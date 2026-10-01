@@ -1,0 +1,34 @@
+[project]
+name = "mesh-code-engine"
+version = "0.2.4"
+description = "Headless Mesh agent engine — the loop behind the Mesh Harness desktop app"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "Fiesta Labs Inc." }]
+
+dependencies = [
+    "httpx>=0.27",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "websockets>=12",
+]
+
+[project.scripts]
+mesh-code-engine = "meshharness.server:main"
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+build = ["pyinstaller>=6.6"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["meshharness"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
