@@ -1,0 +1,110 @@
+{
+  "name": "mesh-code",
+  "productName": "Mesh Code",
+  "version": "0.2.4",
+  "description": "Mesh Code \u2014 an agentic coding desktop app. Plans, writes files, runs commands, with every step under your control.",
+  "main": "main.js",
+  "author": "Fiesta Labs Inc.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "ai.meshapi.code",
+    "productName": "Mesh Code",
+    "directories": {
+      "output": "../packaging/out",
+      "buildResources": "../packaging"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../ui/dist",
+        "to": "ui"
+      },
+      {
+        "from": "../packaging/engine-dist",
+        "to": "engine"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "artifactName": "Mesh-Code-${arch}.${ext}",
+      "icon": "../packaging/icons/icon.png",
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "../packaging/icons/icon.png",
+      "artifactName": "Mesh-Code-Setup-${arch}.${ext}"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Development",
+      "icon": "../packaging/icons/icon.png",
+      "artifactName": "Mesh-Code-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false
+    },
+    "dmg": {
+      "title": "Mesh Code",
+      "artifactName": "Mesh-Code-${arch}.${ext}",
+      "background": "../packaging/dmg-background.png",
+      "window": {
+        "width": 620,
+        "height": 470
+      },
+      "iconSize": 104,
+      "iconTextSize": 12,
+      "contents": [
+        {
+          "x": 190,
+          "y": 186,
+          "type": "file"
+        },
+        {
+          "x": 430,
+          "y": 186,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "afterSign": "../packaging/after-sign.js"
+  }
+}
