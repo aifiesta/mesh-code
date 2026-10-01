@@ -21,6 +21,13 @@ New-Item -ItemType Directory -Path $tmp | Out-Null
 $exe = Join-Path $tmp $name
 
 try {
+  try {
+    $index = (Invoke-WebRequest -Uri "$Base/SHA256SUMS" -UseBasicParsing).Content
+    if ($index -notmatch [regex]::Escape($name)) {
+      $have = ($index -split "`n" | Where-Object { $_ -match '\S' -and $_ -notmatch 'blockmap' } | ForEach-Object { '  - ' + ($_ -split '\s+')[1] }) -join "`n"
+      Die "no Windows build is published yet ($name).`n  Builds in the current release:`n$have`n  Track releases at https://github.com/$Repo/releases"
+    }
+  } catch [System.Net.WebException] { }
   Info "Downloading $name…"
   try { Invoke-WebRequest -Uri "$Base/$name" -OutFile $exe -UseBasicParsing }
   catch { Die "download failed — check your network, or grab it from https://github.com/$Repo/releases/latest" }

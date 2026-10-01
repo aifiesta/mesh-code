@@ -1,0 +1,92 @@
+"""In-memory plan tracking — Claude Code-style checklist for multi-step work.
+
+Plans live in `state["plan"]` and are replaced wholesale when the model calls
+create_plan again. Only one step can be in_progress at a time (matches Claude
+Code's behavior); promoting a different step to in_progress auto-completes
+any other in-progress step.
+"""
+from dataclasses import dataclass
+
+VALID_STATUSES = ("pending", "in_progress", "completed", "blocked")
+
+
+@dataclass
+class Step:
+    title: str
+    status: str = "pending"
+
+
+class Plan:
+    def __init__(self, titles):
+        # Coerce any non-string entries to str so a malformed model response
+        # can't corrupt the plan; drop empties to avoid blank checkboxes.
+        self.steps = [Step(str(t).strip()) for t in titles if str(t).strip()]
+
+    def update(self, index, status):
+        """1-based index. Returns an error string, or None on success."""
+        if not isinstance(index, int):
+            return f"`index` must be an integer (got {type(index).__name__})"
+        if not 1 <= index <= len(self.steps):
+            return f"step {index} out of range (have {len(self.steps)} step(s))"
+        if status not in VALID_STATUSES:
+            return f"`status` must be one of {VALID_STATUSES}, got {status!r}"
+        # Auto-finish any other in-progress step when starting a new one — only
+        # one step is in_progress at a time, mirroring Claude Code's checklist.
+        if status == "in_progress":
+            for s in self.steps:
+                if s.status == "in_progress":
+                    s.status = "completed"
+        self.steps[index - 1].status = status
+        return None
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Plan":
+        """Rebuild from the wire form — used when a session is restored."""
+        plan = cls([st.get("title", "") for st in (data or {}).get("steps", [])])
+        for i, st in enumerate((data or {}).get("steps", [])):
+            if i < len(plan.steps) and st.get("status") in VALID_STATUSES:
+                plan.steps[i].status = st["status"]
+        return plan
+
+    def to_dict(self):
+        """Wire form for Event.PLAN_UPDATED — the UI owns presentation.
+
+        This replaces the CLI's render(): the plan used to draw itself with
+        rich markup, which is precisely the coupling that made a second
+        frontend impossible.
+        """
+        return {
+            "steps": [
+                {"index": i, "title": s.title, "status": s.status}
+                for i, s in enumerate(self.steps, 1)
+            ],
+            "summary": self.summary(),
+            "done": sum(1 for s in self.steps if s.status == "completed"),
+            "total": len(self.steps),
+            "complete": self.is_complete(),
+        }
+
+    def summary(self):
+        done = sum(1 for s in self.steps if s.status == "completed")
+        return f"({done}/{len(self.steps)} done)"
+
+    def is_complete(self):
+        """True when every step is completed (an empty plan is not 'complete')."""
+        return bool(self.steps) and all(s.status == "completed" for s in self.steps)
+
+    def incomplete(self):
+        """[(1-based index, Step)] for every step not yet completed."""
+        return [(i, s) for i, s in enumerate(self.steps, 1) if s.status != "completed"]
+
+    def reminder_text(self):
+        """Plain-text list of the steps still outstanding, for re-grounding the
+        model mid-turn. One line per step, with a status marker for anything
+        that isn't a plain pending step."""
+        lines = []
+        for i, s in self.incomplete():
+            mark = {
+                "in_progress": " (in progress)",
+                "blocked": " (blocked)",
+            }.get(s.status, "")
+            lines.append(f"  {i}. {s.title}{mark}")
+        return "\n".join(lines)

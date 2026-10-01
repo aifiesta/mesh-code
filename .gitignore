@@ -1,0 +1,19 @@
+node_modules/
+dist/
+__pycache__/
+*.pyc
+.build-venv/
+.venv/
+packaging/out/
+packaging/build/
+packaging/engine-dist/
+.pytest_cache/
+.DS_Store
+*.egg-info/
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+# Internal docs — session records, not for publishing
+CHANGELOG.md
+HANDOVER.md
+docs/internal/
