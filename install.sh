@@ -42,6 +42,19 @@ fetch() {
   https://github.com/${REPO}/releases/latest"
 }
 
+# The checksum list doubles as the asset index: a platform with no build
+# published yet gets a precise message instead of a 404 blamed on the network.
+available() {
+  curl -fsSL "${BASE}/SHA256SUMS" -o "$tmp/SHA256SUMS" 2>/dev/null || return 0
+  if ! grep -q " $1\$" "$tmp/SHA256SUMS"; then
+    have=$(awk '{print "  - " $2}' "$tmp/SHA256SUMS" | grep -v blockmap | tr '\n' '\n')
+    die "no build is published yet for $os/$arch ($1).
+  Builds in the current release:
+$have
+  Track releases at https://github.com/${REPO}/releases"
+  fi
+}
+
 # Verify against the release checksums when they are published. A missing
 # SHA256SUMS is a loud warning, not a silent pass.
 # Sets VERIFIED=1 only when a published checksum actually MATCHED. Callers
@@ -70,6 +83,7 @@ verify() {
 case "$os" in
   Darwin)
     dmg="Mesh-Code-${arch}.dmg"
+    available "$dmg"
     fetch "${BASE}/${dmg}" "$tmp/$dmg"
     verify "$tmp/$dmg" "$dmg"
 
@@ -119,6 +133,7 @@ case "$os" in
 
   Linux)
     img="Mesh-Code-${arch}.AppImage"
+    available "$img"
     fetch "${BASE}/${img}" "$tmp/$img"
     verify "$tmp/$img" "$img"
 
