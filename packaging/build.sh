@@ -22,8 +22,8 @@ PY=python3; command -v python3 >/dev/null 2>&1 || PY=python
 # shellcheck disable=SC1091
 if [ -f .build-venv/Scripts/activate ]; then source .build-venv/Scripts/activate
 else source .build-venv/bin/activate; fi
-pip install --quiet --upgrade pip
-pip install --quiet ./engine "pyinstaller>=6.6"
+python -m pip install --quiet --upgrade pip
+python -m pip install --quiet ./engine "pyinstaller>=6.6"
 rm -rf packaging/engine-dist packaging/build
 pyinstaller packaging/engine.spec \
   --distpath packaging/engine-dist \
@@ -64,10 +64,11 @@ else
   kill "$CHECK_PID" 2>/dev/null || true; exit 1
 fi
 kill "$CHECK_PID" 2>/dev/null || true
+wait "$CHECK_PID" 2>/dev/null || true
 
 echo "==> 3/3  packaging the app"
 ( cd desktop
-  npm ci --silent
+  npm ci --no-audit --no-fund
   # --publish never: with GH_TOKEN in the environment electron-builder would
   # otherwise upload straight to a release on its own.
   case "$TARGET" in
