@@ -132,7 +132,8 @@ case "$os" in
     ;;
 
   Linux)
-    img="Mesh-Code-${arch}.AppImage"
+    # electron-builder names AppImages x86_64, not x64.
+    case "$arch" in x64) img="Mesh-Code-x86_64.AppImage" ;; *) img="Mesh-Code-${arch}.AppImage" ;; esac
     available "$img"
     fetch "${BASE}/${img}" "$tmp/$img"
     verify "$tmp/$img" "$img"
@@ -158,6 +159,10 @@ DESKTOP
       *":$bindir:"*) ;;
       *) warn "$bindir is not on your PATH — add it, or run $bindir/mesh-code directly." ;;
     esac
+    if ! ldconfig -p 2>/dev/null | grep -q 'libfuse.so.2'; then
+      warn "AppImages need libfuse2 to launch (e.g. 'sudo apt install libfuse2'),
+  or run: $bindir/mesh-code --appimage-extract-and-run"
+    fi
     info "Installed to $bindir/mesh-code"
     ;;
 
