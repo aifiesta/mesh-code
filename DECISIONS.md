@@ -19,3 +19,10 @@ environment can never make it upload on its own.
 Both installers read `SHA256SUMS` before downloading and list the builds
 that exist when theirs is absent. The previous "check your network" on a
 404 sent a Linux user chasing DNS.
+
+## 2026-10-01 — lock files are generated with peer deps enforced
+The authoring machine has `legacy-peer-deps=true` in `~/.npmrc`, which
+drops electron-builder's platform peers (squirrel-windows, dmg-license)
+from the lock; `npm ci` on a default-configured runner then refuses it.
+Regenerate with `npx npm@10.9 install --package-lock-only
+--legacy-peer-deps=false` when `desktop/package.json` changes.
