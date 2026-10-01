@@ -1,0 +1,79 @@
+# Builds the installers for every platform and attaches them to a DRAFT
+# release. The frozen Python engine must be built on its own platform, so
+# this is a matrix, not a cross-build. Publishing the draft is a human step.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and attach to (e.g. v0.2.4)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  # Where releases live. Set RELEASE_TOKEN (contents: write on that repo)
+  # when it is not this repository.
+  RELEASE_REPO: ${{ vars.RELEASE_REPO || github.repository }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: mac
+          - os: ubuntu-22.04
+            target: linux
+          - os: windows-2022
+            target: win
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build (${{ matrix.target }})
+        shell: bash
+        run: ./packaging/build.sh ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.target }}
+          path: |
+            packaging/out/Mesh-Code-*
+            !packaging/out/*.blockmap
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          rm -f SHA256SUMS
+          sha256sum Mesh-Code-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: Attach to draft release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if ! gh release view "$TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$RELEASE_REPO" --draft \
+              --title "Mesh Code ${TAG#v}" --notes "Draft — notes to follow."
+          fi
+          gh release upload "$TAG" dist/* --repo "$RELEASE_REPO" --clobber
+          echo "Attached to https://github.com/$RELEASE_REPO/releases/tag/$TAG (draft)"
