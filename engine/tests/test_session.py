@@ -5,6 +5,7 @@ httpx, real streaming, real tool-call accumulation, real filesystem writes
 into a tmp workspace. The only fake is the model's opinion.
 """
 import json
+import sys
 import time
 
 import pytest
@@ -438,6 +439,7 @@ def test_pricing_suffix_match_respects_word_boundary():
     assert hit and hit["id"] == "openai/gpt-4o-mini"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell / symlink semantics")
 def test_terminal_stdin_command_does_not_report_premature_done():
     """A command that reads stdin used to swallow the completion marker."""
     import time
@@ -460,6 +462,7 @@ def test_terminal_stdin_command_does_not_report_premature_done():
         t.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell / symlink semantics")
 def test_deleting_a_symlink_removes_the_link_not_its_target(tmp_path):
     """delete('current') must unlink the symlink, never rmtree its target."""
     import os
