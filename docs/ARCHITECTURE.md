@@ -105,9 +105,11 @@ Kept deliberately small, so fixes can still flow between the CLI and here:
 | `config.py` | own config home; reads the CLI's credentials; raises instead of `sys.exit()` | This process serves every open window and must not die over one bad setting. |
 | `plan.py` | `to_dict()` replaces `render()` | The plan used to draw itself with `rich` markup — precisely the coupling that made a second frontend impossible. |
 
-Everything else — `client.py`, `router.py`, `memory.py`, `compact.py`,
-`optimize.py`, `loopguard.py`, `pricing.py`, `styles.py` — is byte-for-byte
-the CLI's.
+`router.py`, `optimize.py`, `loopguard.py` and `styles.py` are the CLI's
+byte-for-byte; `memory.py` differs only in docstring paths. `client.py`,
+`compact.py` and `pricing.py` carry fixes made here (streamed tool-call
+repair, the compaction transcript pointer, billed-cost lookup) that have
+not flowed back to the CLI yet.
 
 ## What was rebuilt rather than ported
 

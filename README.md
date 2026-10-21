@@ -4,7 +4,7 @@
 
 # Mesh Code
 
-**An agentic coding app for your desktop — with 988 models behind one key.**
+**An agentic coding app for your desktop — with 1,000+ models behind one key.**
 
 It plans, writes files, runs commands and starts dev servers inside a project
 folder you choose. Every step is either auto-approved by a mode you picked,
@@ -12,8 +12,8 @@ or shown to you as a real diff before it happens.
 
 [![release](https://img.shields.io/github/v/release/aifiesta/mesh-code?label=release&color=6f5af5)](https://github.com/aifiesta/mesh-code/releases/latest)
 [![downloads](https://img.shields.io/github/downloads/aifiesta/mesh-code/total?color=2ea043)](https://github.com/aifiesta/mesh-code/releases)
-![platform](https://img.shields.io/badge/macOS-Apple%20Silicon-111?logo=apple)
-![models](https://img.shields.io/badge/models-988%20via%20one%20key-6f5af5)
+![platform](https://img.shields.io/badge/macOS%20%7C%20Windows%20%7C%20Linux-111)
+![models](https://img.shields.io/badge/models-1%2C000%2B%20via%20one%20key-6f5af5)
 
 ```bash
 curl -fsSL https://code.meshapi.ai/install.sh | sh
@@ -46,11 +46,11 @@ your eyes open:
 ## One key. Every model that matters.
 
 <div align="center">
-<img src="docs/models.png" width="880" alt="The model browser: 988 models with context windows and per-million pricing" />
+<img src="docs/models.png" width="880" alt="The model browser: 1,000+ models with context windows and per-million pricing" />
 </div>
 
-Mesh Code talks to the Mesh gateway, which fronts **988 models** (at last
-count) from Anthropic, OpenAI, Google, Meta, DeepSeek, Mistral, Qwen, xAI
+Mesh Code talks to the Mesh gateway, which fronts **1,000+ models** from
+Anthropic, OpenAI, Google, Meta, DeepSeek, Mistral, Qwen, xAI
 and dozens more — through one API key and one bill. The app makes that
 catalog usable instead of overwhelming:
 
@@ -86,8 +86,8 @@ auto-approval on.
 
 The engine itself binds to loopback only, requires a per-launch token on
 every request and WebSocket, and checks Origin — a browser tab cannot drive
-it. Your API key lives in the system keychain; the UI only ever sees a hint
-(`…a1b2`).
+it. Your API key lives in an owner-only file (`~/.mesh-code/credentials`,
+0600 on macOS/Linux); the UI only ever sees a hint (`…a1b2`).
 
 ## Every dial, findable
 
@@ -131,7 +131,7 @@ automatically — read once, never written.
 │        └── loads UI from ──────────▶│                               │
 │                                     ▼                               │
 │                          Mesh gateway (one key)                     │
-│                     988 models · one bill · SSE                     │
+│                    1,000+ models · one bill · SSE                   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -154,30 +154,44 @@ directly-downloaded dmg is quarantined by macOS and needs
 `xattr -dr com.apple.quarantine "/Applications/Mesh Code.app"` after copying,
 until the build is notarised. The curl installer handles this for you.
 
-Windows and Linux builds are not published yet; [`install.ps1`](install.ps1)
-is here for when they are.
+**Windows (x64):**
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://code.meshapi.ai/install.ps1 | iex"
+```
+
+**Linux (x86_64):** the same `curl` command installs an AppImage to
+`~/.local/bin/mesh-code` with a desktop entry. AppImages need `libfuse2`
+(`libfuse2t64` on Ubuntu 24.04+).
+
+Windows and Linux builds are new as of 0.2.4 and lightly tested; each
+release ships all three installers plus `SHA256SUMS`.
 
 ## First launch
 
 You'll be asked for a Mesh API key ([app.meshapi.ai](https://app.meshapi.ai)).
-It is stored in the system keychain, owner-only, and sent nowhere but the
-Mesh gateway. If you already use the `meshapi` CLI, your existing key is
-picked up automatically.
+It is stored in an owner-only file (`~/.mesh-code/credentials`, 0600 on
+macOS/Linux) and sent nowhere but the Mesh gateway. If you already use the
+`meshapi` CLI, your existing key is picked up automatically.
 
 ## Honest limits
 
-Mesh Code is in **beta** — the sidebar says so, and things might break.
+Mesh Code is in **beta**, and things might break.
 Today's known edges, stated plainly:
 
 - One agent turn at a time per session (typed input queues for the next turn).
 - The Shell tab is a pipe, not a PTY — no vim, no top.
 - Web search goes through the gateway's tools; there is no local browsing.
-- No Windows/Linux builds shipped yet.
+- Windows and Linux builds are lightly tested; on Windows the Shell panel
+  needs a POSIX `sh` on `PATH`.
 
-Found a rough edge — or something you love? The **Beta** card in the
-sidebar opens a 15-second feedback form that never leaves the app.
+Found a rough edge — or something you love? The **Send feedback** link in
+the sidebar opens a 15-second form; the engine relays your rating and the
+two optional text boxes to a Google Form, and nothing else.
 
 ## What's in this repository
 
-Just the installers. This repo hosts the install scripts and the release
-artifacts — the application source is not published here.
+The whole app: `engine/` (the Python agent engine and its tests), `ui/`
+(React), `desktop/` (Electron shell), `packaging/` (freeze, sign, build
+scripts) and the install scripts. Releases are built by CI from a tag;
+see `DECISIONS.md` for the choices behind that.

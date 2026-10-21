@@ -13,7 +13,7 @@ shown first.
 | Another local process / another user on the box | same | Loopback-only bind + token |
 | A prompt injection in a file, web page or command output | to make the agent exfiltrate secrets or write somewhere bad | System-prompt rule that external content is data; safety gates on paths and commands; sensitive-path denylist that applies even in bypass mode |
 | A malicious or confused model | to write outside the project, read `~/.ssh`, `curl \| sh` | Same gates, plus the approval dialog showing the real diff/command |
-| A shared terminal or screen | the API key or the engine token | Key stored `0600`; token on a private pipe, never a shared tty |
+| A shared terminal or screen | the API key or the engine token | Key stored `0600` (macOS/Linux); token on a private pipe, never a shared tty |
 
 ## The transport
 
@@ -67,7 +67,7 @@ or a web page. So:
 
 ## Secrets
 
-- API key: `~/.mesh-code/credentials`, created `0600` via `os.open` with
+- API key: `~/.mesh-code/credentials`, created `0600` (macOS/Linux) via `os.open` with
   the mode set — never write-then-chmod, which leaves a readable window.
 - The key is never written to `config.json` (`save_config` strips it) and is
   sent only to the configured Mesh gateway.
