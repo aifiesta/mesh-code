@@ -9,16 +9,17 @@ to the original so fixes can flow between the two. What changed, and why:
               workspaces from one engine.
   tools.py    execute() and build_system_prompt() take that same `root`.
               Prompt text that described a terminal now describes a window.
-  config.py   its own config home (~/.mesh-harness), reads the CLI's
+  config.py   its own config home (~/.mesh-code), reads the CLI's
               credentials file so one login covers both, and raises instead
               of sys.exit() on a bad base_url — this process serves every
               open window and must not die over one setting.
   plan.py     no longer draws itself with rich; it serializes via to_dict()
               and the frontend renders it.
 
-Everything else — the streaming client and its tool-call repair, the
-routing table and cohort classifier, repo memory, compaction, the optimize
-levers, loop/stall guards — is byte-for-byte the CLI's.
+router.py, optimize.py, loopguard.py and styles.py are the CLI's
+byte-for-byte; memory.py differs only in docstring paths. client.py,
+compact.py and pricing.py carry fixes made here that have not flowed back
+to the CLI yet.
 """
 
-__version__ = "0.1.4"
+__version__ = "0.2.4"
