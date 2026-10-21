@@ -35,3 +35,37 @@ that `protocol.py` and `types.ts` name the same events, and boots a
 PyInstaller freeze through its WebSocket. The release workflow calls it
 first. Windows cannot block yet because the suite still has POSIX-only
 paths; it runs with `continue-on-error` until it is green.
+
+## 2026-10-21 — the local runtime is a bundled llama-server; weights are downloaded, never shipped
+`llama-server` (MIT, ~16–37 MB per platform) rides in the app bundle so a
+fresh install can run a model offline once the weights exist. The weights
+themselves are 3–30 GB and change monthly, so they are fetched on first
+run — resumable, sha256-verified — into `~/.mesh-code/local/models/`.
+Ollama would have meant a second install and no control over the chat
+template flags tool calling depends on.
+
+## 2026-10-21 — the hardware tier picks the default local model
+The strongest manifest model that fits in RAM minus 4 GB (and within 75 %
+of unified memory on Apple Silicon) at a 32k context wins; the context
+then climbs while it still fits. A machine where nothing fits at 32k gets
+the smallest model at 8k, marked slow, and the app keeps using the cloud
+unless the user opts in. The rule is a table test, not a RAM lookup, so
+new models slot in by editing the manifest.
+
+## 2026-10-21 — the model manifest is data, refreshed remotely, every artifact hashed
+`engine/meshharness/local/manifest.json` pins each model to a Hugging
+Face repo, file, size and sha256, and each llama.cpp asset to a tag and
+sha256 (llama.cpp publishes no checksums; we hash the release assets
+ourselves). A remote copy on a rolling release tag can re-pin a model
+without an app release. A remote copy may only re-pin download facts
+(repo, file, size, sha256, runtime tag and assets) for https URLs on
+huggingface.co or github.com; anything that becomes a filesystem path or a
+llama-server argument comes from the bundled copy, which always validates.
+
+## 2026-10-21 — tool calls printed as text are promoted, never guessed
+Small models sometimes emit `<tool_call>` JSON, Qwen's `<function=…>`
+XML or Cohere's action block as plain text. `core/textcalls.py` turns
+those into structured calls only when the tool name is known and the
+arguments parse; anything inside a code fence is treated as quoted
+material, and unknown names are left for the model to retry.
+
