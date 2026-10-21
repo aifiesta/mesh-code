@@ -44,27 +44,9 @@ fi
 # signed installer is discovered by users, not by us.
 echo "==> verifying the frozen engine starts"
 ENGINE="packaging/engine-dist/mesh-code-engine"
-case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ENGINE="$ENGINE.exe" ;; esac
-[ -x "$ENGINE" ] || { echo "error: $ENGINE is missing or not executable"; exit 1; }
-"$ENGINE" --port 0 > /tmp/mesh-code-freeze-check.json 2>&1 &
-CHECK_PID=$!
-# Poll rather than sleep a flat 8s. The FIRST launch of a freshly frozen
-# binary unpacks _internal and gets a full Gatekeeper signature scan, which
-# on a cold cache runs past 8s — the build then failed on a working engine.
-READY=""
-for _ in $(seq 1 40); do
-  if grep -q '"ready": true' /tmp/mesh-code-freeze-check.json 2>/dev/null; then READY=1; break; fi
-  kill -0 "$CHECK_PID" 2>/dev/null || break   # it died; stop waiting on a corpse
-  sleep 1
-done
-if [ -n "$READY" ]; then
-  echo "    engine OK"
-else
-  echo "error: the frozen engine did not report ready:"; cat /tmp/mesh-code-freeze-check.json
-  kill "$CHECK_PID" 2>/dev/null || true; exit 1
-fi
-kill "$CHECK_PID" 2>/dev/null || true
-wait "$CHECK_PID" 2>/dev/null || true
+VENV_PY=".build-venv/bin/python"
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ENGINE="$ENGINE.exe"; VENV_PY=".build-venv/Scripts/python.exe" ;; esac
+"$VENV_PY" packaging/smoke_engine.py "$ENGINE"
 
 echo "==> 3/3  packaging the app"
 ( cd desktop
