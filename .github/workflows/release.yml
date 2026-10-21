@@ -21,7 +21,11 @@ env:
   RELEASE_REPO: ${{ vars.RELEASE_REPO || github.repository }}
 
 jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
   build:
+    needs: test
     strategy:
       fail-fast: false
       matrix:

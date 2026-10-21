@@ -1,0 +1,78 @@
+# Runs on every PR and push to main, and is reused by release.yml so no
+# installer is built from a tree whose tests or frozen engine are broken.
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  # github.workflow is the caller's name inside a called workflow, so a
+  # release-dispatched run and a push-to-main run never cancel each other.
+  group: ${{ github.workflow }}-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+          - os: ubuntu-22.04
+          # Windows runs but cannot block yet: the suite still has POSIX-only
+          # paths beyond the ones marked skipif. Promote once it is green.
+          - os: windows-2022
+            experimental: true
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental == true }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install engine with test extras
+        run: python -m pip install -e "./engine[test]"
+      - name: Run engine tests
+        working-directory: engine
+        run: python -m pytest   # pyproject already sets -q; a second -q hides the summary
+
+  ui:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Build the UI (tsc -b is the type gate)
+        working-directory: ui
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+  freeze-smoke:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Freeze the engine
+        run: |
+          python -m pip install ./engine "pyinstaller>=6.6"
+          pyinstaller packaging/engine.spec \
+            --distpath packaging/engine-dist \
+            --workpath packaging/build \
+            --noconfirm
+      - name: Boot the frozen engine and open its socket
+        run: python packaging/smoke_engine.py packaging/engine-dist/mesh-code-engine/mesh-code-engine
