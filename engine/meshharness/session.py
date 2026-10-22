@@ -364,6 +364,7 @@ class Session:
                     res = results.get(tc.get("id")) or ""
                     out.append({
                         "kind": "tool",
+                        "id": tc.get("id"),
                         "name": fn.get("name") or "tool",
                         "summary": summarize_call(fn.get("name") or "tool", args),
                         "ok": not str(res).startswith("Error"),

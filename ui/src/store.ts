@@ -18,6 +18,8 @@ export type SessionState = {
   workspace: string
   createdAt?: number
   messages: Msg[]
+  /** Adopted from the engine (restart, reload): its history is replayed once. */
+  needsHistory?: boolean
   plan: Plan | null
   status: Status | null
   approval: Approval | null
@@ -183,8 +185,8 @@ export function reduce(state: AppState, action: Action): AppState {
       const budget = d.budget ?? state.budget
       for (const row of (d.sessions ?? [])) {
         if (!sessions[row.id]) {
-          sessions[row.id] = blank(row.id, row.title ?? 'session', row.workspace ?? '',
-                                   row.created_at)
+          sessions[row.id] = { ...blank(row.id, row.title ?? 'session', row.workspace ?? '',
+                                   row.created_at), needsHistory: true }
           order.push(row.id)
         }
         // Seed status from the descriptor so a hydrated session shows its
@@ -285,7 +287,7 @@ export function reduce(state: AppState, action: Action): AppState {
         ? { ...prior, title: d.title ?? prior.title, label: d.label ?? prior.label,
             workspace: d.workspace ?? prior.workspace }
         : { ...blank(sid, d.title ?? 'session', d.workspace ?? '', d.created_at),
-            label: d.label ?? '' }
+            label: d.label ?? '', needsHistory: !!d.resumed }
       return {
         ...state,
         sessions: { ...state.sessions, [sid]: s },
@@ -313,23 +315,23 @@ export function reduce(state: AppState, action: Action): AppState {
         return { ...s, status: d as Status, busy: !!d.busy }
 
       case Ev.HISTORY: {
-        // Replay from the engine's own history — the UI transcript did not
-        // survive the restart, the conversation did. Only hydrate an EMPTY
-        // transcript: live messages must never be clobbered by a late reply.
-        if (s.messages.length > 0) return s
+        // Replayed once, in front of whatever streamed in since the reload; a
+        // tool call already shown live is not shown twice.
+        if (!s.needsHistory) return s
+        const live = new Set(s.messages.flatMap((m) => (m.kind === 'tool' ? [m.card.callId] : [])))
         const messages: Msg[] = []
         for (const m of (d.messages ?? []) as any[]) {
           if (m.kind === 'user') messages.push({ kind: 'user', id: nid(), text: m.text })
           else if (m.kind === 'assistant') messages.push({ kind: 'assistant', id: nid(), text: m.text })
-          else if (m.kind === 'tool') messages.push({
+          else if (m.kind === 'tool' && !(m.id && live.has(m.id))) messages.push({
             kind: 'tool', id: nid(),
-            card: { callId: nid(), name: m.name, summary: m.summary,
+            card: { callId: m.id ?? nid(), name: m.name, summary: m.summary,
                     status: m.ok ? 'ok' : 'error' } as ToolCard,
           })
           else if (m.kind === 'notice') messages.push({
             kind: 'notice', id: nid(), level: 'info', text: m.text })
         }
-        return { ...s, messages }
+        return { ...s, needsHistory: false, messages: [...messages, ...s.messages] }
       }
 
       case Ev.CHAT_CLEARED:
