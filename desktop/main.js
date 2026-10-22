@@ -17,6 +17,7 @@ const { spawn } = require('node:child_process')
 const path = require('node:path')
 const fs = require('node:fs')
 const readline = require('node:readline')
+const os = require('node:os')
 
 const isDev = !app.isPackaged
 let engine = null
@@ -45,6 +46,20 @@ function uiDir() {
     : path.join(process.resourcesPath, 'ui')
 }
 
+/** The bundled llama-server, if this build carries one: fetch-llama.sh
+ *  leaves the binary plus `variant` and `tag` files the engine matches its plan to. */
+function llamaEnv() {
+  const dir = isDev
+    ? path.resolve(__dirname, '..', 'packaging', 'llama-dist')
+    : path.join(process.resourcesPath, 'llama')
+  try {
+    const variant = fs.readFileSync(path.join(dir, 'variant'), 'utf8').trim()
+    const tag = fs.readFileSync(path.join(dir, 'tag'), 'utf8').trim()
+    if (variant && tag) return { MESH_LLAMA_DIR: dir, MESH_LLAMA_VARIANT: variant, MESH_LLAMA_TAG: tag }
+  } catch { /* no bundled runtime: the engine downloads one */ }
+  return {}
+}
+
 function startEngine() {
   return new Promise((resolve, reject) => {
     const { cmd, args, cwd } = engineCommand()
@@ -56,7 +71,7 @@ function startEngine() {
 
     engine = spawn(cmd, [...args, '--ui', ui], {
       cwd,
-      env: { ...process.env, PYTHONUNBUFFERED: '1' },
+      env: { ...process.env, PYTHONUNBUFFERED: '1', ...llamaEnv() },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
 
@@ -182,6 +197,14 @@ function buildMenu() {
         {
           label: 'Show Engine Logs',
           click: () => shell.openPath(app.getPath('logs')),
+        },
+        {
+          label: 'Show Local Model Logs',
+          click: () => {
+            const dir = path.join(os.homedir(), '.mesh-code', 'local', 'logs')
+            fs.mkdirSync(dir, { recursive: true })
+            shell.openPath(dir)
+          },
         },
       ],
     },
