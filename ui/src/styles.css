@@ -714,7 +714,8 @@ body.resizing .side-resize { pointer-events: auto; }
    already teaches with ⏎. It only earns colour once there is something
    to send. */
 .send-btn {
-  flex: none; width: 30px; height: 30px; margin-bottom: 5px;
+  /* (one 48px textarea line − 30px) / 2: centred on a single line, bottom-pinned when it grows */
+  flex: none; width: 30px; height: 30px; margin-bottom: 9px;
   display: grid; place-items: center;
   border-radius: var(--r-sm); color: var(--ink-3);
   font-size: var(--t-base); line-height: 1;
@@ -2451,7 +2452,8 @@ body.resizing .rail-resize { pointer-events: auto; }
 .ladder-row b i { font-style: normal; font-size: var(--t-2xs); color: var(--ink-3); margin-left: 4px; text-transform: uppercase; letter-spacing: .08em; }
 .ladder-actions { display: flex; gap: 8px; margin-top: 8px; }
 .escalate-btn {
-  align-self: flex-end; margin: 0 6px 5px 0; padding: 5px 11px; border-radius: var(--r-pill);
+  align-self: flex-end; height: 30px; margin: 0 2px 9px 0; padding: 0 12px; border-radius: var(--r-pill);
+  display: inline-flex; align-items: center; line-height: 1;
   font-size: var(--t-xs); font-weight: 600; color: var(--brand); background: var(--brand-film);
 }
 .escalate-btn:hover { background: color-mix(in srgb, var(--brand) 20%, transparent); }
