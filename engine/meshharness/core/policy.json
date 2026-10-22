@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "updated": "2026-10-22",
+  "source": "Artificial Analysis Intelligence Index v4.3.2 and Coding Agent Index v1.5 (2026-10-21), cross-checked against the Mesh catalog",
+  "audit": {
+    "models": [
+      "deepseek/deepseek-v4.1-flash",
+      "anthropic/claude-haiku-5.5",
+      "openai/gpt-6-luna",
+      "z-ai/glm-5.3-flash"
+    ],
+    "reasoning_effort": "low",
+    "max_bundle_tokens": 60000
+  },
+  "escalation": {
+    "models": [
+      "anthropic/claude-sonnet-5.5",
+      "anthropic/claude-opus-5.5",
+      "openai/gpt-6.1-sol",
+      "google/gemini-4-argon"
+    ],
+    "reasoning_effort": "high",
+    "max_hops": 8,
+    "max_tokens": 300000
+  }
+}
