@@ -65,7 +65,7 @@ export function ControlBar({ status, settings, catalog, local, onSet, onOpenSett
   return (
     <div className="controlbar" ref={ref}>
       {/* One pill names what decides the model; its popover holds the
-          routing switch, the effort dial and the router's pick. */}
+          routing switch and the pinned model. */}
       <div className="ctl ctl-model">
         <button className={`ctl-btn ${open === 'model' ? 'on' : ''} ${pending ? 'pending' : ''} ${routing ? 'lit' : ''}`}
                 onClick={() => toggle('model')}

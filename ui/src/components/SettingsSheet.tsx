@@ -5,15 +5,9 @@ import type { SettingSpec } from '../types'
 import { LocalModelPanel } from './LocalModelPanel'
 import { ModelBrowser } from './ModelBrowser'
 
-/**
- * The full surface, grouped and explained. Every control — including ones
- * added to the engine after this file was written — comes from the schema.
- *
- * A setting whose `depends_on` is unmet is dimmed rather than hidden: the
- * routing weights only apply in smart mode, and seeing them greyed out tells
- * you smart mode exists. Hiding them just makes the feature invisible again,
- * which is the problem this whole screen is meant to solve.
- */
+/** The full surface, grouped and explained; every control comes from the
+ *  schema. A setting whose `depends_on` is unmet is dimmed, not hidden, so
+ *  the feature stays discoverable. */
 export function SettingsSheet({ settings, catalog, local, localActions, notices, onDismissNotice, error, onSet, onClose, onRefreshCatalog, initialTab }: {
   settings: SettingsDoc | null
   catalog: CatalogModel[]

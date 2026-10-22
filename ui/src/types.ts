@@ -184,7 +184,6 @@ export type SettingSpec = {
   value?: any
   min?: number
   max?: number
-  step?: number
   beta?: boolean
   multiline?: boolean
   zero_label?: string

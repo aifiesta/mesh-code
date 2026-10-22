@@ -189,9 +189,6 @@ def save_api_key(key: str) -> None:
     secure_file(CREDENTIALS_FILE)  # tighten a pre-existing looser file
 
 
-_OLD_ROUTE_WEIGHTS = {"cost": 0.5, "cap": 0.3, "speed": 0.2}
-
-
 def _migrate_home() -> None:
     """Move a pre-rename ~/.mesh-harness to ~/.mesh-code, once.
 
@@ -248,10 +245,7 @@ def load_config() -> dict:
     from . import styles as _styles
     cfg["output_style"] = (_styles.normalize(cfg.get("output_style"))
                            or _styles.DEFAULT)
-    # `route` (cheapest/fastest/balanced) never existed gateway-side and was
-    # replaced by auto_route in 0.5.0 — drop the stale key from old configs
-    # (it disappears from disk on the next save_config).
-    cfg.pop("route", None)
+    cfg.pop("route", None)   # a pre-0.5.0 key with no gateway meaning
     # Resolution order: env > credentials file > legacy hand-edited
     # config.json. MESH_API_KEY kept as fallback for one release.
     file_key = (cfg.get("api_key") or "").strip()

@@ -989,8 +989,7 @@ class Session:
             return
         if self.state.get("_compact_exhausted"):
             return
-        # Use the EFFECTIVE model's window — a mid-turn escalation may have
-        # moved to a model with a different context limit.
+        # The effective model's window: a fallback or routed model differs from the pin.
         model = self._effective_model()
         limit = (self.state.get("_hop_ctx") if is_local(model) and self.state.get("_hop_ctx")
                  else compact.context_limit(model, self.catalog))
