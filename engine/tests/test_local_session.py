@@ -202,14 +202,6 @@ def test_a_silent_local_server_is_restarted_not_just_retried(harness, llama, mon
     assert h.of(Event.ASSISTANT_MESSAGE)[-1]["data"]["text"] == "back"
 
 
-def test_a_local_pin_is_never_overridden_by_smart_routing(harness, llama):
-    llama.script(sse_turn("local answer"))
-    h = harness(model="local/auto", local=StubLocal(llama), route_mode="smart")
-    h.session.submit("refactor the whole architecture of this large codebase")
-    fin = h.wait_for(Event.TURN_FINISHED)
-    assert fin["data"]["local"] is True and len(llama.requests) == 1
-
-
 def test_a_permanent_reason_is_said_once_per_session_not_per_turn(harness, gateway, llama):
     gateway.script(sse_turn("one"))
     gateway.script(sse_turn("two"))
@@ -223,3 +215,12 @@ def test_a_permanent_reason_is_said_once_per_session_not_per_turn(harness, gatew
     notices = [e for e in h.of(Event.NOTICE) if "turned off" in e["data"]["message"]]
     assert len(notices) == 1 and "unavailable" in notices[0]["data"]["message"]
     assert len(gateway.requests) == 2
+
+
+def test_gateway_auto_routing_never_touches_a_local_pin(harness, llama):
+    llama.script(sse_turn("local answer"))
+    h = harness(model="local/auto", local=StubLocal(llama), route_mode="auto", exclude_models=["x/y"])
+    h.session.submit("refactor the whole architecture of this large codebase")
+    fin = h.wait_for(Event.TURN_FINISHED)
+    sent = llama.requests[-1]
+    assert fin["data"]["local"] is True and sent["model"] != "auto" and "exclude_models" not in sent

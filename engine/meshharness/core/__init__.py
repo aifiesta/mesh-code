@@ -16,10 +16,15 @@ to the original so fixes can flow between the two. What changed, and why:
   plan.py     no longer draws itself with rich; it serializes via to_dict()
               and the frontend renders it.
 
-router.py, optimize.py, loopguard.py and styles.py are the CLI's
-byte-for-byte; memory.py differs only in docstring paths. client.py,
-compact.py and pricing.py carry fixes made here that have not flowed back
-to the CLI yet.
+  client.py   one request per hop, aimed at a per-hop Target (local or
+              cloud); the CLI's optimized-attempt retry is gone with its
+              optimize levers.
+  memory.py   dedupe_read() no longer consults a pruning dial.
+
+loopguard.py and styles.py are the CLI's byte-for-byte; the tool-call repair
+is unchanged inside client.py. compact.py and pricing.py carry fixes made
+here that have not flowed back to the CLI yet. The CLI's local routing table
+is not here: Mesh's own auto routing does that job.
 """
 
 __version__ = "0.2.4"

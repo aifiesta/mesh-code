@@ -11,10 +11,9 @@ extracted deterministically and stored OUTSIDE the user's repo:
 Next session in the same directory starts warm: build_system_prompt appends
 a token-capped REPO MEMORY block (notes + file map). The `remember` tool
 lets the model persist durable decisions. dedupe_read() answers repeat
-reads of unchanged files with a short stub instead of re-sending the body —
-correct by construction against optimize.py's pruning lever (see
-optimize.survives_pruning; a wrong "already in your context" would gaslight
-the model, so every check fails toward a normal read).
+reads of unchanged files with a short stub instead of re-sending the body;
+a wrong "already in your context" would gaslight the model, so every check
+fails toward a normal read.
 
 Everything here is best-effort: a memory bug must never break a write, a
 read, or session start. Pure file I/O only — no POSIX-only calls.
@@ -27,7 +26,6 @@ import time
 from pathlib import Path
 
 from .config import CONFIG_DIR, _secure_dir, secure_file
-from .optimize import survives_pruning
 
 SCHEMA_VERSION = 1
 MAX_FILES = 300               # store entries; evict oldest last_seen
@@ -384,7 +382,7 @@ def record_write(state: dict, path: str, content: str, msg_index: int) -> None:
     _record(state, path, content, msg_index, "write")
 
 
-def dedupe_read(state: dict, path: str, dial: float) -> "str | None":
+def dedupe_read(state: dict, path: str) -> "str | None":
     """Stub iff provably safe; None -> normal read. A wrong 'already in
     your context' is worse than a wasted re-read, so every condition
     fails toward None."""
@@ -401,10 +399,6 @@ def dedupe_read(state: dict, path: str, dial: float) -> "str | None":
         # via _drop_in_flight_turn / /clear invalidate separately; this is
         # the belt-and-braces bound check).
         if entry["msg_index"] >= len(state.get("messages") or ()):
-            return None
-        # Optimize-pruning contract: writes ride in assistant messages
-        # (never pruned); reads must survive the lever at the CURRENT dial.
-        if entry["source"] != "write" and not survives_pruning(entry["chars"], dial):
             return None
         # Ground truth: the file on disk is byte-identical right now.
         current = Path(key).read_text()

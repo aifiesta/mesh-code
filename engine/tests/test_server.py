@@ -143,16 +143,16 @@ def test_a_valid_setting_applies_and_echoes_the_new_schema(app_client, tmp_path)
         # the schema ships with the greeting, so a UI can render controls
         # for settings it was never coded against
         keys = [s["key"] for s in hello["data"]["settings"]["settings"]]
-        assert "route_mode" in keys and "optimize" in keys
+        assert "route_mode" in keys and "reasoning_effort" in keys
 
         ws.send_text(json.dumps({"type": Request.OPEN_WORKSPACE,
                                  "workspace": str(tmp_path)}))
         sid = _drain(ws, Event.SESSION_STARTED)["session"]
         ws.send_text(json.dumps({"type": Request.SET_CONFIG, "session": sid,
-                                 "key": "route_mode", "value": "smart"}))
+                                 "key": "route_mode", "value": "auto"}))
         _drain(ws, Event.SETTINGS)
-    assert engine.sessions[sid].cfg["route_mode"] == "smart"
-    assert engine.cfg["route_mode"] == "smart", "new sessions should inherit it"
+    assert engine.sessions[sid].cfg["route_mode"] == "auto"
+    assert engine.cfg["route_mode"] == "auto", "new sessions should inherit it"
 
 
 def test_an_invalid_setting_is_refused_with_a_reason(app_client, tmp_path):
@@ -163,35 +163,10 @@ def test_an_invalid_setting_is_refused_with_a_reason(app_client, tmp_path):
                                  "workspace": str(tmp_path)}))
         sid = _drain(ws, Event.SESSION_STARTED)["session"]
         ws.send_text(json.dumps({"type": Request.SET_CONFIG, "session": sid,
-                                 "key": "optimize", "value": 9000}))
+                                 "key": "local_keep_free_gb", "value": 9000}))
         err = _drain(ws, Event.CONFIG_ERROR)
     assert "between" in err["data"]["message"]
-    assert engine.sessions[sid].cfg["optimize"] == 0.0, "must not be applied"
-
-
-def test_route_preview_explains_a_pick_before_spending_anything(app_client, tmp_path):
-    client, engine = app_client
-    with client.websocket_connect("/ws?token=secret-token") as ws:
-        json.loads(ws.receive_text())
-        ws.send_text(json.dumps({"type": Request.OPEN_WORKSPACE,
-                                 "workspace": str(tmp_path)}))
-        sid = _drain(ws, Event.SESSION_STARTED)["session"]
-        ws.send_text(json.dumps({"type": Request.ROUTE_PREVIEW, "session": sid,
-                                 "text": "refactor this class and fix the failing test"}))
-        got = _drain(ws, Event.ROUTE_EXPLAIN)
-
-    # The whole point is answering "which model, and why" BEFORE the turn
-    # runs: cohort and difficulty come from the prompt alone (local, free),
-    # and with a catalog loaded the router names an actual pick.
-    d = got["data"]
-    assert d["cohort"], "should classify the prompt"
-    assert d["difficulty"] in ("low", "mid", "high")
-    assert d["available"] is True
-    assert d["pick"], "an available route must name the model it would use"
-    assert set(d["weights"]) == {"cost", "cap", "speed"}
-    # And when it CANNOT pick, it must say why rather than reporting a bare
-    # "unavailable" the popover would render as an empty explanation.
-    assert d.get("reason") is None or isinstance(d["reason"], str)
+    assert engine.sessions[sid].cfg["local_keep_free_gb"] == 4, "must not be applied"
 
 
 def test_saving_a_setting_never_persists_runtime_values(app_client, tmp_path):
