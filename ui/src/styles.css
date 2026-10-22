@@ -2445,3 +2445,9 @@ body.resizing .rail-resize { pointer-events: auto; }
 .app-notice > span { flex: 1; min-width: 0; }
 .app-notice .link { flex: none; padding: 2px 8px; border-radius: var(--r-xs); color: inherit; opacity: .75; }
 .app-notice .link:hover { opacity: 1; background: rgba(0, 0, 0, .06); }
+
+.md-table { overflow-x: auto; margin: 0 0 14px; }
+.md-table table { border-collapse: collapse; width: 100%; font-size: var(--t-sm); }
+.md-table th, .md-table td { padding: 6px 10px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--hair-soft); }
+.md-table th { font-weight: 600; color: var(--ink-2); background: var(--film-2); }
+.md-table tr:last-child td { border-bottom: 0; }
