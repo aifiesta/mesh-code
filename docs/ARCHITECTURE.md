@@ -140,11 +140,12 @@ a settings screen drifts away from what the engine actually does. So instead
 
 ```python
 {
-  "key": "route_mode", "type": "enum", "label": "Routing",
+  "key": "policy", "type": "enum", "label": "Who writes",
   "options": [...],
-  "help": "Who chooses the model for each prompt.",
-  "why":  "Auto spends less on easy prompts and reaches for a stronger "
-          "model on hard ones; a local pin is never routed.",
+  "help": "Local first is free for most of the work; the cloud is called "
+          "only when it earns its keep.",
+  "why":  "A local model handles edits and runs; a strong model is worth "
+          "paying for when the local one is stuck.",
 }
 ```
 

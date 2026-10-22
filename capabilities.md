@@ -26,8 +26,14 @@ true, that is a bug — file it against this document.
 
 - **Pinned model** — pick any model from the live catalog; fuzzy-searchable
   browser with per-1M pricing and context length.
-- **Gateway auto** — Mesh's Auto Router decides per prompt, never picking
-  an excluded model.
+- **Local first** (default) — the local model writes; a stuck turn
+  escalates to the strong-model chain (Sonnet 5.5 → Opus 5.5 → GPT-6.1 Sol
+  → Gemini 4 Argon, minus exclusions) on a repeated action, two failed tool
+  batches, a refusal, or the Escalate button; hands back after 8 hops or
+  300k tokens; "Harder" raises the effort one level for that escalation;
+  sticky per turn or per session.
+- **Gateway auto** — Mesh's Auto Router decides per prompt with a weight
+  profile, never picking an excluded model.
 - The bar is honest about both: with routing on it reads "Auto routing"
   until a hop has actually answered, then shows the real model with a
   `routed` flag.
@@ -82,7 +88,7 @@ true, that is a bug — file it against this document.
 
 - ⌘K palette: every setting expanded to one runnable action per option,
   grouped with sticky headers, matched against the engine's own help text
-  fuzzy abbreviations (`rtga` → Routing: Gateway auto).
+  fuzzy abbreviations (`wwga` → Who writes: Gateway auto).
 - "/" in an empty composer opens the palette; ⏎ sends, ⇧⏎ newline; typing
   while the agent works queues the message for the next turn.
 - Images paste/drop/attach into the composer (multimodal).
