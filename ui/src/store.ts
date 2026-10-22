@@ -1,4 +1,4 @@
-import { Ev, type Approval, type Ask, type CatalogModel, type DirEntry, type FilePreview, type LocalJob, type LocalStatus, type Root, type Msg, type Plan, type Profile, type SettingsDoc, type Status, type ToolCard, type WireEvent } from './types'
+import { Ev, type Approval, type Ask, type CatalogModel, type DirEntry, type FilePreview, type BudgetSnapshot, type LocalJob, type LocalStatus, type Root, type Msg, type Plan, type Profile, type SettingsDoc, type Status, type ToolCard, type WireEvent } from './types'
 
 /**
  * Turning the event stream into renderable state.
@@ -61,6 +61,8 @@ export type AppState = {
   configError: { key: string; message: string } | null
   /** The local model layer: hardware, models, downloads, server. */
   local: LocalStatus | null
+  /** The cloud spend ledger: today and this month against the limits. */
+  budget: BudgetSnapshot | null
   /** Engine notices that belong to no session (migration, local layer). */
   appNotices: { id: string; level: string; text: string }[]
 }
@@ -81,6 +83,7 @@ export const initialState: AppState = {
   keyResult: null,
   configError: null,
   local: null,
+  budget: null,
   appNotices: [],
 }
 
@@ -177,6 +180,7 @@ export function reduce(state: AppState, action: Action): AppState {
       const catalog = d.catalog?.length ? d.catalog : state.catalog
       const profile = d.profile ?? state.profile
       const local = d.local ?? state.local
+      const budget = d.budget ?? state.budget
       for (const row of (d.sessions ?? [])) {
         if (!sessions[row.id]) {
           sessions[row.id] = blank(row.id, row.title ?? 'session', row.workspace ?? '',
@@ -210,9 +214,12 @@ export function reduce(state: AppState, action: Action): AppState {
         ? state.active : (prunedOrder[0] ?? null)
       return {
         ...state, ready: true, hasKey: !!d.has_key, sessions, order: prunedOrder,
-        settings, catalog, profile, active, local,
+        settings, catalog, profile, active, local, budget,
       }
     }
+
+    case Ev.BUDGET_UPDATED:
+      return { ...state, budget: d as BudgetSnapshot }
 
     case Ev.LOCAL_STATUS:
       return { ...state, local: d as LocalStatus }
@@ -536,6 +543,9 @@ export function reduce(state: AppState, action: Action): AppState {
             detail: String(d.note ?? '').slice(0, 200) || undefined,
           }],
         }
+
+      case Ev.BUDGET_HOLD:
+        return s   // the notice that follows carries the words
 
       case Ev.POLICY_CHANGED: {
         // Only an escalation on a weak reply discards the bubble still streaming.

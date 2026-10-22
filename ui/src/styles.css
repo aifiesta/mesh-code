@@ -2455,3 +2455,19 @@ body.resizing .rail-resize { pointer-events: auto; }
   font-size: var(--t-xs); font-weight: 600; color: var(--brand); background: var(--brand-film);
 }
 .escalate-btn:hover { background: color-mix(in srgb, var(--brand) 20%, transparent); }
+
+.ctl.ctl-usage { flex: none; }
+.ring-btn { padding: 4px 6px; }
+.ring .ring-track { fill: none; stroke: var(--film-3); stroke-width: 2.4; }
+.ring .ring-fill { fill: none; stroke: var(--brand); stroke-width: 2.4; stroke-linecap: round; transition: stroke-dasharray .3s ease; }
+.ring.warn .ring-fill { stroke: var(--warn); }
+.ring.over .ring-fill { stroke: var(--danger); }
+.usage { margin: 8px 0 12px; }
+.usage-head { display: flex; justify-content: space-between; font-size: var(--t-sm); margin-bottom: 6px; }
+.usage-head span { color: var(--ink-3); }
+.usage-bar { height: 7px; border-radius: 4px; background: var(--film-3); overflow: hidden; }
+.usage-bar span { display: block; height: 100%; background: var(--brand); border-radius: 4px; transition: width .3s ease; }
+.usage-bar span.warn { background: var(--warn); }
+.usage-bar span.over { background: var(--danger); }
+.usage-foot { display: flex; justify-content: space-between; font-size: var(--t-xs); color: var(--ink-3); margin-top: 4px; }
+.stepper-unit { color: var(--ink-3); font-size: var(--t-sm); }

@@ -638,10 +638,12 @@ export default function App() {
               settings={state.settings}
               catalog={state.catalog}
               local={state.local}
+              budget={state.budget}
               onSet={setConfig}
               onOpenSettings={(tab) => tab === '__palette' ? setPalette(true) : setSheet(tab ?? 'model')}
               onEscalate={(harder) => client?.escalate(session.id, harder)}
               onDeescalate={() => client?.deescalate(session.id)}
+              onBudgetOverride={(clear) => client?.budgetOverride(clear)}
             />
           }
           onSend={(text, attachments, refs) => {

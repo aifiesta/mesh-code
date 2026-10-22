@@ -1,8 +1,9 @@
 import { useRef, useState } from 'react'
 import { useDismissable } from '../useDismissable'
-import type { LocalStatus, SettingSpec, SettingsDoc, Status } from '../types'
+import type { BudgetSnapshot, LocalStatus, SettingSpec, SettingsDoc, Status } from '../types'
 import { fmtTokens, fmtUsd, pricePerM, type CatalogModel } from '../types'
 import { Field } from './Field'
+import { canAllowMoreToday, ringTone } from '../budget'
 
 /**
  * The dials you touch often, where you are already looking.
@@ -15,15 +16,17 @@ import { Field } from './Field'
  * Every popover ends with the same escape hatch to the full settings, so the
  * bar teaches that more exists without having to show it.
  */
-export function ControlBar({ status, settings, catalog, local, onSet, onOpenSettings, onEscalate, onDeescalate }: {
+export function ControlBar({ status, settings, catalog, local, budget, onSet, onOpenSettings, onEscalate, onDeescalate, onBudgetOverride }: {
   status: Status | null
   settings: SettingsDoc | null
   catalog: CatalogModel[]
   local: LocalStatus | null
+  budget: BudgetSnapshot | null
   onSet: (key: string, value: any) => void
   onOpenSettings: (tab?: string) => void
   onEscalate: (harder: boolean) => void
   onDeescalate: () => void
+  onBudgetOverride: (clearKeyCap: boolean) => void
 }) {
   const [open, setOpen] = useState<string | null>(null)
   const ref = useRef<HTMLDivElement>(null)
@@ -119,6 +122,40 @@ export function ControlBar({ status, settings, catalog, local, onSet, onOpenSett
         )}
       </div>
 
+      {/* ---- usage ring: today's share of the cloud budget ---- */}
+      {budget && (
+        <div className="ctl ctl-usage">
+          <button className={`ctl-btn ring-btn ${open === 'usage' ? 'on' : ''}`} onClick={() => toggle('usage')}
+                  title={budget.key_cap ? 'Mesh key spend cap reached' : `Today ${budget.day.pct}% · this month ${budget.month.pct}%`}
+                  aria-label="Usage">
+            <Ring pct={budget.key_cap ? 100 : budget.day.pct} tone={ringTone(budget)} />
+          </button>
+          {open === 'usage' && (
+            <Pop title="Usage" onSettings={() => { setOpen(null); onOpenSettings('budget') }}>
+              <UsageBar label="Today" w={budget.day} limited={budget.month.limit > 0} resets={`Resets at midnight${budget.day.override ? ' · extra allowed today' : ''}`} />
+              <UsageBar label="This month" w={budget.month} limited={budget.month.limit > 0} resets={`Resets ${new Date(budget.month.resets * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`} />
+              {Object.keys(budget.month.by_kind).length > 0 && (
+                <dl className="pop-stats">
+                  {Object.entries(budget.month.by_kind).sort((a, b) => b[1] - a[1]).map(([k, v]) => (
+                    <div key={k}><dt>{KIND_LABEL[k] ?? k}</dt><dd>${v.toFixed(4)}</dd></div>
+                  ))}
+                </dl>
+              )}
+              <p className="pop-note">
+                {budget.key_cap
+                  ? 'Your Mesh key’s own spend cap was reached. Raise it at app.meshapi.ai, then clear the hold.'
+                  : 'Today’s share is what is left this month divided by the days left. Work on this machine is never counted.'}
+              </p>
+              {budget.key_cap
+                ? <button className="btn subtle" onClick={() => { setOpen(null); onBudgetOverride(true) }}>I raised the cap</button>
+                : canAllowMoreToday(budget)
+                  ? <button className="btn primary" onClick={() => { setOpen(null); onBudgetOverride(false) }}>Allow more today</button>
+                  : null}
+            </Pop>
+          )}
+        </div>
+      )}
+
       {/* ---- tokens ---- */}
       <div className="ctl ctl-tok">
         <button className={`ctl-btn ${open === 'tok' ? 'on' : ''} ${live ? 'ticking' : ''}`}
@@ -175,6 +212,37 @@ export function ControlBar({ status, settings, catalog, local, onSet, onOpenSett
         )}
       </div>
 
+    </div>
+  )
+}
+
+const KIND_LABEL: Record<string, string> = {
+  escalate: 'Escalations', audit: 'Audits', auto: 'Gateway auto', pinned: 'Pinned model', fallback: 'Cloud fallback', other: 'Other',
+}
+
+/** A 16px ring filled clockwise to `pct`, like a battery for the day's budget. */
+function Ring({ pct, tone }: { pct: number; tone: string }) {
+  const r = 6, c = 2 * Math.PI * r
+  const fill = Math.max(0, Math.min(100, pct)) / 100
+  return (
+    <svg className={`ring ${tone}`} viewBox="0 0 16 16" width="16" height="16" aria-hidden>
+      <circle cx="8" cy="8" r={r} className="ring-track" />
+      <circle cx="8" cy="8" r={r} className="ring-fill" strokeDasharray={`${c * fill} ${c}`} transform="rotate(-90 8 8)" />
+    </svg>
+  )
+}
+
+function UsageBar({ label, w, limited, resets }: {
+  label: string; w: BudgetSnapshot['day']; limited: boolean; resets: string
+}) {
+  const over = limited && w.pct >= 100
+  return (
+    <div className="usage">
+      <div className="usage-head"><strong>{label}</strong><span>{limited ? `${w.pct}% used` : `$${w.spent.toFixed(2)} · no limit`}</span></div>
+      <div className="usage-bar" role="progressbar" aria-label={label} aria-valuenow={Math.min(100, w.pct)} aria-valuemin={0} aria-valuemax={100}>
+        <span className={over ? 'over' : w.pct >= 80 ? 'warn' : ''} style={{ width: `${Math.min(100, w.pct)}%` }} />
+      </div>
+      <div className="usage-foot"><span>{resets}</span><span>${w.spent.toFixed(2)}{limited ? ` of $${w.limit.toFixed(2)}` : ''}</span></div>
     </div>
   )
 }

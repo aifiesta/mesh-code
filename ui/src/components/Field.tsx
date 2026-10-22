@@ -82,6 +82,9 @@ function control(spec: SettingSpec, set: (v: any) => void) {
     case 'int':
       return <IntField spec={spec} value={Number(v) || 0} onCommit={set} />
 
+    case 'money':
+      return <IntField spec={spec} value={Number(v) || 0} onCommit={set} money />
+
     case 'text':
       return spec.multiline ? (
         <textarea id={`f-${spec.key}`} rows={4} defaultValue={String(v ?? '')}
@@ -135,22 +138,27 @@ function ModelList({ value, onChange }: {
  * "Max steps per turn" could silently cap every turn at a handful of hops.
  * Wheel now blurs the field instead of changing it.
  */
-function IntField({ spec, value, onCommit }: {
-  spec: SettingSpec; value: number; onCommit: (v: number) => void
+function IntField({ spec, value, onCommit, money }: {
+  spec: SettingSpec; value: number; onCommit: (v: number) => void; money?: boolean
 }) {
   const [draft, setDraft] = useState(String(value))
   useEffect(() => { setDraft(String(value)) }, [value])
   const commit = () => {
-    const n = Math.max(spec.min ?? 0, Math.min(spec.max ?? 999, Math.round(Number(draft) || 0)))
+    // A cleared money field is mid-edit, not "No limit".
+    if (money && !draft.trim()) { setDraft(String(value)); return }
+    const raw = Number(draft) || 0
+    const n = Math.max(spec.min ?? 0, Math.min(spec.max ?? 999, money ? Math.round(raw * 100) / 100 : Math.round(raw)))
     setDraft(String(n))
     if (n !== value) onCommit(n)
   }
   return (
     <div className="stepper">
+      {money && <span className="stepper-unit">$</span>}
       <input
         id={`f-${spec.key}`}
         type="number"
-        inputMode="numeric"
+        inputMode={money ? 'decimal' : 'numeric'}
+        step={money ? 0.5 : 1}
         min={spec.min ?? 0} max={spec.max ?? 999}
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
