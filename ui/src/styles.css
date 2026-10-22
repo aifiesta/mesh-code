@@ -2473,3 +2473,15 @@ body.resizing .rail-resize { pointer-events: auto; }
 .usage-bar span.over { background: var(--danger); }
 .usage-foot { display: flex; justify-content: space-between; font-size: var(--t-xs); color: var(--ink-3); margin-top: 4px; }
 .stepper-unit { color: var(--ink-3); font-size: var(--t-sm); }
+
+.composer-input.shell, .composer-input.shell:focus-within {
+  box-shadow: inset 0 0 0 1px var(--warn), 0 0 0 4px var(--warn-film), var(--lift-2);
+}
+.shell-badge {
+  align-self: flex-end; margin: 0 0 13px 10px; padding: 2px 7px; border-radius: var(--r-xs);
+  font-size: var(--t-2xs); font-weight: 650; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--warn); background: var(--warn-film);
+}
+.shell-card .tool-head { cursor: default; }
+.shell-card .tool-summary.mono { font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace); }
+.shell-card .tool-body { display: block; }

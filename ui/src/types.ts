@@ -37,6 +37,8 @@ export const Ev = {
   NOTICE: 'notice',
   ERROR: 'error',
   COMPACTED: 'compacted',
+  COMMAND_STARTED: 'command.started',
+  COMMAND_FINISHED: 'command.finished',
   POLICY_CHANGED: 'policy.changed',
   BUDGET_UPDATED: 'budget.updated',
   BUDGET_HOLD: 'budget.hold',
@@ -56,6 +58,7 @@ export const Req = {
   APPROVAL_RESPONSE: 'approval.response',
   ASK_RESPONSE: 'ask.response',
   SET_MODE: 'set.mode',
+  RUN_COMMAND: 'run.command',
   ESCALATE: 'escalate',
   DEESCALATE: 'deescalate',
   BUDGET_OVERRIDE: 'budget.override',
@@ -133,6 +136,7 @@ export type Msg =
   | { kind: 'user'; id: string; text: string; attachments?: string[]; refs?: string[] }
   | { kind: 'assistant'; id: string; text: string; streaming?: boolean; model?: string }
   | { kind: 'tool'; id: string; card: ToolCard }
+  | { kind: 'shell'; id: string; callId: string; command: string; output?: string; ok?: boolean; running: boolean }
   | { kind: 'notice'; id: string; level: string; text: string; detail?: any }
   | { kind: 'turn'; id: string; cost: number; tokens: number; elapsed: number; model: string; hops: number; estimated?: boolean; local?: boolean; escalated?: string | null }
   | { kind: 'server'; id: string; url: string; pid: number; port: number; cmd: string; stopped?: boolean }

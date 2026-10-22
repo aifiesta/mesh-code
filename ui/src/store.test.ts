@@ -101,3 +101,19 @@ describe('history replay after a reload mid-turn', () => {
     expect(s.sessions.s2.messages).toHaveLength(0)
   })
 })
+
+
+describe('commands typed with !', () => {
+  it('shows a running card, fills it in when done, and replays it after a reload', () => {
+    let s = fire(initialState, Ev.SESSION_STARTED, { title: 'w', workspace: '/w' }, 's1')
+    s = fire(s, Ev.COMMAND_STARTED, { id: 'k1', command: 'ls' }, 's1')
+    expect(s.sessions.s1.messages[0]).toMatchObject({ kind: 'shell', command: 'ls', running: true })
+    expect(s.sessions.s1).toMatchObject({ busy: true, stopping: false })
+    s = fire(s, Ev.COMMAND_FINISHED, { id: 'k1', command: 'ls', ok: true, output: 'a.py\n[exit 0]' }, 's1')
+    expect(s.sessions.s1.messages[0]).toMatchObject({ kind: 'shell', ok: true, running: false })
+    expect(s.sessions.s1.busy).toBe(false)
+    let r = fire(initialState, Ev.SESSION_STARTED, { title: 'w', workspace: '/w', resumed: true }, 's2')
+    r = fire(r, Ev.HISTORY, { messages: [{ kind: 'shell', command: 'ls', output: 'a.py', ok: true }] }, 's2')
+    expect(r.sessions.s2.messages[0]).toMatchObject({ kind: 'shell', command: 'ls', ok: true })
+  })
+})

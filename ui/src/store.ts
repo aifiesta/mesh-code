@@ -330,6 +330,8 @@ export function reduce(state: AppState, action: Action): AppState {
           })
           else if (m.kind === 'notice') messages.push({
             kind: 'notice', id: nid(), level: 'info', text: m.text })
+          else if (m.kind === 'shell') messages.push({
+            kind: 'shell', id: nid(), callId: nid(), command: m.command, output: m.output, ok: !!m.ok, running: false })
         }
         return { ...s, needsHistory: false, messages: [...messages, ...s.messages] }
       }
@@ -545,6 +547,22 @@ export function reduce(state: AppState, action: Action): AppState {
             detail: String(d.note ?? '').slice(0, 200) || undefined,
           }],
         }
+
+      case Ev.COMMAND_STARTED:
+        // Busy, so Stop and Escape reach a long command.
+        return { ...s, busy: true, stopping: false,
+                 messages: [...s.messages, { kind: 'shell', id: nid(), callId: d.id, command: d.command, running: true }] }
+
+      case Ev.COMMAND_FINISHED: {
+        const found = s.messages.some((m) => m.kind === 'shell' && m.callId === d.id)
+        const done = { output: d.output ?? '', ok: !!d.ok, running: false }
+        return {
+          ...s, busy: false, stopping: false,
+          messages: found
+            ? s.messages.map((m) => (m.kind === 'shell' && m.callId === d.id ? { ...m, ...done } : m))
+            : [...s.messages, { kind: 'shell', id: nid(), callId: d.id, command: d.command, ...done }],
+        }
+      }
 
       case Ev.BUDGET_HOLD:
         return s   // the notice that follows carries the words

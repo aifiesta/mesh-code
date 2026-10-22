@@ -112,6 +112,7 @@ export class EngineClient {
   escalate(session: string, harder = false) { this.send(Req.ESCALATE, { session, harder }) }
   deescalate(session: string) { this.send(Req.DEESCALATE, { session }) }
   budgetOverride(clearKeyCap = false) { this.send(Req.BUDGET_OVERRIDE, { clear_key_cap: clearKeyCap }) }
+  runCommand(session: string, command: string) { this.send(Req.RUN_COMMAND, { session, command }) }
   localInstall(model: string) { this.send(Req.LOCAL_INSTALL, { model }) }
   localCancel(job: string) { this.send(Req.LOCAL_CANCEL, { job }) }
   localDelete(model: string) { this.send(Req.LOCAL_DELETE, { model }) }

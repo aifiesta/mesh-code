@@ -64,7 +64,7 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 }
 
 export function Composer({ busy, stopping, mode, controls, onSend, onInterrupt, onMode, onCommands,
-                          fileIndex, onNeedFiles, onEscalate, escalated }: {
+                          fileIndex, onNeedFiles, onEscalate, escalated, onRunCommand }: {
   busy: boolean
   /** Stop was clicked; the engine has not confirmed the abort yet. */
   stopping?: boolean
@@ -73,6 +73,8 @@ export function Composer({ busy, stopping, mode, controls, onSend, onInterrupt, 
   controls?: React.ReactNode
   onSend: (text: string, attachments: { name: string; data_url: string }[], refs: string[]) => void
   onInterrupt: () => void
+  /** `!command`: run it in the project folder, like Claude Code's bash mode. */
+  onRunCommand: (command: string) => void
   /** Present under the local-first policy: hand the rest of the turn to the strong model. */
   onEscalate?: () => void
   escalated?: boolean
@@ -159,8 +161,17 @@ export function Composer({ busy, stopping, mode, controls, onSend, onInterrupt, 
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`
   }, [text])
 
+  const shell = text.trimStart().startsWith('!')
+
   function send() {
     const t = text.trim()
+    if (shell) {
+      const command = t.slice(1).trim()
+      if (!command) return
+      onRunCommand(command)
+      setText('')
+      return
+    }
     if (!t && files.length === 0 && refs.length === 0) return
     onSend(t, files, refs)
     setText('')
@@ -236,12 +247,13 @@ export function Composer({ busy, stopping, mode, controls, onSend, onInterrupt, 
           belong to the field itself. Everything else moved OUT of it and
           below, so a narrow window squeezes a quiet meta row rather than
           wrapping "Ask every time" onto three lines inside the input. */}
-      <div className="composer-input">
+      <div className={`composer-input ${shell ? 'shell' : ''}`}>
+        {shell && <span className="shell-badge" title="Runs in the project folder; the output goes to the chat and the model">shell</span>}
         <textarea
           ref={ref}
           value={text}
           rows={1}
-          placeholder={busy ? 'Queue another message…' : 'Ask for anything, @ a file, or / for commands'}
+          placeholder={busy ? 'Queue another message…' : 'Ask for anything, @ a file, / for commands, ! to run in the shell'}
           onChange={(e) => { setText(e.target.value); setCaret(e.target.selectionStart ?? 0) }}
           onSelect={(e) => setCaret((e.target as HTMLTextAreaElement).selectionStart ?? 0)}
           onPaste={(e) => absorb(e.clipboardData.files)}
