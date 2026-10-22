@@ -2451,3 +2451,11 @@ body.resizing .rail-resize { pointer-events: auto; }
 .md-table th, .md-table td { padding: 6px 10px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--hair-soft); }
 .md-table th { font-weight: 600; color: var(--ink-2); background: var(--film-2); }
 .md-table tr:last-child td { border-bottom: 0; }
+
+/* The local table has four columns and few rows: its actions carry state, so they stay visible. */
+.localpanel .browser-head, .localpanel .browser-row { grid-template-columns: minmax(0, 1fr) 72px 72px 190px; }
+.localpanel .browser-row { padding-block: 6px; }
+.localpanel .m-id { white-space: normal; overflow: visible; flex-wrap: wrap; row-gap: 4px; }
+.localpanel .browser-row .m-actions { opacity: 1; }
+.localpanel .browser-row.off { opacity: .55; }
+.localpanel .m-actions button:disabled { opacity: .45; cursor: default; }
