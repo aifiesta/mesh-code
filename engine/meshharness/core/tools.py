@@ -930,8 +930,11 @@ def execute(name: str, arguments: dict, cfg: "dict | None" = None,
                     "pass a larger `timeout` (max 600s), or break the work into "
                     "smaller commands."
                 )
-            tail = "...[truncated]" if len(out) > OUTPUT_LIMIT else ""
-            return f"{out[:OUTPUT_LIMIT]}{tail}\n[exit {proc.returncode}]"
+            if len(out) > OUTPUT_LIMIT:
+                # The end of a command's output (test summaries, errors) matters most.
+                head = OUTPUT_LIMIT // 4
+                out = f"{out[:head]}\n...[{len(out) - OUTPUT_LIMIT} chars truncated]...\n{out[-(OUTPUT_LIMIT - head):]}"
+            return f"{out}\n[exit {proc.returncode}]"
         except Exception as e:
             return f"Error: {e}"
 

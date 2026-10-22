@@ -151,7 +151,7 @@ class Engine:
         # Count both natural and aborted ends: a turn the user stopped after
         # real spend must still reach the lifetime tally, or the total drifts
         # down with every interrupt.
-        if ev.get("type") in (Event.TURN_FINISHED, Event.TURN_ABORTED,
+        if ev.get("type") in (Event.TURN_FINISHED, Event.TURN_ABORTED, Event.COMMAND_FINISHED,
                               Event.SESSION_STARTED, Event.CHAT_CLEARED):
             sess = self.sessions.get(ev.get("session") or "")
             if sess:
@@ -789,6 +789,8 @@ async def handle_request(engine: Engine, msg: dict) -> None:
             except (files_mod.FileOpError, files_mod.OutsideWorkspace) as e:
                 engine.emit(event(Event.FILE_OP, sid, ok=False, op=kind,
                                   root=msg.get("root"), path=path, error=str(e)))
+        elif kind == Request.RUN_COMMAND:
+            s.run_command(msg.get("command") or "")
         elif kind == Request.TERM_RUN:
             s.terminal().run(msg.get("command") or "")
         elif kind == Request.TERM_INTERRUPT:

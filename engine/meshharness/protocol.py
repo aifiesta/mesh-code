@@ -78,6 +78,8 @@ class Event:
     NOTICE = "notice"                  # info | warn — non-fatal
     ERROR = "error"
     COMPACTED = "compacted"
+    COMMAND_STARTED = "command.started"    # a `!` command the user typed
+    COMMAND_FINISHED = "command.finished"
     POLICY_CHANGED = "policy.changed"  # tier moved: escalated, handed back, de-escalated
     BUDGET_UPDATED = "budget.updated"  # ledger snapshot (session None)
     BUDGET_HOLD = "budget.hold"        # a cloud hop was refused; why
@@ -104,6 +106,7 @@ class Request:
     APPROVAL_RESPONSE = "approval.response"   # reply to TOOL_PROPOSED
     ASK_RESPONSE = "ask.response"             # reply to ASK_USER
     SET_MODE = "set.mode"
+    RUN_COMMAND = "run.command"     # `!cmd` from the composer: run it, show it, tell the model
     ESCALATE = "escalate"          # strong model for the rest of the turn (or the next)
     DEESCALATE = "deescalate"
     BUDGET_OVERRIDE = "budget.override"  # allow more today; clear a key-cap hold
