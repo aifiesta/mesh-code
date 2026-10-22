@@ -1008,16 +1008,6 @@ kbd {
   display: block; width: 100%; text-align: left; margin-top: 10px; padding: 9px 0 1px;
   border-top: 1px solid var(--hair-soft); color: var(--brand); font-size: var(--t-sm); font-weight: 500;
 }
-.explain { margin-top: 2px; }
-.explain-top {
-  display: flex; flex-direction: column; gap: 3px; padding: 10px 12px;
-  border-radius: var(--r-sm); background: var(--brand-film);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand) 18%, transparent);
-}
-.explain-cap { font-size: var(--t-xs); color: var(--ink-3); font-family: var(--sans); }
-.explain-cap b { color: var(--ink-2); font-weight: 600; }
-.explain-model { font-size: var(--t-md); font-weight: 600; color: var(--brand); letter-spacing: -.01em; }
-.explain-rest { margin: 8px 2px 0; font-size: var(--t-xs); color: var(--ink-3); font-family: var(--sans); }
 
 /* ------------------------------------------------------------- right rail */
 .rail > * { -webkit-app-region: no-drag; }
@@ -1290,16 +1280,10 @@ kbd {
 .toggle.on::before { background: linear-gradient(135deg, var(--brand), var(--brand-2)); box-shadow: none; }
 .toggle.on .knob { transform: translateX(14px); background: #ffffff; }
 
-.dial { display: flex; align-items: center; gap: 14px; }
 input[type=range] { accent-color: var(--brand); flex: 1; max-width: 270px; }
-.dial-value { font-family: var(--sans); font-size: var(--t-sm); color: var(--ink-2); min-width: 36px; }
 .stepper { display: flex; align-items: center; gap: 11px; }
 .stepper input { width: 84px; font-family: var(--sans); }
 .stepper-note { font-size: var(--t-sm); color: var(--ink-3); }
-.weights { display: flex; flex-direction: column; gap: 7px; }
-.weight-row { display: flex; align-items: center; gap: 12px; }
-.weight-label { font-size: var(--t-sm); color: var(--ink-2); width: 96px; }
-.weight-pct { font-family: var(--sans); font-size: var(--t-sm); color: var(--ink-3); width: 36px; text-align: right; }
 .model-list { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .model-list input {
   width: auto; border-radius: var(--r-pill); padding: 4px 12px; font-size: var(--t-sm); font-family: var(--sans);

@@ -100,9 +100,6 @@ export class EngineClient {
   setModel(session: string, model: string) {
     this.send(Req.SET_MODEL, { session, model })
   }
-  setRoute(session: string, route_mode: string) {
-    this.send(Req.SET_ROUTE, { session, route_mode })
-  }
   stopServer(session: string, pid: number) {
     this.send(Req.STOP_SERVER, { session, pid })
   }
