@@ -112,6 +112,12 @@ export class EngineClient {
   saveKey(key: string) {
     this.send(Req.SAVE_KEY, { key })
   }
+  localInstall(model: string) { this.send(Req.LOCAL_INSTALL, { model }) }
+  localCancel(job: string) { this.send(Req.LOCAL_CANCEL, { job }) }
+  localDelete(model: string) { this.send(Req.LOCAL_DELETE, { model }) }
+  localServer(action: 'stop' | 'restart') { this.send(Req.LOCAL_SERVER, { action }) }
+  localRefresh() { this.send(Req.LOCAL_REFRESH, {}) }
+  localDecline() { this.send(Req.LOCAL_DECLINE, {}) }
 
   /** Beta feedback → the engine relays it to the Google Form (POST
    *  /api/feedback). Plain HTTP rather than the socket: a one-shot
