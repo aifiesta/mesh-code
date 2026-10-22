@@ -18,7 +18,13 @@ _GB = 1024 ** 3
 
 
 class LocalUnavailable(RuntimeError):
-    """The hop cannot run locally right now; `reason` is user-readable."""
+    """The hop cannot run locally; the message is user-readable. `permanent`
+    means waiting will not help (disabled, nothing fits), so the caller
+    should say so once per session rather than once per turn."""
+
+    def __init__(self, message: str, *, permanent: bool = False):
+        super().__init__(message)
+        self.permanent = permanent
 
 
 class LocalModels:
@@ -40,9 +46,23 @@ class LocalModels:
         self.downloads = download.DownloadManager(lambda job: self._emit("local.progress", job))
         self.server = LocalServer(local_dir, on_state=lambda _: self._emit_status())
         self.booted = threading.Event()
+        self._booting = threading.Lock()   # one boot at a time
 
     def boot(self) -> None:
-        """Runs on a thread at engine start; never raises."""
+        """Runs on a thread at engine start; never raises. A disabled layer
+        touches nothing: no probe, no manifest fetch, no download."""
+        if not self._booting.acquire(blocking=False):
+            return
+        try:
+            self._boot()
+        finally:
+            self._booting.release()
+
+    def _boot(self) -> None:
+        if not self.cfg.get("local_enabled", True):
+            self.booted.set()
+            self._emit_status()
+            return
         try:
             hw = probe(self.models_dir)
             manifest = manifest_mod.load(self.local_dir / "manifest.json", self.app_version)
@@ -51,11 +71,7 @@ class LocalModels:
                 self._reconcile()
                 self.plan = self._plan_for(self.default_id())
             threading.Thread(target=self._refresh_manifest, daemon=True).start()
-            if (self.cfg.get("local_enabled", True) and self.cfg.get("local_auto_setup", True)
-                    and not self.state.get("declined") and not self.installed_ids()):
-                entry = self.plan.model if self.plan else None
-                if entry and entry["bytes"] <= AUTO_DOWNLOAD_LIMIT_GB * _GB:
-                    self.install(entry["id"])
+            self._auto_install()
         except Exception as e:  # a local-model problem must never block the engine
             with self._lock:
                 self.state["boot_error"] = f"{type(e).__name__}: {e}"
@@ -81,7 +97,7 @@ class LocalModels:
     def catalog_rows(self) -> list[dict]:
         with self._lock:
             manifest = self.manifest
-            if not manifest:
+            if not manifest or not self.cfg.get("local_enabled", True):
                 return []
             running = {}
             srv = self.server.describe()
@@ -95,9 +111,10 @@ class LocalModels:
         with self._lock:
             plan = self.plan
             needs_confirm = None
-            if (plan and plan.model["id"] not in self.installed_ids() and not self._job_for(plan.model["id"])
-                    and plan.model["bytes"] > AUTO_DOWNLOAD_LIMIT_GB * _GB and not self.state.get("declined")):
-                needs_confirm = {"model": plan.model["id"], "bytes": plan.model["bytes"]}
+            blocked = self._blocked(plan) if plan else None
+            if (plan and blocked and plan.model["id"] not in self.installed_ids()
+                    and not self._job_for(plan.model["id"]) and not self.state.get("declined")):
+                needs_confirm = {"model": plan.model["id"], "bytes": plan.model["bytes"], "reason": blocked}
             return {
                 "enabled": bool(self.cfg.get("local_enabled", True)),
                 "booted": self.booted.is_set(),
@@ -172,6 +189,23 @@ class LocalModels:
                 self.target_for(self.plan.model["id"])
         self._emit_status()
 
+    def refresh(self, *, force: bool = False) -> bool:
+        """Fetch the remote manifest; True when it changed what we know."""
+        if not manifest_mod.refresh(self.local_dir / "manifest.json", self.app_version, force=force):
+            return False
+        with self._lock:
+            self.manifest = manifest_mod.load(self.local_dir / "manifest.json", self.app_version)
+            self._reconcile()          # a re-pinned sha un-installs a stale file
+            self.plan = self._plan_for(self.default_id())
+        self._on_catalog_change()
+        self._emit_status()
+        return True
+
+    def validate_setting(self, key: str, value) -> None:
+        """Raise ValueError for a value the layer cannot honour."""
+        if key == "local_model" and value and value not in self.installed_ids():
+            raise ValueError(f"{value} is not downloaded yet; install it under Settings › Local model first")
+
     def recover(self, *, force: bool = False) -> None:
         """`force` stops a server that is alive but not answering."""
         if force:
@@ -186,39 +220,66 @@ class LocalModels:
                 self.plan = self._plan_for(self.default_id())
             if key in ("local_context", "local_gpu", "local_keep_free_gb"):
                 self.state["restart_needed"] = self.server.state == "ready"
+        if key == "local_enabled":
+            if value:
+                if self.hw is None and self.booted.is_set():   # booted while disabled: probe now
+                    self.booted.clear()
+                    threading.Thread(target=self.boot, daemon=True).start()
+            else:
+                # Stopping waits on the process; never do that on the event loop.
+                threading.Thread(target=self._stop_and_report, daemon=True).start()
+        elif key == "local_use_when_slow" and value:
+            self._auto_install()          # the gate that blocked the download just opened
         self._on_catalog_change()
         self._emit_status()
+
+    def _stop_and_report(self) -> None:
+        self.server.stop()
+        self._emit_status()
+
+    def _auto_install(self) -> None:
+        if (self.cfg.get("local_auto_setup", True) and not self.state.get("declined")
+                and not self.installed_ids() and self.plan and not self._blocked(self.plan)):
+            self.install(self.plan.model["id"])
 
     def target_for(self, model_id: str, *, cancel: threading.Event | None = None,
                    notify: Callable[[str], None] | None = None) -> Target:
         if not self.cfg.get("local_enabled", True):
-            raise LocalUnavailable("local models are turned off in Settings")
+            raise LocalUnavailable("local models are turned off in Settings", permanent=True)
         if not self.booted.wait(timeout=30) or not self.manifest or not self.hw:
+            if self.booted.is_set() and self.state.get("boot_error"):
+                raise LocalUnavailable(f"the local model layer failed to start ({self.state['boot_error']})",
+                                       permanent=True)
             raise LocalUnavailable("the local model layer is still starting")
         if self.hw.probe_failed:
-            raise LocalUnavailable("could not read this machine's memory, so no local model was chosen")
+            raise LocalUnavailable("could not read this machine's memory, so no local model was chosen",
+                                   permanent=True)
         resolved = self.default_id() if model_id == AUTO_ID else model_id
         if not resolved:
-            raise LocalUnavailable("no local model fits this machine")
+            raise LocalUnavailable("no local model fits this machine", permanent=True)
         entry = manifest_mod.model(self.manifest, resolved)
         if not entry:
             raise LocalUnavailable(f"unknown local model {resolved}")
+        plan = self._plan_for(resolved)
         path = self.state.get("installed", {}).get(resolved)
         if not path or not Path(path).exists():
             job = self._job_for(resolved)
             if job:
                 pct = int(100 * job["bytes"] / max(job["total"], 1))
                 raise LocalUnavailable(f"{entry['label']} is still downloading ({pct}%)")
-            raise LocalUnavailable(f"{entry['label']} is not downloaded yet")
-        plan = self._plan_for(resolved)
+            # Nothing is coming on its own: the user declined, or the plan needs
+            # a click. Say so once, not every turn.
+            settled = bool(self.state.get("declined")) or bool(plan and self._blocked(plan))
+            raise LocalUnavailable(f"{entry['label']} is not downloaded yet", permanent=settled)
         if plan is None:
-            raise LocalUnavailable(f"{entry['label']} does not fit in memory on this machine")
+            raise LocalUnavailable(f"{entry['label']} does not fit in memory on this machine", permanent=True)
         if plan.slow and not self.cfg.get("local_use_when_slow", False):
-            raise LocalUnavailable(f"{entry['label']} would run slowly here; enable 'Use even when slow' to try it")
+            raise LocalUnavailable(f"{entry['label']} would run slowly here; enable 'Use even when slow' to try it",
+                                   permanent=True)
         server_bin = runtime.locate(self.runtime_dir, self.manifest["runtime"]["tag"], plan.variant)
         if not server_bin:
             if not self._ensure_runtime_download(plan.variant):
-                raise LocalUnavailable(f"no llama-server build is pinned for {plan.variant}")
+                raise LocalUnavailable(f"no llama-server build is pinned for {plan.variant}", permanent=True)
             raise LocalUnavailable("the local runtime is still downloading")
         idle = int(self.cfg.get("local_idle_unload_min", 20) or 0) * 60
         argv = [a.replace("{model_path}", path)
@@ -245,6 +306,15 @@ class LocalModels:
         if not entry:
             return None
         return tiers.choose({"runtime": self.manifest["runtime"], "models": [entry]}, self.hw, **self._tier_kw())
+
+    def _blocked(self, plan: tiers.TierPlan) -> str | None:
+        """Why this plan is not auto-installed: too big to fetch unasked, or
+        too slow to be used with the current settings."""
+        if plan.model["bytes"] > AUTO_DOWNLOAD_LIMIT_GB * _GB:
+            return "size"
+        if plan.slow and not self.cfg.get("local_use_when_slow", False):
+            return "slow"
+        return None
 
     def _tier_kw(self) -> dict:
         return {"keep_free_gb": float(self.cfg.get("local_keep_free_gb", 4) or 4),
@@ -281,16 +351,18 @@ class LocalModels:
         return True
 
     def _runtime_done(self, tag: str, variant: str, archive: Path, err) -> None:
+        error = str(err) if err else None
+        if not err:
+            try:                      # extraction runs unlocked; it can take a while
+                runtime.install_from_archive(archive, self.runtime_dir / tag / variant)
+                archive.unlink(missing_ok=True)
+            except Exception as e:
+                error = f"{type(e).__name__}: {e}"
         with self._lock:
-            if err:
-                self.state["runtime_error"] = str(err)
+            if error:
+                self.state["runtime_error"] = error
             else:
-                try:
-                    runtime.install_from_archive(archive, self.runtime_dir / tag / variant)
-                    archive.unlink(missing_ok=True)
-                    self.state.pop("runtime_error", None)
-                except Exception as e:
-                    self.state["runtime_error"] = f"{type(e).__name__}: {e}"
+                self.state.pop("runtime_error", None)
             self._save_state()
         self._emit_status()
 
@@ -306,14 +378,7 @@ class LocalModels:
         self._emit_status()
 
     def _refresh_manifest(self) -> None:
-        if not manifest_mod.refresh(self.local_dir / "manifest.json", self.app_version):
-            return
-        with self._lock:
-            self.manifest = manifest_mod.load(self.local_dir / "manifest.json", self.app_version)
-            self._reconcile()          # a re-pinned sha un-installs a stale file
-            self.plan = self._plan_for(self.default_id())
-        self._on_catalog_change()
-        self._emit_status()
+        self.refresh(force=False)
 
     def _runtime_status(self) -> dict:
         if not (self.manifest and self.plan):

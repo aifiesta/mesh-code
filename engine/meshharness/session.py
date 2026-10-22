@@ -987,10 +987,14 @@ class Session:
             fallback = cfg.get("local_fallback_model") or ""
             if not fallback or is_local(fallback):
                 raise TargetUnavailable(f"local model not ready ({e}) and no cloud fallback is set") from e
-            if self.state.get("_local_fellback_turn") != self._turn_id:
-                self.state["_local_fellback_turn"] = self._turn_id
-                self.emit(Event.NOTICE, level="warn",
-                          message=f"Local model not ready ({e}) — using {fallback} for this turn")
+            permanent = getattr(e, "permanent", False)
+            said = self.state.setdefault("_local_fellback_said", set())
+            key = str(e) if permanent else self._turn_id
+            if key not in said:
+                said.add(key)
+                self.emit(Event.NOTICE, level="warn", message=(
+                    f"Local model unavailable ({e}) — using {fallback}" if permanent
+                    else f"Local model not ready ({e}) — using {fallback} for this turn"))
             self.state["_hop_model"] = fallback
             self.state["_hop_ctx"] = compact.context_limit(fallback, self.catalog)
             return Target.from_cfg({**cfg, "model": fallback})

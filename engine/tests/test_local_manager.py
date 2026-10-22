@@ -129,3 +129,70 @@ def test_disabled_layer_never_starts_anything(layer):
     with pytest.raises(manager_mod.LocalUnavailable, match="turned off"):
         layer.target_for("local/auto")
     assert layer.status()["server"]["state"] == "stopped"
+
+
+def test_a_slow_plan_is_not_auto_installed_and_says_why(layer, monkeypatch):
+    monkeypatch.setattr(manager_mod, "probe",
+                        lambda *_: HardwareProfile(os="linux", arch="x64", ram_gb=16, avail_gb=10,
+                                                   cores=8, gpu=Gpu(kind="none")))
+    layer.boot()
+    assert layer.downloads.active() == [] and layer.installed_ids() == set()
+    st = layer.status()
+    assert st["recommended"]["slow"] is True and st["needs_confirm"]["reason"] == "slow"
+    layer.cfg["local_use_when_slow"] = True
+    layer.install("local/tiny")
+    assert _wait(lambda: "local/tiny" in layer.installed_ids())
+
+
+def test_refresh_force_re_pins_from_a_newer_remote(layer, host, monkeypatch, tmp_path):
+    layer.boot()
+    assert _wait(lambda: "local/tiny" in layer.installed_ids())
+    newer = json.loads(Path(manager_mod.manifest_mod.BUNDLED).read_text())
+    newer["updated"] = "2999-01-01"
+    newer["models"][0]["quality_rank"] = 99
+    for m in newer["models"]:
+        for k in ("url", "chat_template_kwargs", "extra_server_args", "request_defaults"):
+            m.pop(k, None)
+    newer["runtime"] = {"tag": "test", "assets": {k: {f: v[f] for f in ("file", "sha256", "bytes")}
+                                                  for k, v in newer["runtime"]["assets"].items()}}
+
+    def fake_refresh(cache_path, app_version, *, url=None, force=False, timeout=10.0):
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(newer))
+        return True
+    monkeypatch.setattr(manager_mod.manifest_mod, "refresh", fake_refresh)
+    assert layer.refresh(force=True) is True
+    assert layer.manifest["models"][0]["quality_rank"] == 99
+    assert layer.manifest["models"][0]["url"] == host.url          # bundled-only fields survive the overlay
+    assert "local/tiny" in layer.installed_ids()
+
+
+def test_declined_or_blocked_downloads_are_a_permanent_reason(layer, monkeypatch):
+    layer.cfg["local_auto_setup"] = False
+    layer.boot()
+    with pytest.raises(manager_mod.LocalUnavailable) as e:
+        layer.target_for("local/auto")
+    assert e.value.permanent is False                       # a download may still be started
+    layer.decline()
+    with pytest.raises(manager_mod.LocalUnavailable) as e:
+        layer.target_for("local/auto")
+    assert e.value.permanent is True
+
+
+def test_opting_in_to_slow_starts_the_install_the_gate_was_blocking(layer, monkeypatch):
+    monkeypatch.setattr(manager_mod, "probe",
+                        lambda *_: HardwareProfile(os="linux", arch="x64", ram_gb=16, avail_gb=10,
+                                                   cores=8, gpu=Gpu(kind="none")))
+    layer.boot()
+    assert layer.downloads.active() == []
+    layer.on_setting("local_use_when_slow", True)
+    assert _wait(lambda: "local/tiny" in layer.installed_ids())
+
+
+def test_a_failed_boot_is_a_permanent_reason(layer, monkeypatch):
+    monkeypatch.setattr(manager_mod, "probe", lambda *_: (_ for _ in ()).throw(RuntimeError("no sysctl")))
+    layer.boot()
+    assert layer.booted.is_set() and "no sysctl" in layer.state["boot_error"]
+    with pytest.raises(manager_mod.LocalUnavailable) as e:
+        layer.target_for("local/auto")
+    assert e.value.permanent is True and "failed to start" in str(e.value)
