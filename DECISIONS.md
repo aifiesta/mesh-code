@@ -69,3 +69,18 @@ those into structured calls only when the tool name is known and the
 arguments parse; anything inside a code fence is treated as quoted
 material, and unknown names are left for the model to retry.
 
+## 2026-10-22 — a hop goes to a Target, and the config stays the cloud default
+`client.py` takes an optional per-hop `Target` (base URL, key, model alias,
+context, timeouts, request defaults) instead of learning about local
+servers. The session resolves `local/*` ids through the local layer right
+before each hop; a local id that cannot be served yet falls back to
+`local_fallback_model` with one notice per reason, so a download in
+progress never blocks a turn. Local hops cost $0 and are never priced.
+
+## 2026-10-22 — small local models get a compact system prompt at request time
+The full prompt is swapped for `local/prompt.py`'s short one only in the
+request sent to a local target; history keeps the full prompt, so a session
+can move between a local and a cloud model mid-conversation. Tool calls a
+local model prints as text are promoted (never a cloud model's: quoted
+text stays text); an unparseable one gets a single nudge per turn.
+
