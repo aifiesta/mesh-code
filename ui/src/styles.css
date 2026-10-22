@@ -2443,3 +2443,15 @@ body.resizing .rail-resize { pointer-events: auto; }
 .localpanel .browser-row .m-actions { opacity: 1; }
 .localpanel .browser-row.off { opacity: .55; }
 .localpanel .m-actions button:disabled { opacity: .45; cursor: default; }
+
+.ladder { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 4px; font-size: var(--t-sm); }
+.ladder-row { display: flex; justify-content: space-between; gap: 12px; }
+.ladder-row span { color: var(--ink-3); flex: none; }
+.ladder-row b { font-weight: 500; color: var(--ink-2); text-align: right; min-width: 0; overflow-wrap: anywhere; }
+.ladder-row b i { font-style: normal; font-size: var(--t-2xs); color: var(--ink-3); margin-left: 4px; text-transform: uppercase; letter-spacing: .08em; }
+.ladder-actions { display: flex; gap: 8px; margin-top: 8px; }
+.escalate-btn {
+  align-self: flex-end; margin: 0 6px 5px 0; padding: 5px 11px; border-radius: var(--r-pill);
+  font-size: var(--t-xs); font-weight: 600; color: var(--brand); background: var(--brand-film);
+}
+.escalate-btn:hover { background: color-mix(in srgb, var(--brand) 20%, transparent); }

@@ -64,7 +64,7 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 }
 
 export function Composer({ busy, stopping, mode, controls, onSend, onInterrupt, onMode, onCommands,
-                          fileIndex, onNeedFiles }: {
+                          fileIndex, onNeedFiles, onEscalate, escalated }: {
   busy: boolean
   /** Stop was clicked; the engine has not confirmed the abort yet. */
   stopping?: boolean
@@ -73,6 +73,9 @@ export function Composer({ busy, stopping, mode, controls, onSend, onInterrupt, 
   controls?: React.ReactNode
   onSend: (text: string, attachments: { name: string; data_url: string }[], refs: string[]) => void
   onInterrupt: () => void
+  /** Present under the local-first policy: hand the rest of the turn to the strong model. */
+  onEscalate?: () => void
+  escalated?: boolean
   onMode: (m: Mode) => void
   onCommands: () => void
   /** Workspace file list for the @ picker; null until fetched. */
@@ -261,6 +264,11 @@ export function Composer({ busy, stopping, mode, controls, onSend, onInterrupt, 
             if (e.key === 'Escape' && busy) { e.preventDefault(); onInterrupt() }
           }}
         />
+        {busy && onEscalate && !escalated && (
+          <button className="escalate-btn" onClick={onEscalate} title="Hand the rest of this turn to the strong cloud model">
+            Escalate
+          </button>
+        )}
         {busy ? (
           <button className={`send-btn stop ${stopping ? 'stopping' : ''}`}
                   onClick={onInterrupt} disabled={!!stopping}

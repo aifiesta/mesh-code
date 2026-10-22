@@ -640,6 +640,8 @@ export default function App() {
               local={state.local}
               onSet={setConfig}
               onOpenSettings={(tab) => tab === '__palette' ? setPalette(true) : setSheet(tab ?? 'model')}
+              onEscalate={(harder) => client?.escalate(session.id, harder)}
+              onDeescalate={() => client?.deescalate(session.id)}
             />
           }
           onSend={(text, attachments, refs) => {
@@ -653,6 +655,8 @@ export default function App() {
             ? client.fileUrl(session.id, session.file.root ?? session.workspace, session.file.path)
             : null}
           onInterrupt={() => { dispatch({ t: 'stopping', id: session.id }); client?.interrupt(session.id) }}
+          onEscalate={session.status?.policy?.policy === 'local-first' ? () => client?.escalate(session.id) : undefined}
+          escalated={session.status?.policy?.tier === 'escalated'}
           onMode={(m) => client?.setMode(session.id, m)}
           onDecide={(d) => session.approval && client?.approve(session.id, session.approval.token, d)}
           onAnswer={(a) => {
@@ -706,7 +710,7 @@ export default function App() {
   )
 }
 
-function SessionView({ s, controls, banner, profile, local, railOpen, onRailResize, railResizing, onSend, onInterrupt, onMode, onCommands, onLoadJournal, onDecide, approvalIsTop, onAnswer, onDismissAsk, onStopServer, onManageKey, onManageLocal, onHideRail, onShowRail, onTermRun, onTermInterrupt, onTermClear, onCloseFile, onMention, onNeedFiles, onOpenRef, fileUrl }: {
+function SessionView({ s, controls, banner, profile, local, railOpen, onRailResize, railResizing, onSend, onInterrupt, onEscalate, escalated, onMode, onCommands, onLoadJournal, onDecide, approvalIsTop, onAnswer, onDismissAsk, onStopServer, onManageKey, onManageLocal, onHideRail, onShowRail, onTermRun, onTermInterrupt, onTermClear, onCloseFile, onMention, onNeedFiles, onOpenRef, fileUrl }: {
   s: SessionState
   controls: React.ReactNode
   /** App-level notices and the local download banner, above the transcript. */
@@ -719,6 +723,8 @@ function SessionView({ s, controls, banner, profile, local, railOpen, onRailResi
   onOpenRef: (path: string) => void
   fileUrl: string | null
   onInterrupt: () => void
+  onEscalate?: () => void
+  escalated?: boolean
   onMode: (m: Mode) => void
   onCommands: () => void
   onLoadJournal: () => void
@@ -850,7 +856,7 @@ function SessionView({ s, controls, banner, profile, local, railOpen, onRailResi
                 return (
                   <div className="turn-foot" key={m.id} id={`m-${m.id}`}>
                     {m.model} · {m.hops} hop{m.hops === 1 ? '' : 's'} · {m.tokens.toLocaleString()} tok ·
-                    {' '}{m.local && m.cost === 0 ? 'free · local' : `${m.estimated ? '~' : ''}$${m.cost.toFixed(6)}${m.local ? ' · partly local' : ''}`} · {m.elapsed.toFixed(1)}s
+                    {' '}{m.local && m.cost === 0 ? 'free · local' : `${m.estimated ? '~' : ''}$${m.cost.toFixed(6)}${m.local ? ' · partly local' : ''}`}{m.escalated ? ` · escalated to ${m.escalated.split('/').pop()}` : ''} · {m.elapsed.toFixed(1)}s
                   </div>
                 )
             }
@@ -866,6 +872,8 @@ function SessionView({ s, controls, banner, profile, local, railOpen, onRailResi
           controls={controls}
           onSend={onSend}
           onInterrupt={onInterrupt}
+          onEscalate={onEscalate}
+          escalated={escalated}
           onMode={onMode}
           onCommands={onCommands}
           fileIndex={s.fileIndex}

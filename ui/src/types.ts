@@ -37,6 +37,7 @@ export const Ev = {
   NOTICE: 'notice',
   ERROR: 'error',
   COMPACTED: 'compacted',
+  POLICY_CHANGED: 'policy.changed',
   ENGINE_READY: 'engine.ready',
   HISTORY: 'history',
   CHAT_CLEARED: 'chat.cleared',
@@ -53,6 +54,8 @@ export const Req = {
   APPROVAL_RESPONSE: 'approval.response',
   ASK_RESPONSE: 'ask.response',
   SET_MODE: 'set.mode',
+  ESCALATE: 'escalate',
+  DEESCALATE: 'deescalate',
   SET_MODEL: 'set.model',
   SET_STYLE: 'set.style',
   OPEN_WORKSPACE: 'open.workspace',
@@ -127,7 +130,7 @@ export type Msg =
   | { kind: 'assistant'; id: string; text: string; streaming?: boolean; model?: string }
   | { kind: 'tool'; id: string; card: ToolCard }
   | { kind: 'notice'; id: string; level: string; text: string; detail?: any }
-  | { kind: 'turn'; id: string; cost: number; tokens: number; elapsed: number; model: string; hops: number; estimated?: boolean; local?: boolean }
+  | { kind: 'turn'; id: string; cost: number; tokens: number; elapsed: number; model: string; hops: number; estimated?: boolean; local?: boolean; escalated?: string | null }
   | { kind: 'server'; id: string; url: string; pid: number; port: number; cmd: string; stopped?: boolean }
   | { kind: 'plan'; id: string; plan: Plan }
   | { kind: 'ask'; id: string; ask: Ask; answered?: string[] }
@@ -144,8 +147,19 @@ export type AskQuestion = {
 }
 export type Ask = { token: string; questions: AskQuestion[] }
 
+export type PolicyInfo = {
+  policy: 'local-first' | 'cloud-auto' | 'pinned'
+  tier: 'local' | 'cloud_fallback' | 'cloud_auto' | 'pinned' | 'escalated'
+  escalation_model: string | null
+  audit_model: string | null
+  /** The model an escalation is on, or will be on next turn. */
+  escalated: string | null
+  escalated_reason: string | null
+  escalation_pending: boolean
+}
+
 export type Status = {
-  model: string; mode: Mode; route_mode: string; session_cost: number
+  model: string; mode: Mode; policy?: PolicyInfo; session_cost: number
   session_tokens: number; workspace: string; busy: boolean
   /** The turn IN FLIGHT: the model a hop actually ran on (the gateway or a
    *  local pin may differ from `model`), and the spend so far. Session
