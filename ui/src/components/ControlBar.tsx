@@ -53,6 +53,7 @@ export function ControlBar({ status, settings, catalog, local, routeExplain, onS
   const localId = row?.resolves_to ?? model
   const localJob = local?.jobs.find((j) => j.kind === 'model' && j.target === localId) ?? null
   const localInstalled = !!local?.models.find((m) => m.id === localId)?.installed
+  const localName = local?.models.find((m) => m.id === localId)?.label ?? shortModel(localId)
   const shownModel = turnModel
     ?? (routing ? (routeMode === 'auto' ? 'Gateway picks' : 'Router picks') : model)
   // Session totals only advance when a turn ENDS, so the in-flight turn has
@@ -77,7 +78,8 @@ export function ControlBar({ status, settings, catalog, local, routeExplain, onS
           <span className="ctl-value">
             {pending ? (routeMode === 'auto' ? 'Auto routing' : 'Smart routing')
               : isLocal && !turnModel && localJob ? `Local (${Math.round((100 * localJob.bytes) / Math.max(localJob.total, 1))}%)`
-              : isLocal && !turnModel && !localInstalled && local ? 'Local (not ready)'
+              : isLocal && !turnModel && !localInstalled && local ? 'Local (download needed)'
+              : isLocal && !turnModel ? `Local · ${shortModel(localId)}`
               : shortModel(shownModel)}
           </span>
           {routedAway && <span className="ctl-flag" title="chosen by the router">routed</span>}
@@ -89,7 +91,7 @@ export function ControlBar({ status, settings, catalog, local, routeExplain, onS
 
             {!routing && (
               <div className="pinned-model">
-                <span className="pinned-name" title={model}>{shortModel(model)}</span>
+                <span className="pinned-name" title={isLocal ? localId : model}>{isLocal ? localName : shortModel(model)}</span>
                 <span className="pinned-price">
                   {isLocal ? 'free · on this machine'
                     : row ? <>{fmtUsd(inPrice)} in · {fmtUsd(pricePerM(row, 'completion'))} out, per 1M</>

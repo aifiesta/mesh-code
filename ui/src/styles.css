@@ -2433,3 +2433,15 @@ body.resizing .rail-resize { pointer-events: auto; }
 .app-notice { display: flex; align-items: center; gap: 10px; }
 .app-notice .link { margin-left: auto; color: var(--ink-3); font-size: var(--t-xs); }
 .empty .local-card, .empty .app-notice { text-align: left; margin-top: 18px; }
+
+.chat > .local-card.compact, .chat > .app-notice { margin: 0 26px 8px; }
+.local-card.compact { padding: 8px 14px 6px; }
+.local-card.compact .local-head { margin-bottom: 2px; }
+.local-card.compact .local-bar { margin: 6px 0 4px; }
+.local-card.compact .local-actions { margin-top: 4px; }
+.local-card.compact .local-actions .btn { padding: 3px 10px; font-size: var(--t-xs); }
+
+.notice.info.app-notice { background: var(--ok-film); color: var(--ok); }
+.app-notice > span { flex: 1; min-width: 0; }
+.app-notice .link { flex: none; padding: 2px 8px; border-radius: var(--r-xs); color: inherit; opacity: .75; }
+.app-notice .link:hover { opacity: 1; background: rgba(0, 0, 0, .06); }
