@@ -60,6 +60,12 @@ catalog usable instead of overwhelming:
   the code for free, and a strong cloud model (Sonnet 5.5, then Opus 5.5,
   GPT-6.1 Sol, Gemini 4 Argon) takes over a stuck turn on evidence or when
   you press **Escalate**, then hands back after its share of the turn.
+- **A budget you set** — one monthly cloud limit ($10 by default); today's
+  share is what is left divided by the days left. The bar shows today as a
+  ring, the popover shows Today and This month with what each tier cost.
+  Past the share, cloud work pauses until midnight unless you allow more;
+  past the month, the cloud stops and the local model keeps working. Work
+  on this machine is never counted.
 - **Gateway auto** — or let Mesh's Auto Router pick per prompt, honouring
   the models you have excluded.
 - **Fallback order** — if the primary model fails or is rate-limited, the

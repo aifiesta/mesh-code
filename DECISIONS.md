@@ -183,3 +183,24 @@ in-band gateway error) the current turn continues on the local model with
 the pending nudge intact, and the turn is not summarised as escalated unless
 an escalated hop actually completed. The user's "stay escalated this
 session" choice survives one bad hop; only "Back to local" clears it.
+
+## 2026-10-22 — spend is governed client-side against a monthly limit the user sets; local work never counts
+
+`core/budget.py` keeps a ledger under `~/.mesh-code/budget.json`: one
+monthly limit (default $10), today's share of it (what was left when the day
+began divided by the days left, so a quiet week raises it and a heavy one
+lowers it), and what each cloud tier cost by day and month. There is no
+separate daily setting and no ration of automatic escalations: both were
+extra numbers to tune for one decision, and the share already bounds them. Every cloud hop asks the ledger
+before it starts and records what it cost after; local hops never touch it.
+A cloud hop that is stopped or fails mid-stream may already be billed, so
+its pre-flight estimate is recorded, marked as an estimate. Only one copy of
+the app runs at a time, so two engines never overwrite the ledger; a dev
+build beside the installed app is the one case left uncovered.
+Past the daily share, or on the key's HTTP 402, the escalated tier hands
+back for this turn (a session-sticky escalation tries again next turn) and
+other cloud turns stop with a hold the user can lift for the day; past the month everything
+cloud stops and local keeps working. The control bar shows the day as a
+ring and the detail as two bars, because a number in dollars does not read
+at a glance and a ring does. The gateway's own HTTP 402 is treated as the
+key's cap: a hold until the user says they raised it.

@@ -34,6 +34,14 @@ true, that is a bug — file it against this document.
   sticky per turn or per session.
 - **Gateway auto** — Mesh's Auto Router decides per prompt with a weight
   profile, never picking an excluded model.
+- **Budget** — Settings › Budget: one monthly limit (default $10). Today's
+  share is what was left of the month this morning divided by the days
+  left. The control bar ring fills with today's share (amber at 80%, red
+  when over); its popover shows Today (resets at midnight) and This month
+  (resets on the 1st), the spend by tier, "Allow more today" when held, and
+  "I raised the cap" after a Mesh HTTP 402. A held cloud turn
+  ends with a notice; a held escalation hands back to the local model.
+  Local hops are never counted.
 - The bar is honest about both: with routing on it reads "Auto routing"
   until a hop has actually answered, then shows the real model with a
   `routed` flag.
