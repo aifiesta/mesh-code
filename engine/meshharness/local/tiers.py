@@ -13,6 +13,10 @@ CTX_MIN = 32768   # an agent loop below this re-compacts constantly
 # Metal keeps weights in unified memory; past ~75 % the OS starts paging.
 METAL_WORKING_SET = 0.75
 VRAM_USABLE = 0.9
+# The recommended tier leaves this share of RAM (up to the cap) to the OS and
+# the user's other apps; a 9.5 GB model on an 18 GB laptop swaps otherwise.
+DEFAULT_HEADROOM = 0.375
+DEFAULT_HEADROOM_CAP_GB = 8.0
 
 
 @dataclass
@@ -23,6 +27,8 @@ class TierPlan:
     variant: str
     slow: bool
     reason: str
+    # Fits only by the hard rule: an explicit pick that leaves little for the rest of the machine.
+    tight: bool = False
 
 
 def kv_bytes(model: dict, ctx: int) -> int:
@@ -39,9 +45,16 @@ def footprint(model: dict, ctx: int) -> int:
     return int(model["bytes"]) + kv_bytes(model, ctx) + overhead_bytes(ctx)
 
 
-def fits(model: dict, ctx: int, hw: HardwareProfile, keep_free_gb: float) -> bool:
+def headroom_gb(hw: HardwareProfile, keep_free_gb: float, *, conservative: bool) -> float:
+    if not conservative:
+        return keep_free_gb
+    return max(keep_free_gb, min(hw.ram_gb * DEFAULT_HEADROOM, DEFAULT_HEADROOM_CAP_GB))
+
+
+def fits(model: dict, ctx: int, hw: HardwareProfile, keep_free_gb: float, *,
+         conservative: bool = False) -> bool:
     need = footprint(model, ctx)
-    budget = hw.ram_gb * _GB - keep_free_gb * _GB
+    budget = hw.ram_gb * _GB - headroom_gb(hw, keep_free_gb, conservative=conservative) * _GB
     if hw.gpu.kind == "metal":
         budget = min(budget, hw.ram_gb * _GB * METAL_WORKING_SET)
     return need <= budget
@@ -66,29 +79,34 @@ def gpu_layers(model: dict, ctx: int, hw: HardwareProfile, gpu_setting: str) -> 
 
 
 def choose(manifest: dict, hw: HardwareProfile, *, keep_free_gb: float = 4.0,
-           ctx_override: int | None = None, gpu_setting: str = "auto") -> TierPlan | None:
+           ctx_override: int | None = None, gpu_setting: str = "auto",
+           conservative: bool = True) -> TierPlan | None:
+    """The recommendation is conservative; an explicit pick (`conservative=False`)
+    may use the hard rule and is then marked tight at the minimum context."""
     candidates = sorted(
         (m for m in manifest["models"] if m.get("tool_calls", "native") != "none"),
         key=lambda m: m.get("quality_rank", 0), reverse=True)
     for model in candidates:
-        if not fits(model, CTX_MIN, hw, keep_free_gb):
+        tight = not fits(model, CTX_MIN, hw, keep_free_gb, conservative=True)
+        if tight and (conservative or not fits(model, CTX_MIN, hw, keep_free_gb)):
             continue
         ctx = CTX_MIN
         for step in CTX_LADDER:
-            if step < CTX_MIN:
+            if tight or step < CTX_MIN:
                 continue
             if step > int(model.get("ctx_max") or step):
                 break
             if ctx_override and step > ctx_override:
                 break
-            if fits(model, step, hw, keep_free_gb):
+            if fits(model, step, hw, keep_free_gb, conservative=True):
                 ctx = step
         ngl = gpu_layers(model, ctx, hw, gpu_setting)
+        note = " (tight: little memory left for other apps)" if tight else ""
         return TierPlan(
             model=model, ctx=ctx, ngl=ngl,
             variant=runtime_variant(hw, gpu_setting),
-            slow=ngl < 99,
-            reason=f"{hw.ram_gb:g} GB RAM, {hw.gpu.kind} → {model['label']} at {ctx // 1024}k context",
+            slow=ngl < 99, tight=tight,
+            reason=f"{hw.ram_gb:g} GB RAM, {hw.gpu.kind} → {model['label']} at {ctx // 1024}k context{note}",
         )
     # Nothing fits at the minimum context: offer the smallest model at the
     # smallest context and let the user decide, marked slow.

@@ -196,3 +196,16 @@ def test_a_failed_boot_is_a_permanent_reason(layer, monkeypatch):
     with pytest.raises(manager_mod.LocalUnavailable) as e:
         layer.target_for("local/auto")
     assert e.value.permanent is True and "failed to start" in str(e.value)
+
+
+def test_a_comfortable_installed_model_beats_downloading_the_recommendation(layer, monkeypatch):
+    from types import SimpleNamespace as NS
+    plans = {"local/big": NS(model={"id": "local/big", "quality_rank": 30}, tight=False, slow=False),
+             "local/mid": NS(model={"id": "local/mid", "quality_rank": 20}, tight=False, slow=False),
+             "local/huge": NS(model={"id": "local/huge", "quality_rank": 40}, tight=True, slow=False)}
+    monkeypatch.setattr(layer, "_recommend", lambda: plans["local/big"])
+    monkeypatch.setattr(layer, "_plan_for", lambda mid: plans.get(mid))
+    layer.state["installed"] = {"local/huge": "x"}
+    assert layer.default_id() == "local/big", "a tight install does not stand in for the recommendation"
+    layer.state["installed"] = {"local/huge": "x", "local/mid": "y"}
+    assert layer.default_id() == "local/mid"

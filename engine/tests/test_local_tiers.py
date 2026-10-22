@@ -28,7 +28,7 @@ def _hw(ram, gpu="metal", vram=0.0, driver="", os_="darwin"):
     (8, "local/small", 8192, True),       # nothing fits at 32k: smallest, 8k, marked slow
     (12, "local/small", 32768, False),
     (16, "local/mid", 32768, False),
-    (18, "local/mid", 65536, False),
+    (18, "local/mid", 32768, False),      # 6.75 GB headroom: 64k no longer fits
     (32, "local/big", 32768, False),
     (64, "local/big", 262144, False),
 ])
@@ -99,5 +99,15 @@ def test_bundled_manifest_numbers_give_sane_defaults():
     real = json.loads((Path(tiers.__file__).parent / "manifest.json").read_text())
     plan = tiers.choose(real, _hw(16))
     assert plan.model["id"] == "local/qwen3.5-9b-q4" and plan.ctx >= 32768
+    assert tiers.choose(real, _hw(18)).model["id"] == "local/qwen3.5-9b-q4"   # the Q8 swapped an 18 GB laptop
+    assert tiers.choose(real, _hw(24)).model["id"] == "local/qwen3.5-9b-q8"
     assert tiers.choose(real, _hw(32)).model["id"] == "local/north-mini-code-1.0-q4"
     assert tiers.choose(real, _hw(48)).model["id"] == "local/qwen3.8-27b-q6"
+
+
+def test_an_explicit_bigger_pick_runs_tight_at_the_minimum_context():
+    real = json.loads((Path(tiers.__file__).parent / "manifest.json").read_text())
+    q8 = {"runtime": real["runtime"], "models": [m for m in real["models"] if m["id"] == "local/qwen3.5-9b-q8"]}
+    plan = tiers.choose(q8, _hw(18), conservative=False)
+    assert plan is not None and plan.tight and plan.ctx == tiers.CTX_MIN and "tight" in plan.reason
+    assert not tiers.choose(q8, _hw(24), conservative=False).tight

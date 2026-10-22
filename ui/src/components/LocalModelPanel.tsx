@@ -55,6 +55,7 @@ export function LocalModelPanel({ local, onInstall, onCancel, onDelete, onSetDef
                 {m.recommended && <span className="tag now">recommended</span>}
                 {m.installed && <span className="tag think">installed</span>}
                 {m.slow && <span className="tag beta">slow here</span>}
+                {m.tight && <span className="tag never" title="Fits, but leaves little memory for everything else">tight</span>}
                 {!m.fits && <span className="tag never">too big</span>}
               </span>
               <span className="num">{fmtBytes(m.bytes)}</span>
