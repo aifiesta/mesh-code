@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import type { CatalogModel, SettingsDoc } from '../types'
+import type { CatalogModel, LocalStatus, SettingsDoc } from '../types'
 import { Field } from './Field'
+import type { SettingSpec } from '../types'
+import { LocalModelPanel } from './LocalModelPanel'
 import { ModelBrowser } from './ModelBrowser'
 
 /**
@@ -12,15 +14,25 @@ import { ModelBrowser } from './ModelBrowser'
  * you smart mode exists. Hiding them just makes the feature invisible again,
  * which is the problem this whole screen is meant to solve.
  */
-export function SettingsSheet({ settings, catalog, error, onSet, onClose, onRefreshCatalog }: {
+export function SettingsSheet({ settings, catalog, local, localActions, notices, onDismissNotice, error, onSet, onClose, onRefreshCatalog, initialTab }: {
   settings: SettingsDoc | null
   catalog: CatalogModel[]
+  local: LocalStatus | null
+  localActions: {
+    install: (model: string) => void; cancel: (job: string) => void; remove: (model: string) => void
+    setDefault: (model: string) => void; server: (action: 'stop' | 'restart') => void; refresh: () => void
+  }
+  /** App-level notices: local-layer failures land here while the sheet is open. */
+  notices: { id: string; level: string; text: string }[]
+  onDismissNotice: (id: string) => void
   error: { key: string; message: string } | null
   onSet: (key: string, value: any) => void
   onClose: () => void
   onRefreshCatalog: (force?: boolean) => void
+  initialTab?: string
 }) {
-  const [tab, setTab] = useState<string>(settings?.categories[0]?.id ?? 'model')
+  const [tab, setTab] = useState<string>(initialTab ?? settings?.categories[0]?.id ?? 'model')
+  useEffect(() => { if (initialTab) setTab(initialTab) }, [initialTab])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -65,6 +77,12 @@ export function SettingsSheet({ settings, catalog, error, onSet, onClose, onRefr
   const met = (dep?: Record<string, any>) =>
     !dep || Object.entries(dep).every(([k, v]) =>
       settings.settings.find((s) => s.key === k)?.value === v)
+  const depText = (doc: SettingsDoc, dep?: Record<string, any>) =>
+    Object.entries(dep ?? {}).map(([k, v]) => {
+      const spec = doc.settings.find((s) => s.key === k)
+      const opt = spec?.options?.find((o) => o.value === v)
+      return `${spec?.label ?? k} is ${opt?.label ?? String(v)}`
+    }).join(' and ')
 
   return (
     <div className="modal-scrim" onClick={onClose}>
@@ -87,6 +105,12 @@ export function SettingsSheet({ settings, catalog, error, onSet, onClose, onRefr
               <strong>{error.key}</strong> — {error.message}
             </div>
           )}
+          {notices.map((n) => (
+            <div className={`sheet-error ${n.level}`} key={n.id}>
+              {n.text}
+              <button className="link" onClick={() => onDismissNotice(n.id)}>Dismiss</button>
+            </div>
+          ))}
 
           {tab === 'model' && (
             <ModelBrowser
@@ -97,23 +121,68 @@ export function SettingsSheet({ settings, catalog, error, onSet, onClose, onRefr
               onExclude={(id) => onSet('exclude_models', [...excluded, id])}
               onUnexclude={(id) => onSet('exclude_models', excluded.filter((x) => x !== id))}
               onRefresh={() => onRefreshCatalog(true)}
+              onInstall={localActions.install}
             />
           )}
 
+          {tab === 'local' && (
+            local
+              ? <LocalModelPanel
+                  local={local}
+                  onInstall={localActions.install}
+                  onCancel={localActions.cancel}
+                  onDelete={localActions.remove}
+                  onSetDefault={localActions.setDefault}
+                  onServer={localActions.server}
+                  onRefresh={localActions.refresh}
+                />
+              : <p className="sheet-blurb">The local model layer has not reported yet.</p>
+          )}
+
           {inTab
-            .filter((s) => s.type !== 'model')
+            .filter((s) => s.key !== 'model' && s.key !== 'local_model')
             .map((s) => (
               <div key={s.key} className={met(s.depends_on) ? '' : 'field-muted'}>
-                <Field spec={s} onChange={onSet} />
+                {s.type === 'model'
+                  ? <CloudModelField spec={s} catalog={catalog} onChange={onSet} />
+                  : <Field spec={s} onChange={onSet} />}
                 {!met(s.depends_on) && (
                   <p className="field-dep">
-                    Applies when routing is set to Smart.
+                    Applies when {depText(settings, s.depends_on)}.
                   </p>
                 )}
               </div>
             ))}
         </div>
       </div>
+    </div>
+  )
+}
+
+/** A model-typed setting other than the pinned one: a plain picker over the
+ *  cloud catalog (local rows are not cloud fallbacks). */
+function CloudModelField({ spec, catalog, onChange }: {
+  spec: SettingSpec
+  catalog: CatalogModel[]
+  onChange: (key: string, value: any) => void
+}) {
+  const value = String(spec.value ?? spec.default ?? '')
+  const ids = catalog.filter((m) => !m.local).map((m) => String(m.id)).sort()
+  if (value && !ids.includes(value)) ids.unshift(value)
+  const none = value === '' || spec.default === ''
+  return (
+    <div className="field">
+      <div className="field-head">
+        <label htmlFor={`f-${spec.key}`}>{spec.label}</label>
+      </div>
+      {spec.help && <p className="field-help">{spec.help}</p>}
+      <div className="field-control">
+        <select id={`f-${spec.key}`} value={value} onChange={(e) => onChange(spec.key, e.target.value)}>
+          {none && <option value="">No fallback (fail instead)</option>}
+          {ids.map((id) => <option key={id} value={id}>{id}</option>)}
+        </select>
+      </div>
+      {spec.why && <p className="field-why">{spec.why}</p>}
     </div>
   )
 }

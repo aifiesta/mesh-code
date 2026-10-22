@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { Plan, Profile } from '../types'
+import type { LocalStatus, Plan, Profile } from '../types'
 import { Chevron } from './Chevron'
 import { PlanPanel } from './PlanPanel'
 import { ServerPanel } from './ServerPanel'
@@ -48,17 +48,19 @@ function TabIcon({ tab }: { tab: Tab }) {
  * that is the one moment where the thing you want to look at is definitely
  * not the plan. It never steals focus again after that.
  */
-export function Rail({ plan, servers, profile, sessionCost, sessionTokens,
-                      onStopServer, onManageKey, onHide, terminal,
+export function Rail({ plan, servers, profile, local, sessionCost, sessionTokens,
+                      onStopServer, onManageKey, onManageLocal, onHide, terminal,
                       journal, onLoadJournal, onResize, resizing,
                       file, fileUrl, onCloseFile, onMention }: {
   plan: Plan | null
   servers: { pid: number; port: number; url: string; cmd: string }[]
   profile: Profile | null
+  local: LocalStatus | null
   sessionCost: number
   sessionTokens: number
   onStopServer: (pid: number) => void
   onManageKey: () => void
+  onManageLocal: () => void
   onHide: () => void
   onResize: (e: React.PointerEvent) => void
   resizing: boolean
@@ -209,9 +211,11 @@ export function Rail({ plan, servers, profile, sessionCost, sessionTokens,
         {tab === 'profile' && (
           <ProfilePanel
             profile={profile}
+            local={local}
             sessionCost={sessionCost}
             sessionTokens={sessionTokens}
             onManageKey={onManageKey}
+            onManageLocal={onManageLocal}
           />
         )}
       </div>

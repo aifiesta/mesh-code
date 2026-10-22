@@ -20,7 +20,7 @@ const RENDER_CAP = 200
  * adds it to the router's exclude list — which the CLI could only ever build
  * implicitly, by blacklisting a model after it failed mid-session.
  */
-export function ModelBrowser({ catalog, current, excluded, onPick, onExclude, onUnexclude, onRefresh }: {
+export function ModelBrowser({ catalog, current, excluded, onPick, onExclude, onUnexclude, onRefresh, onInstall }: {
   catalog: CatalogModel[]
   current: string
   excluded: string[]
@@ -29,6 +29,8 @@ export function ModelBrowser({ catalog, current, excluded, onPick, onExclude, on
   onUnexclude: (id: string) => void
   /** Ask the engine to refetch the gateway's list (new models, new prices). */
   onRefresh: () => void
+  /** Download a local model that is listed but not on disk yet. */
+  onInstall: (id: string) => void
 }) {
   const [q, setQ] = useState('')
   const [refreshing, setRefreshing] = useState(false)
@@ -70,11 +72,11 @@ export function ModelBrowser({ catalog, current, excluded, onPick, onExclude, on
       return String(a.id).localeCompare(String(b.id))
     }
 
-    // With a query, match quality leads and the chosen sort breaks ties —
-    // a cheap model that barely matches should never outrank an exact one.
-    // With no query it is a plain browse, so the sort takes over entirely.
+    // With a query, match quality leads and the sort breaks ties; a plain
+    // browse is sorted, with the free local rows first.
+    const localFirst = (a: CatalogModel, b: CatalogModel) => Number(!!b.local) - Number(!!a.local)
     return [...hits].sort((x, y) =>
-      (q.trim() ? x.match.rank - y.match.rank : 0) || byField(x.item, y.item))
+      (q.trim() ? x.match.rank - y.match.rank : 0) || localFirst(x.item, y.item) || byField(x.item, y.item))
   }, [catalog, q, sort, freeOnly, toolsOnly])
 
   return (
@@ -127,8 +129,9 @@ export function ModelBrowser({ catalog, current, excluded, onPick, onExclude, on
           const off = excluded.includes(id)
           return (
             <div className={`browser-row ${id === current ? 'current' : ''} ${off ? 'off' : ''}`} key={id}>
-              <span className="m-id" title={id}>
+              <span className="m-id" title={m.local && m.name ? `${id} — ${m.name}` : id}>
                 <Highlight text={id} positions={match.positions} />
+                {m.local && <span className="tag local" title="Runs on this machine, free">{m.installed ? 'local' : 'not downloaded'}</span>}
                 {m.supports_thinking && <span className="tag think" title="Supports a reasoning budget">think</span>}
                 {id === current && <span className="tag now">in use</span>}
                 {off && <span className="tag never">never</span>}
@@ -137,10 +140,12 @@ export function ModelBrowser({ catalog, current, excluded, onPick, onExclude, on
               <span className="num">{fmtUsd(pricePerM(m, 'prompt'))}</span>
               <span className="num">{fmtUsd(pricePerM(m, 'completion'))}</span>
               <span className="m-actions">
-                {id !== current && <button className="use" onClick={() => onPick(id)}>Use</button>}
-                {off
+                {m.local && !m.installed
+                  ? <button className="use" onClick={() => onInstall(m.resolves_to ?? id)}>Install</button>
+                  : id !== current && <button className="use" onClick={() => onPick(id)}>Use</button>}
+                {!m.local && (off
                   ? <button onClick={() => onUnexclude(id)}>Allow</button>
-                  : <button className="danger" onClick={() => onExclude(id)}>Never</button>}
+                  : <button className="danger" onClick={() => onExclude(id)}>Never</button>)}
               </span>
             </div>
           )

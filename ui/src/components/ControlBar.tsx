@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import { useDismissable } from '../useDismissable'
-import type { RouteExplain, SettingSpec, SettingsDoc, Status } from '../types'
+import type { LocalStatus, RouteExplain, SettingSpec, SettingsDoc, Status } from '../types'
 import { fmtTokens, fmtUsd, pricePerM, type CatalogModel } from '../types'
 import { Field } from './Field'
 
@@ -15,10 +15,11 @@ import { Field } from './Field'
  * Every popover ends with the same escape hatch to the full settings, so the
  * bar teaches that more exists without having to show it.
  */
-export function ControlBar({ status, settings, catalog, routeExplain, onSet, onOpenSettings, onExplain }: {
+export function ControlBar({ status, settings, catalog, local, routeExplain, onSet, onOpenSettings, onExplain }: {
   status: Status | null
   settings: SettingsDoc | null
   catalog: CatalogModel[]
+  local: LocalStatus | null
   routeExplain: RouteExplain | null
   onSet: (key: string, value: any) => void
   onOpenSettings: (tab?: string) => void
@@ -50,6 +51,10 @@ export function ControlBar({ status, settings, catalog, routeExplain, onSet, onO
   // wrong — the router has not chosen, and it usually will not choose that
   // one. Name what DECIDES until there is a real answer to show.
   const pending = routing && !turnModel
+  const isLocal = model.startsWith('local/')
+  const localId = row?.resolves_to ?? model
+  const localJob = local?.jobs.find((j) => j.kind === 'model' && j.target === localId) ?? null
+  const localInstalled = !!local?.models.find((m) => m.id === localId)?.installed
   const shownModel = turnModel
     ?? (routing ? (routeMode === 'auto' ? 'Gateway picks' : 'Router picks') : model)
   // Session totals only advance when a turn ENDS, so the in-flight turn has
@@ -75,9 +80,13 @@ export function ControlBar({ status, settings, catalog, routeExplain, onSet, onO
                   : routedAway ? `Routed to ${turnModel} (pinned: ${model})` : shownModel}>
           <span className="ctl-label">Model</span>
           <span className="ctl-value">
-            {pending ? (routeMode === 'auto' ? 'Auto routing' : 'Smart routing') : shortModel(shownModel)}
+            {pending ? (routeMode === 'auto' ? 'Auto routing' : 'Smart routing')
+              : isLocal && !turnModel && localJob ? `Local (${Math.round((100 * localJob.bytes) / Math.max(localJob.total, 1))}%)`
+              : isLocal && !turnModel && !localInstalled && local ? 'Local (not ready)'
+              : shortModel(shownModel)}
           </span>
           {routedAway && <span className="ctl-flag" title="chosen by the router">routed</span>}
+          {(status?.turn_local || (isLocal && !turnModel && localInstalled)) && <span className="tag local" title="Runs on this machine, free">local</span>}
         </button>
         {open === 'model' && (
           <Pop title="Model" onSettings={() => { setOpen(null); onOpenSettings(routing ? 'routing' : 'model') }}>
@@ -87,8 +96,9 @@ export function ControlBar({ status, settings, catalog, routeExplain, onSet, onO
               <div className="pinned-model">
                 <span className="pinned-name" title={model}>{shortModel(model)}</span>
                 <span className="pinned-price">
-                  {row ? <>{fmtUsd(inPrice)} in · {fmtUsd(pricePerM(row, 'completion'))} out, per 1M</>
-                       : 'Pricing loads with the catalog.'}
+                  {isLocal ? 'free · on this machine'
+                    : row ? <>{fmtUsd(inPrice)} in · {fmtUsd(pricePerM(row, 'completion'))} out, per 1M</>
+                         : 'Pricing loads with the catalog.'}
                 </span>
                 <button className="btn subtle" onClick={() => { setOpen(null); onOpenSettings('model') }}>
                   Change model
@@ -158,7 +168,9 @@ export function ControlBar({ status, settings, catalog, routeExplain, onSet, onO
               <div><dt>Rate</dt><dd>{fmtUsd(inPrice)} / 1M in</dd></div>
             </dl>
             <p className="pop-note">
-              {estimated
+              {status?.turn_local && (status.turn_cost ?? 0) === 0
+                ? 'This turn ran on your machine — nothing was billed.'
+                : estimated
                 ? 'Marked ~ because this model reported no cost, so this is '
                   + 'computed from the catalog’s own per-token rates.'
                 : cost <= 0 && tokens > 0

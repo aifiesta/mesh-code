@@ -12,8 +12,12 @@ import { Wordmark } from './Logo'
  * The key is verified against the gateway before it is saved, so a typo
  * fails here rather than on the first prompt.
  */
-export function KeyGate({ variant = 'gate', error, resultAt, hint, source, onSave, onClear, onClose }: {
+export function KeyGate({ variant = 'gate', error, resultAt, hint, source, onSave, onClear, onClose, below, onContinueLocal }: {
   variant?: 'gate' | 'modal'
+  /** Rendered under the card on the first-run gate: the local model setup. */
+  below?: React.ReactNode
+  /** Offered when a local model is installed: use the app with no key at all. */
+  onContinueLocal?: () => void
   error: string | null
   /** Bumped whenever ANY key.result lands — success or failure. */
   resultAt?: number
@@ -93,6 +97,12 @@ export function KeyGate({ variant = 'gate', error, resultAt, hint, source, onSav
         </button>
       </div>
 
+      {variant === 'gate' && onContinueLocal && (
+        <button className="btn ghost wide" onClick={onContinueLocal}>
+          Continue with the local model only
+        </button>
+      )}
+
       <p className="fine">
         Get a key at <a href="https://app.meshapi.ai" target="_blank" rel="noreferrer noopener">app.meshapi.ai</a>.
         It is stored locally with owner-only permissions and is only ever sent
@@ -107,5 +117,5 @@ export function KeyGate({ variant = 'gate', error, resultAt, hint, source, onSav
       <div onClick={(e) => e.stopPropagation()}>{card}</div>
     </div>
   }
-  return <div className="gate">{card}</div>
+  return <div className="gate"><div className="gate-stack">{card}{below}</div></div>
 }
