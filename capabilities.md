@@ -26,15 +26,13 @@ true, that is a bug — file it against this document.
 
 - **Pinned model** — pick any model from the live catalog; fuzzy-searchable
   browser with per-1M pricing and context length.
-- **Smart routing (local)** — a bundled table classifies each prompt
-  (cohort + difficulty) and picks per turn, zero extra tokens; the bar
-  explains what it would pick and why before you spend anything.
-- **Gateway auto** — Mesh's upstream Auto Router decides.
-- The bar is honest about all three: with routing on it reads
-  "Router picks"/"Gateway picks" until a hop has actually answered, then
-  shows the real model with a `ROUTED` tag.
-- Effort dial, model exclusions, fallback models, output style, reasoning
-  effort — all in Settings (⌘,) and the ⌘K palette.
+- **Gateway auto** — Mesh's Auto Router decides per prompt, never picking
+  an excluded model.
+- The bar is honest about both: with routing on it reads "Auto routing"
+  until a hop has actually answered, then shows the real model with a
+  `routed` flag.
+- Model exclusions, fallback models, output style, reasoning effort — all
+  in Settings (⌘,) and the ⌘K palette.
 
 ## Cost & usage
 
@@ -84,8 +82,7 @@ true, that is a bug — file it against this document.
 
 - ⌘K palette: every setting expanded to one runnable action per option,
   grouped with sticky headers, matched against the engine's own help text
-  (typing "cheap" finds token savings), fuzzy abbreviations (`rtsm` →
-  Routing: Smart).
+  fuzzy abbreviations (`rtga` → Routing: Gateway auto).
 - "/" in an empty composer opens the palette; ⏎ sends, ⇧⏎ newline; typing
   while the agent works queues the message for the next turn.
 - Images paste/drop/attach into the composer (multimodal).

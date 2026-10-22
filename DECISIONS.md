@@ -135,3 +135,16 @@ manifest. Hugging Face exposes every LFS file's sha256 and size through its
 tree API, so model pins are refreshed without downloading gigabytes. Either
 can be re-pinned and shipped through the remote manifest without an app
 build.
+
+## 2026-10-22 — the local router and the token-savings dial are removed in favour of Mesh Auto Routing
+
+The CLI's bundled routing table picked a model per prompt and climbed an
+effort ladder within a turn; the optimize dial pruned re-sent context.
+Neither has a gateway equivalent, both duplicated what Mesh does server-side
+(Auto Routing with weight profiles and exclusions, provider prompt caching),
+and the table went stale every month. `route_mode` stays as off | auto until
+the policy PR replaces it with a policy, so settings keep validating in
+between. The refusal and claimed-work checks live on in `core/verify.py`:
+they are the cheapest audit triggers there are, so a weak reply is recorded
+per turn now and acted on once the auditor exists. The old `route` key
+(cheapest/fastest/balanced, pre-0.5.0) is still dropped on load.

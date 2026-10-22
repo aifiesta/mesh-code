@@ -4,7 +4,7 @@
 
 The `meshapi` CLI is ~10k lines. About 6k of that is an agent engine worth
 keeping: a streaming client that repairs malformed tool-call deltas from
-misbehaving providers, a local routing table, repo memory, context
+misbehaving providers, repo memory, context
 compaction, safety gates. The other ~4k is a terminal — `prompt_toolkit`
 key bindings, `rich` live regions, a REPL.
 
@@ -104,12 +104,14 @@ Kept deliberately small, so fixes can still flow between the CLI and here:
 | `tools.py` | `execute()` / `build_system_prompt()` take `cwd` | Same reason. Also: prompt text that described a terminal now describes a window. |
 | `config.py` | own config home; reads the CLI's credentials; raises instead of `sys.exit()` | This process serves every open window and must not die over one bad setting. |
 | `plan.py` | `to_dict()` replaces `render()` | The plan used to draw itself with `rich` markup — precisely the coupling that made a second frontend impossible. |
+| `client.py` | one request per hop, a per-hop `Target`, `exclude_models` with `model: "auto"` | The CLI's optimized-attempt retry went with its optimize levers; local hops need their own endpoint and timeouts. |
+| `memory.py` | `dedupe_read(state, path)` | The pruning lever it guarded against is gone. |
 
-`router.py`, `optimize.py`, `loopguard.py` and `styles.py` are the CLI's
-byte-for-byte; `memory.py` differs only in docstring paths. `client.py`,
-`compact.py` and `pricing.py` carry fixes made here (streamed tool-call
-repair, the compaction transcript pointer, billed-cost lookup) that have
-not flowed back to the CLI yet.
+`loopguard.py` and `styles.py` are the CLI's byte-for-byte. `compact.py` and
+`pricing.py` carry fixes made here (the compaction transcript pointer,
+billed-cost lookup) that have not flowed back to the CLI yet. The CLI's local
+routing table and optimize levers were dropped in favour of Mesh's own auto
+routing and prompt caching.
 
 ## What was rebuilt rather than ported
 
@@ -141,8 +143,8 @@ a settings screen drifts away from what the engine actually does. So instead
   "key": "route_mode", "type": "enum", "label": "Routing",
   "options": [...],
   "help": "Who chooses the model for each prompt.",
-  "why":  "Smart routing spends less on easy prompts and reaches for a "
-          "stronger model on hard ones, deciding locally in microseconds.",
+  "why":  "Auto spends less on easy prompts and reaches for a stronger "
+          "model on hard ones; a local pin is never routed.",
 }
 ```
 
@@ -160,18 +162,15 @@ Two details that matter more than they look:
 - **`why` is not filler.** Most of these dials are only worth touching if you
   know what they cost you. That sentence is the difference between a
   discoverable feature and a mystery toggle.
-- **Unmet dependencies are dimmed, not hidden.** The routing weights only
-  apply in smart mode, but hiding them makes the feature invisible again —
-  which is the problem the whole screen exists to solve.
-
-`route.preview` answers "which model would you pick, and why?" *before* the
-turn runs. The CLI could only answer that after the fact with `/route why`.
+- **Unmet dependencies are dimmed, not hidden.** A setting that only
+  applies under another setting's value stays visible, greyed, with the
+  condition spelled out — hiding it makes the feature invisible again.
 
 ## Why the engine is a frozen binary
 
 Mesh Code must install on a machine with no Python, no Node and no `meshapi`
 CLI. Electron brings its own Node; `packaging/engine.spec` freezes the engine
-— interpreter, dependencies and the routing table — into one ~28 MB directory
+— interpreter, dependencies and the local-model manifest — into one ~28 MB directory
 that the app bundle carries in `Resources/engine`.
 
 Two things about that freeze are easy to get wrong and were both caught by
@@ -182,10 +181,9 @@ running it rather than reading it:
   "attempted relative import with no known parent package" — the engine dies
   before printing its handshake and the shell reports only that it never
   became ready.
-- **The routing table is DATA.** Import analysis cannot see a `.json`, so it
-  has to be listed in `datas` explicitly. Without it smart routing degrades
-  silently to the pinned model, because routing is designed to fail open —
-  nothing would ever surface the loss.
+- **The local-model manifest is DATA.** Import analysis cannot see a
+  `.json`, so it has to be listed in `datas` explicitly; `verify-dist.sh`
+  checks it was frozen in.
 
 In development `main.js` spawns `python3 -m meshharness.server` instead, so a
 contributor does not re-freeze on every change.
