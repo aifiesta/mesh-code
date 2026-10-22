@@ -719,6 +719,10 @@ async def handle_request(engine: Engine, msg: dict) -> None:
             s.set_mode(mode_from_str(msg.get("mode") or "default"))
         elif kind == Request.SET_MODEL:
             s.set_model(msg.get("model") or s.cfg.get("model"))
+        elif kind == Request.ESCALATE:
+            s.escalate(harder=bool(msg.get("harder")))
+        elif kind == Request.DEESCALATE:
+            s.deescalate()
         elif kind == Request.SET_STYLE:
             s.update_cfg(output_style=msg.get("style", "default"))
         elif kind == Request.LIST_DIR:

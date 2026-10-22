@@ -217,9 +217,9 @@ def test_a_permanent_reason_is_said_once_per_session_not_per_turn(harness, gatew
     assert len(gateway.requests) == 2
 
 
-def test_gateway_auto_routing_never_touches_a_local_pin(harness, llama):
+def test_local_first_never_sends_auto_to_the_local_server(harness, llama):
     llama.script(sse_turn("local answer"))
-    h = harness(model="local/auto", local=StubLocal(llama), route_mode="auto", exclude_models=["x/y"])
+    h = harness(model="local/auto", local=StubLocal(llama), policy="local-first", exclude_models=["x/y"])
     h.session.submit("refactor the whole architecture of this large codebase")
     fin = h.wait_for(Event.TURN_FINISHED)
     sent = llama.requests[-1]

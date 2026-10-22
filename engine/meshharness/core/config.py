@@ -81,8 +81,15 @@ DEFAULT_CONFIG = {
     "max_hops": 0,
     "auto_compact": True,
     "stall_policy": "pause",
-    # "off" pins `model`; "auto" sends model:"auto" so the gateway picks.
-    "route_mode": "off",
+    # Who writes: the local model with cloud audit/escalation, Mesh's
+    # auto router, or the pinned `model`.
+    "policy": "local-first",
+    "escalation_model": "",        # empty = the shipped chain's first
+    "escalation_fallbacks": [],
+    "escalation_effort": "high",
+    "auto_escalate": True,
+    "escalation_sticky": "turn",
+    "weight_profile": "balanced",  # cloud-auto only
     # How the assistant writes (prose only — never tool access or scope).
     "output_style": "default",
     # Last version whose "what's new" line was shown (see whatsnew.py).
@@ -234,12 +241,9 @@ def load_config() -> dict:
         )
         loaded = {}
     cfg = {**DEFAULT_CONFIG, **loaded}
-    # Keys outside the schema leave the file on save; an unknown route
-    # mode means pinned.
+    # Keys outside the schema leave the file on save.
     for gone in ("route_weights", "route_effort", "optimize"):
         cfg.pop(gone, None)
-    if cfg.get("route_mode") not in ("off", "auto"):
-        cfg["route_mode"] = "off"
     # A hand-edited or stale output_style must degrade to default rather
     # than silently injecting nothing while the UI claims a style is on.
     from . import styles as _styles
@@ -271,7 +275,28 @@ def load_config() -> dict:
     migrated = None if corrupt else _migrate_to_local(cfg, loaded)
     if migrated:
         cfg["_migrated_to_local"] = migrated   # runtime-only: the one-time notice
+    if not corrupt:
+        _migrate_policy(cfg, loaded)
     return cfg
+
+
+def _migrate_policy(cfg: dict, loaded: dict) -> None:
+    """route_mode becomes policy: gateway auto stays auto, a local pin is
+    local-first, a cloud pin is pinned."""
+    route_mode = cfg.pop("route_mode", None)
+    if "policy" in loaded:
+        return
+    model = str(cfg.get("model") or "")
+    cfg["policy"] = ("cloud-auto" if route_mode == "auto"
+                     else "local-first" if model.startswith("local/") else "pinned")
+    # local-first always asks for local/auto: a hand-picked local model becomes the pick.
+    if model.startswith("local/") and model != "local/auto" and not cfg.get("local_model"):
+        cfg["local_model"] = model
+    if loaded:
+        try:
+            save_config(cfg)
+        except OSError:
+            pass
 
 
 def _migrate_to_local(cfg: dict, loaded: dict) -> "str | None":

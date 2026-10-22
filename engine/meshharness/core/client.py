@@ -133,7 +133,9 @@ def build_payload(messages: list, cfg: dict, tools: Optional[list] = None,
     Pure function (unit-testable without a network). Mesh extensions:
       - auto_route  -> model:"auto" (gateway Auto Router picks per prompt),
         with exclude_models so the router never picks a banned model
-      - fallback_models -> `models` ordered fallback list
+      - models / fallback_models -> `models` ordered fallback list (a
+        policy tier's own chain wins over the user's list)
+      - weight_profile -> sent with model:"auto"
       - reasoning_effort -> passed through when set ("none" is a real level;
         None means "don't send")
     """
@@ -143,10 +145,14 @@ def build_payload(messages: list, cfg: dict, tools: Optional[list] = None,
         "messages": messages,
         "stream": True,
     }
-    if cfg.get("fallback_models") and not local:
-        payload["models"] = list(cfg["fallback_models"])
-    if payload["model"] == "auto" and cfg.get("exclude_models"):
-        payload["exclude_models"] = list(cfg["exclude_models"])
+    fallbacks = cfg["models"] if "models" in cfg else cfg.get("fallback_models")
+    if fallbacks and not local:
+        payload["models"] = list(fallbacks)
+    if payload["model"] == "auto":
+        if cfg.get("exclude_models"):
+            payload["exclude_models"] = list(cfg["exclude_models"])
+        if cfg.get("weight_profile"):
+            payload["weight_profile"] = cfg["weight_profile"]
     if cfg.get("reasoning_effort") and (target is None or target.supports_reasoning_effort):
         payload["reasoning_effort"] = cfg["reasoning_effort"]
     if target:
@@ -190,8 +196,10 @@ def _endpoint(cfg: dict, target, *, blocking: bool = False) -> tuple:
         timeout = httpx.Timeout(connect=10.0, read=target.read_timeout, write=60.0, pool=10.0)
     else:
         timeout = 300 if blocking else 120
-    return (f"{base.rstrip('/')}/chat/completions",
-            {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}, timeout)
+    headers = {"Content-Type": "application/json"}
+    if key:    # an empty bearer is an invalid header, not an unauthenticated request
+        headers["Authorization"] = f"Bearer {key}"
+    return (f"{base.rstrip('/')}/chat/completions", headers, timeout)
 
 
 def stream_chat(

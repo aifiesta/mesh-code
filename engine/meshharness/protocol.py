@@ -78,6 +78,7 @@ class Event:
     NOTICE = "notice"                  # info | warn — non-fatal
     ERROR = "error"
     COMPACTED = "compacted"
+    POLICY_CHANGED = "policy.changed"  # tier moved: escalated, handed back, de-escalated
     SETTINGS = "settings"              # schema + current values
     CATALOG = "catalog"                # model list with context + pricing
     CONFIG_ERROR = "config.error"      # a rejected setting, with the reason
@@ -101,6 +102,8 @@ class Request:
     APPROVAL_RESPONSE = "approval.response"   # reply to TOOL_PROPOSED
     ASK_RESPONSE = "ask.response"             # reply to ASK_USER
     SET_MODE = "set.mode"
+    ESCALATE = "escalate"          # strong model for the rest of the turn (or the next)
+    DEESCALATE = "deescalate"
     SET_MODEL = "set.model"
     SET_STYLE = "set.style"
     OPEN_WORKSPACE = "open.workspace"

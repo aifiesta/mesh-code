@@ -143,16 +143,16 @@ def test_a_valid_setting_applies_and_echoes_the_new_schema(app_client, tmp_path)
         # the schema ships with the greeting, so a UI can render controls
         # for settings it was never coded against
         keys = [s["key"] for s in hello["data"]["settings"]["settings"]]
-        assert "route_mode" in keys and "reasoning_effort" in keys
+        assert "policy" in keys and "reasoning_effort" in keys
 
         ws.send_text(json.dumps({"type": Request.OPEN_WORKSPACE,
                                  "workspace": str(tmp_path)}))
         sid = _drain(ws, Event.SESSION_STARTED)["session"]
         ws.send_text(json.dumps({"type": Request.SET_CONFIG, "session": sid,
-                                 "key": "route_mode", "value": "auto"}))
+                                 "key": "policy", "value": "cloud-auto"}))
         _drain(ws, Event.SETTINGS)
-    assert engine.sessions[sid].cfg["route_mode"] == "auto"
-    assert engine.cfg["route_mode"] == "auto", "new sessions should inherit it"
+    assert engine.sessions[sid].cfg["policy"] == "cloud-auto"
+    assert engine.cfg["policy"] == "cloud-auto", "new sessions should inherit it"
 
 
 def test_an_invalid_setting_is_refused_with_a_reason(app_client, tmp_path):

@@ -15,7 +15,7 @@ def test_an_upgraded_cloud_pin_becomes_the_fallback_and_is_persisted():
     assert cfg["model"] == "local/auto"
     assert cfg["local_fallback_model"] == "anthropic/claude-sonnet-4.5"
     assert cfg["_migrated_to_local"] == "anthropic/claude-sonnet-4.5"
-    assert cfg["route_mode"] == "off"               # smart never applies to a local pin
+    assert cfg["policy"] == "local-first" and "route_mode" not in cfg
     assert cfg["max_hops"] == 7                      # everything else survives
     on_disk = json.loads(cfg_mod.CONFIG_FILE.read_text())
     assert on_disk["model"] == "local/auto" and on_disk["local_fallback_model"] == "anthropic/claude-sonnet-4.5"
@@ -64,8 +64,22 @@ def test_a_local_config_with_the_dead_router_keys_loses_them_on_save():
     _write({"model": "local/qwen3.5-9b-q4", "route_mode": "smart", "optimize": 0.8,
             "route_weights": {"cost": 1}, "route_effort": "max", "local_fallback_model": "x/y"})
     cfg = cfg_mod.load_config()
-    assert cfg["route_mode"] == "off"
+    assert cfg["policy"] == "local-first" and "route_mode" not in cfg
     assert not {"optimize", "route_weights", "route_effort"} & set(cfg)
     cfg_mod.save_config(cfg)
     on_disk = json.loads(cfg_mod.CONFIG_FILE.read_text())
-    assert not {"optimize", "route_weights", "route_effort"} & set(on_disk) and on_disk["route_mode"] == "off"
+    assert not {"optimize", "route_weights", "route_effort", "route_mode"} & set(on_disk)
+    assert on_disk["policy"] == "local-first"
+
+
+def test_route_mode_auto_becomes_the_cloud_auto_policy_and_a_cloud_pin_stays_pinned():
+    _write({"model": "local/auto", "route_mode": "auto", "local_fallback_model": "x/y"})
+    assert cfg_mod.load_config()["policy"] == "cloud-auto"
+    _write({"model": "anthropic/claude-sonnet-5.5", "route_mode": "off", "local_fallback_model": "x/y"})
+    assert cfg_mod.load_config()["policy"] == "pinned"
+
+
+def test_a_hand_picked_local_model_becomes_the_local_pick_under_local_first():
+    _write({"model": "local/qwen3.5-9b-q4", "local_fallback_model": "x/y"})
+    cfg = cfg_mod.load_config()
+    assert cfg["policy"] == "local-first" and cfg["local_model"] == "local/qwen3.5-9b-q4"

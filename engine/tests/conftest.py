@@ -94,7 +94,7 @@ def harness(gateway, tmp_path):
             "system": "test",
             "auto_route": False, "repo_memory": False, "fallback_models": [],
             "reasoning_effort": None, "max_hops": 0,
-            "auto_compact": False, "stall_policy": "pause", "route_mode": "off",
+            "auto_compact": False, "stall_policy": "pause", "policy": "pinned", "exclude_models": [],
             "output_style": "default",
         }
         cfg.update(cfg_over)
