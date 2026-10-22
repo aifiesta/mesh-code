@@ -172,8 +172,12 @@ class LocalModels:
                 self.target_for(self.plan.model["id"])
         self._emit_status()
 
-    def recover(self) -> None:
-        self.server.recover()
+    def recover(self, *, force: bool = False) -> None:
+        """`force` stops a server that is alive but not answering."""
+        if force:
+            self.server.stop()
+        else:
+            self.server.recover()
 
     def on_setting(self, key: str, value) -> None:
         with self._lock:
