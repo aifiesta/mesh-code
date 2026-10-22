@@ -39,6 +39,7 @@ import httpx
 from .bridge import Cancelled, Pending
 from .core import compact, loopguard, memory, textcalls, verify
 from .core import policy as policy_mod
+from .core import budget as budget_mod
 from .core.policy import PolicyController, Tier
 from .core import journal, safety
 from .core import tools as tools_mod
@@ -59,6 +60,10 @@ TOOL_SCHEMAS = {t["function"]["name"]: (t["function"].get("parameters") or {}).g
 
 class TargetUnavailable(RuntimeError):
     """No model can serve this hop; the turn ends with a clear error."""
+
+
+class KeyCapHit(TargetUnavailable):
+    """The gateway answered HTTP 402: the key's own spend cap is reached."""
 PLAN_TOOLS = {"create_plan", "update_step"}
 INTERACTIVE_TOOLS = {"ask_user"}
 UNGATED_TOOLS = PLAN_TOOLS | INTERACTIVE_TOOLS | {"remember"}
@@ -76,9 +81,10 @@ class Session:
     """One conversation against one workspace directory."""
 
     def __init__(self, session_id: str, workspace: str | Path, cfg: dict,
-                 emit, *, title: str = "", mode: Mode = Mode.DEFAULT, local=None):
+                 emit, *, title: str = "", mode: Mode = Mode.DEFAULT, local=None, budget=None):
         self.id = session_id
         self.local = local          # the LocalModels layer, or None in a cloud-only engine
+        self.budget = budget        # the engine's spend ledger, or None in tests
         self.workspace = Path(workspace).expanduser().resolve()
         self.title = title or self.workspace.name
         self._emit_raw = emit
@@ -154,6 +160,7 @@ class Session:
             model=self.cfg.get("model"),
             mode=self.mode.value,
             policy=self.policy.describe(),
+            budget=self.budget.snapshot() if self.budget is not None else None,
             reasoning_effort=self.cfg.get("reasoning_effort"),
             output_style=self.cfg.get("output_style", "default"),
             max_hops=self.cfg.get("max_hops", 0),
@@ -474,6 +481,33 @@ class Session:
             return True
         return False
 
+    def _spend_kind(self) -> str:
+        return {Tier.ESCALATED: "escalate", Tier.CLOUD_AUTO: "auto", Tier.PINNED: "pinned"}.get(
+            self.policy.tier, "fallback")
+
+    def _budget_hold(self, target):
+        """The ledger's answer for the hop about to run; local hops never ask.
+        The estimate is kept so a hop that never settles is still counted."""
+        self._hop_estimate = 0.0
+        if self.budget is None or target.local:
+            return None
+        prompt_tokens = compact.est_history_tokens(self.state.get("messages") or [])
+        self._hop_estimate = budget_mod.estimate_hop_usd(target.display_id, prompt_tokens, self.catalog)
+        return self.budget.check(self._spend_kind(), self._hop_estimate)
+
+    def _record_unsettled(self, kind: str) -> None:
+        """A cloud hop stopped or failed after its request went out: the
+        gateway may have billed it, so the pre-flight estimate is recorded."""
+        if self.budget is not None and self._hop_estimate:
+            self._record_spend(kind, self._hop_estimate, estimated=True)
+
+    def _record_spend(self, kind: str, cost: float, *, estimated: bool) -> None:
+        for step in self.budget.record(kind, cost, estimated=estimated):
+            scope, pct = ("this month", step - 1000) if step >= 1000 else ("today", step)
+            self.emit(Event.NOTICE, level="warn" if pct >= 80 else "info",
+                      message=f"cloud spend is at {pct}% of {scope}'s budget")
+        self.emit(Event.BUDGET_UPDATED, **self.budget.snapshot())
+
     def _hand_back_after_failure(self, what: str, nudge: str | None = None) -> bool:
         """A failed escalated hop goes back to the base tier; the turn goes on
         (a session-sticky escalation is kept for the next turn)."""
@@ -629,6 +663,21 @@ class Session:
             if self._take_escalate_request() and probe.local:
                 hop -= 1
                 continue        # Escalate landed during the local load: re-resolve
+            hold = self._budget_hold(probe)
+            if hold is not None:
+                self.emit(Event.BUDGET_UPDATED, **self.budget.snapshot())
+                if self.policy.tier is Tier.ESCALATED:
+                    if not self.state.get("_escalated_hop_done"):
+                        self.turn_escalated = None
+                    self.policy.hand_back()
+                    self.emit(Event.POLICY_CHANGED, tier=self.policy.tier.value, model=None,
+                              reason=f"budget hold: {hold.message}")
+                    self.emit(Event.NOTICE, level="warn", message=f"back to the local model — {hold.message}")
+                    self._status()
+                    continue
+                self.emit(Event.BUDGET_HOLD, scope=hold.scope, message=hold.message)
+                self.emit(Event.NOTICE, level="warn", message=f"cloud hop held: {hold.message}")
+                break
             self._maybe_compact()
 
             extras = []
@@ -636,10 +685,19 @@ class Session:
             if nudge:
                 extras = [{"role": "user", "content": nudge}]
 
+            hop_kind = self._spend_kind()
             try:
                 reply, meta = self._hop(extras)
             except KeyboardInterrupt:
+                if not probe.local:
+                    self._record_unsettled(hop_kind)
                 aborted = True
+                break
+            except KeyCapHit as e:
+                if self._hand_back_after_failure("HTTP 402", nudge):
+                    continue
+                self.emit(Event.BUDGET_HOLD, scope="key_cap", message=str(e))
+                self.emit(Event.NOTICE, level="warn", message=f"cloud hop held: {e}")
                 break
             except httpx.HTTPStatusError as e:
                 if self._hand_back_after_failure(f"HTTP {e.response.status_code}", nudge):
@@ -676,6 +734,8 @@ class Session:
                     if nudge:
                         self.state["stall_nudge_msg"] = nudge
                     continue
+                if not probe.local:
+                    self._record_unsettled(hop_kind)
                 if self._hand_back_after_failure(msg[:120], nudge):
                     continue
                 self.emit(Event.ERROR, fatal=True, message=msg)
@@ -736,6 +796,8 @@ class Session:
                 except Exception:
                     pass
             self.turn_cost += hop_cost
+            if not local_hop and self.budget is not None:
+                self._record_spend(hop_kind, hop_cost, estimated=estimated)
             if estimated:
                 self.turn_estimated = True
             # Publish the running tally now, while the turn is still going.
@@ -910,6 +972,13 @@ class Session:
             except httpx.HTTPStatusError as e:
                 code = e.response.status_code
                 body = _safe_text(e.response)
+                if code == 402 and not (target and target.local):
+                    if self.budget is not None:
+                        self.budget.set_key_cap(True)
+                        self.emit(Event.BUDGET_UPDATED, **self.budget.snapshot())
+                    raise KeyCapHit(
+                        "your Mesh key's spend cap was reached (HTTP 402); raise it at app.meshapi.ai, "
+                        "then clear the hold from the usage ring") from e
                 overflow = loopguard.parse_max_tokens_overflow(body)
                 if overflow is not None and not self.state.get("_max_tokens_shrunk"):
                     new = loopguard.adjusted_max_tokens(overflow)

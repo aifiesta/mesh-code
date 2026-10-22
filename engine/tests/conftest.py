@@ -80,7 +80,7 @@ class Harness:
 def harness(gateway, tmp_path):
     made = []
 
-    def _make(mode=Mode.DEFAULT, local=None, **cfg_over):
+    def _make(mode=Mode.DEFAULT, local=None, budget=None, **cfg_over):
         events, lock = [], threading.Lock()
 
         def emit(ev):
@@ -98,7 +98,7 @@ def harness(gateway, tmp_path):
             "output_style": "default",
         }
         cfg.update(cfg_over)
-        s = Session("t1", tmp_path, cfg, emit, mode=mode, local=local)
+        s = Session("t1", tmp_path, cfg, emit, mode=mode, local=local, budget=budget)
         s.start()
         made.append(s)
         return Harness(s, events, lock)

@@ -26,6 +26,7 @@ CATEGORIES = [
     ("model", "Model", "Which model answers, and what it costs"),
     ("local", "Local model", "A coding model that runs on this machine — free, private, works offline"),
     ("routing", "Policy", "Who writes the code, and when the cloud steps in"),
+    ("budget", "Budget", "What the cloud may spend; work on this machine is always free"),
     ("behaviour", "Behaviour", "How the assistant works and writes"),
     ("limits", "Limits & recovery", "What happens on long or stuck turns"),
     ("privacy", "Memory & privacy", "What persists between sessions"),
@@ -246,6 +247,17 @@ SCHEMA: list[dict] = [
         "why": "The router trades quality, price and speed per prompt along this profile.",
     },
     {
+        "key": "monthly_budget_usd",
+        "category": "budget",
+        "type": "money",
+        "label": "Monthly limit",
+        "default": 10.0,
+        "min": 0.0, "max": 10000.0,
+        "zero_label": "No limit",
+        "help": "Cloud spend this app allows per calendar month. Today's share is what is left this month divided by the days left; past it, cloud work pauses until midnight unless you allow more from the usage ring.",
+        "why": "Ten dollars covers a month of six-hour days when the local model writes and the cloud only audits and rescues.",
+    },
+    {
         "key": "reasoning_effort",
         "category": "behaviour",
         "type": "enum",
@@ -359,6 +371,16 @@ def coerce(key: str, value: Any) -> Any:
 
     if kind == "bool":
         return bool(value)
+
+    if kind == "money":
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            raise InvalidSetting(f"{key} must be a number")
+        lo, hi = spec.get("min", 0.0), spec.get("max", 10**6)
+        if not lo <= f <= hi:
+            raise InvalidSetting(f"{key} must be between {lo} and {hi}")
+        return round(f, 2)
 
     if kind == "int":
         try:
