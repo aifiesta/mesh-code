@@ -15,9 +15,9 @@ _LIB_SUFFIXES = (".dylib", ".so", ".dll", ".metallib")
 
 
 def locate(runtime_dir: Path, tag: str, variant: str) -> Path | None:
-    """env override → a downloaded build of this variant → the build Electron
-    bundled, but only when it is the same variant (a CPU bundle must not
-    serve a GPU plan)."""
+    """env override → a downloaded build of this tag+variant → the build
+    Electron bundled, only when its tag and variant match (a re-pinned tag
+    downloads; a CPU bundle never serves a GPU plan)."""
     override = os.environ.get("MESH_LLAMA_SERVER")
     if override and Path(override).is_file():
         return Path(override)
@@ -25,7 +25,8 @@ def locate(runtime_dir: Path, tag: str, variant: str) -> Path | None:
     if downloaded.is_file():
         return downloaded
     bundled_dir = os.environ.get("MESH_LLAMA_DIR")
-    if bundled_dir and os.environ.get("MESH_LLAMA_VARIANT") == variant:
+    if (bundled_dir and os.environ.get("MESH_LLAMA_VARIANT") == variant
+            and os.environ.get("MESH_LLAMA_TAG") == tag):
         bundled = Path(bundled_dir) / SERVER
         if bundled.is_file():
             return bundled
@@ -45,16 +46,25 @@ def install_from_archive(archive: Path, into: Path) -> Path:
                 with z.open(info) as src, open(into / name, "wb") as dst:
                     shutil.copyfileobj(src, dst)
     else:
+        links: list[tuple[str, str]] = []
         with tarfile.open(archive, "r:gz") as t:
             for member in t.getmembers():
                 name = Path(member.name).name
-                if not member.isfile() or not _wanted(name) or _escapes(member.name):
+                if not _wanted(name) or _escapes(member.name):
+                    continue
+                # The loader opens libllama.0.dylib, a symlink onto the versioned file.
+                if member.issym() and member.linkname == Path(member.linkname).name \
+                        and member.linkname not in ("", ".", "..", name):
+                    links.append((name, member.linkname))
+                    continue
+                if not member.isfile():
                     continue
                 src = t.extractfile(member)
                 if src is None:
                     continue
                 with src, open(into / name, "wb") as dst:
                     shutil.copyfileobj(src, dst)
+        _relink(into, links)
     server = into / SERVER
     if not server.exists():
         raise FileNotFoundError(f"{archive.name} contains no {SERVER}")
@@ -78,6 +88,19 @@ def version(server: Path) -> str:
 
 def _wanted(name: str) -> bool:
     return name == SERVER or name.endswith(_LIB_SUFFIXES) or ".so." in name or name.startswith("LICENSE")
+
+
+def _relink(into: Path, links: list) -> None:
+    """Recreate same-directory symlinks whose target exists, chains included."""
+    pending = list(links)
+    while pending:
+        done = [(n, target) for n, target in pending if (into / target).exists()]
+        if not done:
+            return
+        for name, target in done:
+            (into / name).unlink(missing_ok=True)
+            os.symlink(target, into / name)
+        pending = [l for l in pending if l not in done]
 
 
 def _escapes(member: str) -> bool:
