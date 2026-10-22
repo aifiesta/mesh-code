@@ -39,10 +39,8 @@ export function ControlBar({ status, settings, catalog, local, routeExplain, onS
   const row = catalog.find((m) => String(m.id) === model)
   const inPrice = row ? pricePerM(row, 'prompt') : null
 
-  // What is running RIGHT NOW versus what is configured. With routing on
-  // these differ constantly, and the bar used to show only the configured
-  // one — so it read "claude-sonnet-4.5" through an entire turn that in fact
-  // ran on something else.
+  // What runs right now versus what is configured: with routing on they
+  // differ for a whole turn.
   const live = !!status?.busy
   const turnModel = status?.turn_model || null
   const routing = routeMode !== 'off'
@@ -67,11 +65,8 @@ export function ControlBar({ status, settings, catalog, local, routeExplain, onS
 
   return (
     <div className="controlbar" ref={ref}>
-      {/* ---- model + routing, one pill ----
-          These were two pills that said the same thing twice ("Router picks"
-          next to "Smart (local)"). Now one pill names what decides the model
-          — the pinned model, or the router — and its popover holds the
-          routing switch, the effort dial and the router's pick together. */}
+      {/* One pill names what decides the model; its popover holds the
+          routing switch, the effort dial and the router's pick. */}
       <div className="ctl ctl-model">
         <button className={`ctl-btn ${open === 'model' ? 'on' : ''} ${pending ? 'pending' : ''} ${routing ? 'lit' : ''}`}
                 onClick={() => { toggle('model'); if (routing) onExplain() }}
@@ -236,7 +231,6 @@ function Explain({ explain }: { explain: RouteExplain | null }) {
 
 const shortModel = (m: string) => (m.includes('/') ? m.split('/').slice(1).join('/') : m)
 
-/** Engine data is rendered as-is, so never assume a field's runtime type —
- *  a stray non-string here previously threw and blanked the whole window. */
+/** Engine data is rendered as-is: a non-string here must not throw. */
 const pretty = (v: unknown) =>
   typeof v === 'string' ? v.replace(/[-_]/g, ' ') : String(v ?? '')

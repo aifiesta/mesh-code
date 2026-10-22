@@ -290,10 +290,6 @@ export function reduce(state: AppState, action: Action): AppState {
         ...state,
         sessions: { ...state.sessions, [sid]: s },
         order: state.order.includes(sid) ? state.order : [...state.order, sid],
-        // Always focus it. This used to be `state.active ?? sid`, so opening
-        // a second project left the first one active: the new project's chat
-        // was never shown and everything typed went into the old thread,
-        // which is what made every project look like one merged chat.
         active: sid,
       }
     }
@@ -506,9 +502,7 @@ export function reduce(state: AppState, action: Action): AppState {
         }
 
       case Ev.SERVER_STOPPED:
-        // Was silently dropped: the transcript's server card kept its live
-        // dot and clickable URL to a dead server. Mark the matching card
-        // stopped so it reads as finished.
+        // Mark the matching card stopped so its live dot and URL go dead.
         return {
           ...s,
           messages: s.messages.map((m) =>

@@ -75,12 +75,8 @@ export default function App() {
   const stateRef = useRef(state)
   stateRef.current = state
 
-  // Theme. The CSS has always supported an explicit override; there was
-  // simply no control for it, so "light or dark" meant "whatever the OS
-  // says". `system` stamps no attribute and lets prefers-color-scheme win.
-  // Light by default. The key is versioned because the old default
-  // ('system') was written back to storage on first run, so an unversioned
-  // read could not tell "never chose" from "chose system".
+  // `system` stamps no attribute and lets prefers-color-scheme win. The
+  // storage key is versioned so "never chose" and "chose system" differ.
   const [theme, setTheme] = useState<'system' | 'light' | 'dark'>(() => {
     try { return (localStorage.getItem('mesh.theme.v2') as any) || 'light' }
     catch { return 'light' }
@@ -404,13 +400,9 @@ export default function App() {
         explorer={session ? (
           <>
             <Explorer
-              /* The files panel FOLLOWS THE ACTIVE SESSION. Its workspace is
-                 the (dotted, expanded) root; other sessions' projects are NOT
-                 listed here — they're reachable by clicking their session
-                 above, which swaps this whole tree. Only genuinely added
-                 browse folders appear alongside. The old version showed every
-                 folder ever opened with a stale global "active" flag, so
-                 switching chats left the tree stuck on the previous project. */
+              /* The files panel follows the active session: its workspace is
+                 the expanded root, other sessions' projects are reached by
+                 clicking them above; only added browse folders sit alongside. */
               roots={(() => {
                 // Every open session is a project NODE (the sessions list is
                 // gone — these nodes are it), active first; then folders
@@ -908,10 +900,8 @@ function paletteActions(
   restartLocal: (() => void) | null,
 ): Action[] {
   return [
-    // All one group. These were five groups of ONE item each, which turned
-    // the top of the palette into five headers and five rows — grouping that
-    // groups nothing is just noise. Only Appearance and Permissions below
-    // have enough members to earn a section.
+    // One group: only Appearance and Permissions have enough members to
+    // earn a section of their own.
     { id: 'open', title: 'Open project…', group: 'Actions', keywords: 'folder workspace directory', run: openFolder },
     { id: 'models', title: 'Browse models', group: 'Actions',
       hint: 'Compare every model on price and context', keywords: 'catalog price context switch', run: browseModels },

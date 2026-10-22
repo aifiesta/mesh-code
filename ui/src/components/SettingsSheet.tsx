@@ -40,14 +40,8 @@ export function SettingsSheet({ settings, catalog, local, localActions, notices,
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  // Refresh the catalog ONCE per visit to the Model tab.
-  //
-  // This depended on `onRefreshCatalog`, which App passes as an inline arrow
-  // — a new function identity on every render. So: effect fires, request
-  // returns, catalog lands in state, App re-renders, identity changes,
-  // effect fires again… an unbounded request loop against the engine for as
-  // long as the tab was open. The ref makes the TAB the trigger, which is
-  // what it was always meant to be.
+  // Refresh the catalog once per visit to the Model tab. The tab, not the
+  // callback identity, is the trigger: App passes an inline arrow.
   const refreshed = useRef<string | null>(null)
   useEffect(() => {
     if (tab !== 'model') { refreshed.current = null; return }
@@ -56,9 +50,7 @@ export function SettingsSheet({ settings, catalog, local, localActions, notices,
     onRefreshCatalog()
   }, [tab, onRefreshCatalog])
 
-  // Show a placeholder rather than rendering NOTHING: pressing ⌘, before the
-  // settings doc arrives used to open an invisible sheet (state set, nothing
-  // drawn), reading as a dead shortcut.
+  // A placeholder, so ⌘, before the settings doc arrives is not a dead shortcut.
   if (!settings) {
     return (
       <div className="modal-scrim" onClick={onClose}>

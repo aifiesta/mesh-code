@@ -1,17 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Wordmark } from './Logo'
 
-/**
- * Connect, replace, or remove the Mesh API key.
- *
- * One component, two placements. As a `gate` it is the first-run screen; as
- * a `modal` it is how you change keys later — which had no route at all
- * before: the gate only ever appeared when NO key was stored, so anyone
- * whose key was picked up from the meshapi CLI had no way to set their own.
- *
- * The key is verified against the gateway before it is saved, so a typo
- * fails here rather than on the first prompt.
- */
+/** Connect, replace, or remove the Mesh API key: the first-run `gate`, or a
+ *  `modal` later. The key is verified against the gateway before it is saved. */
 export function KeyGate({ variant = 'gate', error, resultAt, hint, source, onSave, onClear, onClose, below, onContinueLocal }: {
   variant?: 'gate' | 'modal'
   /** Rendered under the card on the first-run gate: the local model setup. */
