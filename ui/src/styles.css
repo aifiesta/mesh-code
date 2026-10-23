@@ -1267,19 +1267,19 @@ kbd {
 }
 .seg.small button { padding: 4px 10px; font-size: var(--t-sm); }
 
-.toggle { display: inline-flex; align-items: center; gap: 10px; color: var(--ink-2); font-size: var(--t-base); }
+.toggle { position: relative; display: inline-flex; align-items: center; gap: 10px; color: var(--ink-2); font-size: var(--t-base); }
 .toggle::before {
   content: ''; width: 36px; height: 21px; border-radius: var(--r-pill);
   background: var(--film-3); box-shadow: inset 0 0 0 1px var(--hair);
   transition: background .2s ease, box-shadow .2s ease;
 }
 .toggle .knob {
-  position: absolute; width: 15px; height: 15px; border-radius: 50%;
-  background: var(--ink-3); margin-left: 4px;
+  position: absolute; top: 50%; left: 3px; transform: translateY(-50%);
+  width: 15px; height: 15px; border-radius: 50%; background: var(--ink-3);
   transition: transform .22s cubic-bezier(.3,.9,.3,1), background .2s ease;
 }
 .toggle.on::before { background: linear-gradient(135deg, var(--brand), var(--brand-2)); box-shadow: none; }
-.toggle.on .knob { transform: translateX(14px); background: #ffffff; }
+.toggle.on .knob { transform: translate(15px, -50%); background: #ffffff; }
 
 input[type=range] { accent-color: var(--brand); flex: 1; max-width: 270px; }
 .stepper { display: flex; align-items: center; gap: 11px; }
