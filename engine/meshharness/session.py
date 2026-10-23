@@ -198,6 +198,7 @@ class Session:
             "session_tokens": self.session_tokens,
             "messages": len(self.state["messages"]),
             "busy": self._busy.is_set(),
+            "policy": self.policy.describe(),
         }
 
     # ------------------------------------------------------------------

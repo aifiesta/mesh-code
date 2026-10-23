@@ -197,7 +197,7 @@ export function reduce(state: AppState, action: Action): AppState {
           busy: !!row.busy,
           label: row.label ?? sessions[row.id].label,
           status: sessions[row.id].status ?? {
-            model: row.model, mode: row.mode,
+            model: row.model, mode: row.mode, policy: row.policy,
             session_cost: row.session_cost ?? 0, session_tokens: row.session_tokens ?? 0,
             workspace: row.workspace ?? '', busy: !!row.busy, servers: [],
           },
