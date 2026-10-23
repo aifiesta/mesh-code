@@ -583,6 +583,7 @@ export default function App() {
             setTheme,
             (m: string) => session && client?.setMode(session.id, m),
             () => setSheet('local'),
+            () => setSheet('budget'),
             state.local?.default_model ? () => client?.localServer('restart') : null,
           )}
         />
@@ -950,6 +951,7 @@ function paletteActions(
   setTheme: (t: 'system' | 'light' | 'dark') => void,
   setMode: (m: string) => void,
   manageLocal: () => void,
+  manageBudget: () => void,
   restartLocal: (() => void) | null,
 ): Action[] {
   return [
@@ -966,6 +968,9 @@ function paletteActions(
     { id: 'tour', title: 'Take the guided tour', group: 'Actions',
       hint: 'A two-minute walkthrough anchored to the real UI',
       keywords: 'walkthrough onboarding help intro getting started features', run: startTour },
+    { id: 'budget', title: 'Set the monthly budget', group: 'Actions',
+      hint: 'How much the cloud may spend; today’s share follows from it',
+      keywords: 'budget limit spend monthly cost money usage cap dollars', run: manageBudget },
     { id: 'local', title: 'Manage local models', group: 'Actions',
       hint: 'Download, delete or switch the model that runs on this machine',
       keywords: 'local offline llama gguf download free machine', run: manageLocal },

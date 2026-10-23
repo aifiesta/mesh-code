@@ -26,7 +26,7 @@ export const TOUR: TourStep[] = [
   {
     id: 'welcome',
     title: 'Welcome to Mesh Code',
-    body: 'A coding agent that plans, writes files and runs commands inside a project folder you choose. Two minutes and you will know where everything is.',
+    body: 'A coding agent that plans, writes files and runs commands inside a project folder you choose. A model on this machine does the work for free; the cloud steps in only when it is stuck. Two minutes and you will know where everything is.',
   },
   {
     id: 'projects',
@@ -40,7 +40,7 @@ export const TOUR: TourStep[] = [
     target: '.composer',
     placement: 'top',
     title: 'Ask for anything',
-    body: 'Describe the outcome, not the steps: “add a health endpoint and run the tests”. Enter sends, Shift+Enter adds a line. You can keep typing while it works — messages queue.',
+    body: 'Describe the outcome, not the steps: “add a health endpoint and run the tests”. Enter sends, Shift+Enter adds a line, and messages queue while it works. Start with ! to run a shell command yourself; the agent sees the output.',
   },
   {
     id: 'mode',
@@ -53,27 +53,34 @@ export const TOUR: TourStep[] = [
     id: 'model',
     target: '.controlbar .ctl-model',
     placement: 'top',
-    title: 'Who answers',
-    body: 'Pin one model, or let Mesh’s Auto Router pick a cloud model per prompt. The pill reads “Auto routing” until a hop answers, then names the real model. A local model pin is never routed.',
+    title: 'Who writes',
+    body: 'Local first: the model on this machine writes the code for free. When it gets stuck — repeats itself, fails tool calls, gives up — a strong cloud model takes over for a few steps and hands back. Click to escalate yourself, or switch to Mesh’s Auto Router or one pinned model.',
+  },
+  {
+    id: 'usage',
+    target: '.controlbar .ctl-usage',
+    placement: 'top',
+    title: 'Today’s cloud budget',
+    body: 'The ring fills as cloud work uses today’s share of your monthly limit. Click it for Today and This month, and what each kind of cloud call cost. Set the limit in Settings › Budget; work on this machine never counts.',
   },
   {
     id: 'cost',
     target: '.controlbar .ctl-cost',
     placement: 'top',
     title: 'Cost and tokens, live',
-    body: 'The session spend and token count, updated per hop as the agent works — not just at the end. When a model reports no price it is computed from the catalog and marked ~. A turn on the local model shows as free.',
+    body: 'The session spend and token count, updated as the agent works. Turns on the local model are free; a cloud price the gateway did not report is computed from the catalog and marked ~.',
   },
   {
     id: 'rail',
     target: '.rail-tabs',
     placement: 'left',
-    title: 'Plan, Preview, Account',
-    body: 'Multi-step work gets a checklist you can watch. When the agent starts a dev server it renders right here. Account is where your key and session spend live.',
+    title: 'The side panel',
+    body: 'Plan is the checklist for multi-step work. Preview renders a dev server the agent starts. Shell is your own terminal in the project. Journal is what it has learned about the repo. Account holds your key, your spend and the local model.',
   },
   {
     id: 'palette',
     title: 'Everything is one shortcut away',
-    body: '⌘K searches every setting and action by name or by what it does — try “cheap”. ⌘, opens the full settings, including a fuzzy-searchable browser of every model on your account.',
+    body: '⌘K searches every setting and action by name or by what it does — try “escalate” or “budget”. ⌘, opens the full settings: the local model, the policy, the budget and a browser of every model on your account.',
   },
 ]
 
