@@ -52,7 +52,8 @@ export function LocalModelPanel({ local, onInstall, onCancel, onDelete, onSetDef
             <div className={`browser-row ${isDefault ? 'current' : ''} ${!m.fits ? 'off' : ''}`} key={m.id}>
               <span className="m-id" title={m.id}>
                 {m.label}
-                {m.recommended && <span className="tag now">recommended</span>}
+                {isDefault && m.installed ? <span className="tag now">default</span>
+                  : m.recommended && <span className="tag now">recommended</span>}
                 {m.installed && <span className="tag think">installed</span>}
                 {m.slow && <span className="tag beta">slow here</span>}
                 {m.tight && <span className="tag never" title="Fits, but leaves little memory for everything else">tight</span>}

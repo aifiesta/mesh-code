@@ -156,6 +156,7 @@ function CloudModelField({ spec, catalog, onChange }: {
   const ids = catalog.filter((m) => !m.local).map((m) => String(m.id)).sort()
   if (value && !ids.includes(value)) ids.unshift(value)
   const none = value === '' || spec.default === ''
+  const emptyLabel = spec.key === 'local_fallback_model' ? 'No fallback (fail instead)' : 'The shipped chain (recommended)'
   return (
     <div className="field">
       <div className="field-head">
@@ -164,7 +165,7 @@ function CloudModelField({ spec, catalog, onChange }: {
       {spec.help && <p className="field-help">{spec.help}</p>}
       <div className="field-control">
         <select id={`f-${spec.key}`} value={value} onChange={(e) => onChange(spec.key, e.target.value)}>
-          {none && <option value="">No fallback (fail instead)</option>}
+          {none && <option value="">{emptyLabel}</option>}
           {ids.map((id) => <option key={id} value={id}>{id}</option>)}
         </select>
       </div>
