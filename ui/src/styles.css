@@ -2267,7 +2267,8 @@ body.resizing .rail-resize { pointer-events: auto; }
 .term-shell {
   text-transform: uppercase; letter-spacing: .08em; font-weight: 650; color: var(--brand);
 }
-.term-cwd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-cwd { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-shell, .term-head button { flex: none; white-space: nowrap; }
 .term-head button {
   color: var(--ink-3); padding: 2px 7px; border-radius: var(--r-xs);
   font-size: var(--t-2xs); transition: background .14s ease, color .14s ease;
