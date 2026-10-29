@@ -54,6 +54,8 @@ TOOLCALL_FAILURES_FILE = CONFIG_DIR / "toolcall_failures.jsonl"
 # read back exact code/errors it no longer has. (Claude Code does the same —
 # its compact summary points at the session transcript.)
 TRANSCRIPTS_DIR = CONFIG_DIR / "transcripts"
+# The local model layer: downloaded weights, runtime builds, server state.
+LOCAL_DIR = CONFIG_DIR / "local"
 FAILURE_LOG_MAX_BYTES = 1_000_000
 _RAW_ARGS_LOG_CAP = 32_768  # bound one pathological record
 
@@ -64,7 +66,7 @@ class InsecureBaseURL(ValueError):
 DEFAULT_CONFIG = {
     "base_url": "https://api.meshapi.ai/v1",
     "api_key": "",
-    "model": "anthropic/claude-sonnet-4.5",
+    "model": "local/auto",       # the tier's local model; cloud until it is downloaded
     "system": "You are a helpful coding assistant. Be concise.",
     "auto_route": False,        # model:"auto" — gateway Auto Router picks per prompt
     "repo_memory": True,        # warm-start repo map + remember notes (/memory off)
@@ -100,6 +102,17 @@ DEFAULT_CONFIG = {
     # Models observed rejecting reasoning_effort (with tools) — skipped
     # without a doomed retry in future sessions. Evidence-based cache.
     "reasoning_rejected_models": [],
+    # Local model layer (see local/manager.py). The fallback is the cloud
+    # model used while the local one downloads or cannot start.
+    "local_enabled": True,
+    "local_auto_setup": True,
+    "local_model": "",
+    "local_fallback_model": "anthropic/claude-sonnet-4.5",
+    "local_context": "auto",
+    "local_gpu": "auto",
+    "local_keep_free_gb": 4,
+    "local_idle_unload_min": 20,
+    "local_use_when_slow": False,
 }
 
 _DIR_MODE = stat.S_IRWXU                       # 0700
@@ -222,11 +235,13 @@ def load_config() -> dict:
     # A corrupt/non-object config.json must NEVER brick launch (a truncated
     # write, a bad hand-edit). Every other loader here already degrades to a
     # default — load_config used to be the exception and would crash the CLI.
+    corrupt = False
     try:
         loaded = json.loads(CONFIG_FILE.read_text())
         if not isinstance(loaded, dict):
             raise ValueError("config.json is not a JSON object")
     except (json.JSONDecodeError, ValueError, OSError) as e:
+        corrupt = True
         print(
             f"mesh-code: ~/.mesh-code/config.json is unreadable ({e}); using "
             "defaults. Fix or delete it to silence this.",
@@ -269,7 +284,30 @@ def load_config() -> dict:
     cfg["base_url"] = _validate_base_url(
         os.getenv("MESHAPI_BASE_URL", cfg["base_url"])
     )
+    # Last, so the persist never writes over a file we could not parse and
+    # never drops a hand-edited key before it reached the credentials file.
+    migrated = None if corrupt else _migrate_to_local(cfg, loaded)
+    if migrated:
+        cfg["_migrated_to_local"] = migrated   # runtime-only: the one-time notice
     return cfg
+
+
+def _migrate_to_local(cfg: dict, loaded: dict) -> "str | None":
+    """A cloud `model` with no `local_fallback_model` becomes local-first with
+    that model as the fallback; smart routing never applies to a local pin."""
+    if "local_fallback_model" in loaded or str(loaded.get("model", "")).startswith("local/"):
+        return None
+    old = loaded.get("model") or ""
+    if old:
+        cfg["local_fallback_model"] = old
+    cfg["model"] = "local/auto"
+    if cfg.get("route_mode") == "smart":
+        cfg["route_mode"] = "off"
+    try:
+        save_config(cfg)
+    except OSError:
+        pass
+    return old or None
 
 
 # Keys that are RESOLVED AT RUNTIME (from the environment, or a credentials

@@ -90,6 +90,9 @@ class Event:
     TERM_OUTPUT = "term.output"        # one line from the user's shell
     TERM_READY = "term.ready"
     FOLDERS = "folders"                # the open roots, and which is active
+    LOCAL_STATUS = "local.status"      # the local model layer: hardware, models, server, jobs
+    LOCAL_PROGRESS = "local.progress"  # one download job's phase and bytes
+    LOCAL_READY = "local.ready"        # a model finished installing
 
 
 class Request:
@@ -127,6 +130,13 @@ class Request:
     TERM_RUN = "term.run"            # the USER's own shell, not the agent's
     TERM_INTERRUPT = "term.interrupt"
     TERM_CLOSE = "term.close"
+    LOCAL_STATUS = "local.status"
+    LOCAL_INSTALL = "local.install"   # {model}
+    LOCAL_CANCEL = "local.cancel"     # {job}
+    LOCAL_DELETE = "local.delete"     # {model}
+    LOCAL_SERVER = "local.server"     # {action: stop|restart}
+    LOCAL_REFRESH = "local.refresh"
+    LOCAL_DECLINE = "local.decline"
 
 
 # Approval verdicts. ALWAYS is "auto-approve this tool for the rest of the

@@ -40,7 +40,20 @@ def main():
             if self.headers.get("Authorization") != f"Bearer {key}":
                 self._send(401, {"error": {"message": "bad key"}})
                 return
-            self._send(200, {"ok": True})
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0)) or b"{}") or b"{}")
+            usage = {"prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16}
+            if body.get("stream"):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                for chunk in ({"choices": [{"delta": {"content": "hello from llama"}}]},
+                              {"choices": [], "usage": usage, "timings": {"predicted_per_second": 42.0}}):
+                    self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                return
+            self._send(200, {"choices": [{"message": {"role": "assistant", "content": "hello from llama"}}],
+                             "usage": usage})
 
         def _send(self, code, body):
             data = json.dumps(body).encode()

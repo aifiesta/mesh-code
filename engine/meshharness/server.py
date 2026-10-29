@@ -50,6 +50,7 @@ from . import settings as settings_mod
 from .core import __version__
 from .core import config as config_mod
 from .core.permissions import Mode, from_str as mode_from_str
+from .local.manager import LocalModels
 from .protocol import Event, Request, event
 from .session import Session
 
@@ -98,6 +99,10 @@ class Engine:
         self._usage_lock = threading.Lock()
         self.cfg = config_mod.load_config()
         self._catalog: list | None = None
+        self.local = LocalModels(
+            self.cfg, local_dir=config_mod.LOCAL_DIR, app_version=__version__,
+            emit=lambda type_, data: self.emit(event(type_, None, **data)),
+            on_catalog_change=self._share_catalog)
         self.usage = config_mod.load_usage()
         # Browsable roots for the explorer, keyed by absolute path. The
         # ACTIVE one is the session's workspace — the only place the agent
@@ -124,8 +129,12 @@ class Engine:
                         continue
                     if not Path(data["workspace"]).is_dir():
                         continue  # the project folder is gone
-                    sess = Session.restore(data, dict(self.cfg), self.emit)
-                    sess.catalog = self._catalog
+                    sess = Session.restore(data, dict(self.cfg), self.emit, local=self.local)
+                    migrated = self.cfg.get("_migrated_to_local")
+                    if migrated and sess.cfg.get("model") == migrated:
+                        sess.cfg["model"] = "local/auto"   # the snapshot predates local-first
+                        sess.save_state()
+                    sess.catalog = self.merged_catalog()
                     self.sessions[sess.id] = sess
                     self.add_root(str(sess.workspace))
                 except Exception:
@@ -222,9 +231,9 @@ class Engine:
         if model:
             cfg["model"] = model
         self.add_root(workspace)
-        s = Session(sid, workspace, cfg, self.emit, mode=mode_from_str(mode))
+        s = Session(sid, workspace, cfg, self.emit, mode=mode_from_str(mode), local=self.local)
         self.sessions[sid] = s
-        s.catalog = self._catalog
+        s.catalog = self.merged_catalog()
         s.start()
         return s
 
@@ -237,7 +246,7 @@ class Engine:
             except OSError:
                 pass
 
-    async def catalog(self, force: bool = False) -> list:
+    async def catalog(self, force: bool = False, *, announce: bool = True) -> list:
         """Model catalog, fetched and shared by every session (it feeds the
         picker, the router's feasibility filter, and context limits).
 
@@ -258,9 +267,7 @@ class Engine:
             # A session opened before the first fetch (or restored on boot)
             # has no catalog and can't price a hop. Hand it over here too,
             # not only on the fetch path.
-            for s in self.sessions.values():
-                if not s.catalog:
-                    s.catalog = self._catalog
+            self._share_catalog(emit=False)
             return self._catalog
         import time as _time
         now = _time.monotonic()
@@ -285,9 +292,22 @@ class Engine:
             self._catalog = []
         if not self._catalog:
             self._catalog_retry_after = now + 15  # cool down, then retry
-        for s in self.sessions.values():
-            s.catalog = self._catalog
+        self._share_catalog(emit=announce and bool(self._catalog))
         return self._catalog
+
+    def merged_catalog(self) -> list:
+        """Local rows first, then the gateway's. `_catalog` itself stays
+        gateway-only so its retry-when-empty rule keeps working."""
+        return self.local.catalog_rows() + (self._catalog or [])
+
+    def _share_catalog(self, emit: bool = True) -> None:
+        """Hand the merged catalog to every session; `emit` broadcasts it
+        too, which only a change (fetch, install, delete) should do."""
+        merged = self.merged_catalog()
+        for s in list(self.sessions.values()):   # called from worker threads
+            s.catalog = merged
+        if emit:
+            self.emit(event(Event.CATALOG, None, models=merged, refreshed=False))
 
     def add_root(self, path: str) -> str:
         p = str(Path(path).expanduser().resolve())
@@ -336,6 +356,9 @@ class Engine:
             "version": __version__,
             "config_dir": str(config_mod.CONFIG_DIR),
             "models": len(self._catalog or []),
+            "local": {"default_model": self.local.default_id(),
+                      "server_state": self.local.server.state,
+                      "ram_gb": self.local.hw.ram_gb if self.local.hw else None},
             # This app's own tally. NOT an account balance — the gateway
             # exposes none to a data-plane key, and inventing one would be
             # worse than showing nothing.
@@ -352,6 +375,7 @@ class Engine:
         for s in list(self.sessions.values()):
             s.close()
         self.sessions.clear()
+        self.local.shutdown()
 
 
 def create_app(engine: Engine, ui_dir: Path | None = None) -> FastAPI:
@@ -361,6 +385,7 @@ def create_app(engine: Engine, ui_dir: Path | None = None) -> FastAPI:
         engine.loop = asyncio.get_running_loop()
         engine.spawn(engine.pump())
         engine.spawn(engine.catalog())
+        engine.spawn(asyncio.to_thread(engine.local.boot))
         try:
             yield
         finally:
@@ -404,7 +429,8 @@ def create_app(engine: Engine, ui_dir: Path | None = None) -> FastAPI:
     async def models(token: str = ""):
         if not secrets.compare_digest(token, engine.token):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
-        return {"models": await engine.catalog()}
+        await engine.catalog()
+        return {"models": engine.merged_catalog()}
 
     # Where the sidebar's beta-feedback dialog lands: the "Mesh Code Beta
     # Feedback" Google Form. The renderer's CSP only allows connections to
@@ -464,9 +490,15 @@ def create_app(engine: Engine, ui_dir: Path | None = None) -> FastAPI:
             sessions=[s.describe() for s in engine.sessions.values()],
             has_key=bool(engine.cfg.get("api_key")),
             settings=settings_mod.describe(engine.cfg),
-            catalog=engine._catalog or [],
+            catalog=engine.merged_catalog(),
             profile=engine.profile(),
+            local=engine.local.status(),
         )))
+        migrated = engine.cfg.pop("_migrated_to_local", None)
+        if migrated:
+            engine.emit(event(Event.NOTICE, None, level="info", message=(
+                f"Mesh Code now writes code with a model on this machine by default; "
+                f"{migrated} stays as the fallback and is one click away under Settings › Model.")))
         try:
             while True:
                 raw = await ws.receive_text()
@@ -484,6 +516,39 @@ def create_app(engine: Engine, ui_dir: Path | None = None) -> FastAPI:
         app.mount("/", StaticFiles(directory=str(ui_dir), html=True), name="ui")
 
     return app
+
+
+async def _local_request(engine: Engine, kind: str, msg: dict) -> None:
+    """Local-layer commands run off the event loop: a delete or a server
+    stop can block on the process for seconds."""
+    local = engine.local
+    try:
+        if kind == Request.LOCAL_INSTALL:
+            await asyncio.to_thread(local.install, msg.get("model") or "")
+        elif kind == Request.LOCAL_CANCEL:
+            local.cancel(msg.get("job") or "")
+        elif kind == Request.LOCAL_DELETE:
+            await asyncio.to_thread(local.delete, msg.get("model") or "")
+        elif kind == Request.LOCAL_SERVER:
+            action = msg.get("action") or "stop"
+            if action == "restart":
+                # A restart waits for the model to load; never hold the socket loop for that.
+                async def _restart():
+                    try:
+                        await asyncio.to_thread(local.server_action, "restart")
+                    except Exception as e:
+                        engine.emit(event(Event.NOTICE, None, level="warn", message=f"local model: {e}"))
+                    engine.emit(event(Event.LOCAL_STATUS, None, **local.status()))
+                engine.spawn(_restart())
+            else:
+                await asyncio.to_thread(local.server_action, action)
+        elif kind == Request.LOCAL_REFRESH:
+            await asyncio.to_thread(local.refresh, force=True)
+        elif kind == Request.LOCAL_DECLINE:
+            local.decline()
+    except Exception as e:
+        engine.emit(event(Event.NOTICE, None, level="warn", message=f"local model: {e}"))
+    engine.emit(event(Event.LOCAL_STATUS, None, **local.status()))
 
 
 async def handle_request(engine: Engine, msg: dict) -> None:
@@ -576,13 +641,17 @@ async def handle_request(engine: Engine, msg: dict) -> None:
             key, value = msg.get("key"), msg.get("value")
             try:
                 clean = settings_mod.coerce(key, value)
-            except settings_mod.InvalidSetting as e:
+                if key.startswith("local_"):
+                    engine.local.validate_setting(key, clean)
+            except (settings_mod.InvalidSetting, ValueError) as e:
                 engine.emit(event(Event.CONFIG_ERROR, sid, key=key, message=str(e)))
                 return
             targets = [s] if s else list(engine.sessions.values())
             engine.cfg[key] = clean          # new sessions inherit it
             for sess in targets:
                 sess.update_cfg(**{key: clean})
+            if key.startswith("local_"):
+                engine.local.on_setting(key, clean)
             try:
                 # Persist only what the schema declares. engine.cfg also holds
                 # runtime-resolved values (api_key, base_url) that are not
@@ -597,9 +666,14 @@ async def handle_request(engine: Engine, msg: dict) -> None:
             return
 
         if kind == Request.LIST_MODELS:
-            engine.emit(event(Event.CATALOG, sid,
-                              models=await engine.catalog(force=bool(msg.get("refresh"))),
+            await engine.catalog(force=bool(msg.get("refresh")), announce=False)
+            engine.emit(event(Event.CATALOG, sid, models=engine.merged_catalog(),
                               refreshed=bool(msg.get("refresh"))))
+            return
+
+        if kind in (Request.LOCAL_STATUS, Request.LOCAL_INSTALL, Request.LOCAL_CANCEL, Request.LOCAL_DELETE,
+                    Request.LOCAL_SERVER, Request.LOCAL_REFRESH, Request.LOCAL_DECLINE):
+            await _local_request(engine, kind, msg)
             return
 
         if s is None:

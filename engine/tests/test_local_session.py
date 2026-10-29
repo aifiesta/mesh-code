@@ -17,8 +17,8 @@ class StubLocal:
     """What Session needs from LocalModels: a Target, or a reason it can't have one."""
 
     def __init__(self, llama: FakeGateway, *, ready=True, reason="Tiny is still downloading (42%)",
-                 read_timeout=600.0, load_s=0.0):
-        self.llama, self.ready, self.reason = llama, ready, reason
+                 read_timeout=600.0, load_s=0.0, permanent=False):
+        self.llama, self.ready, self.reason, self.permanent = llama, ready, reason, permanent
         self.read_timeout, self.load_s = read_timeout, load_s
         self.recovered = self.forced = 0
 
@@ -26,7 +26,7 @@ class StubLocal:
         if self.load_s and cancel is not None and cancel.wait(self.load_s):
             raise LocalUnavailable("cancelled while the model was loading")
         if not self.ready:
-            raise LocalUnavailable(self.reason)
+            raise LocalUnavailable(self.reason, permanent=self.permanent)
         port = int(self.llama.base_url.rsplit(":", 1)[1].split("/")[0])
         t = Target.for_local(port=port, api_key="local-key", alias="local/tiny", model_id="local/tiny",
                              ctx=32768, entry={"request_defaults": {"temperature": 0.2}})
@@ -208,3 +208,18 @@ def test_a_local_pin_is_never_overridden_by_smart_routing(harness, llama):
     h.session.submit("refactor the whole architecture of this large codebase")
     fin = h.wait_for(Event.TURN_FINISHED)
     assert fin["data"]["local"] is True and len(llama.requests) == 1
+
+
+def test_a_permanent_reason_is_said_once_per_session_not_per_turn(harness, gateway, llama):
+    gateway.script(sse_turn("one"))
+    gateway.script(sse_turn("two"))
+    h = harness(model="local/auto", local=StubLocal(llama, ready=False, permanent=True,
+                                                    reason="local models are turned off in Settings"),
+                local_fallback_model="test/model")
+    h.session.submit("a")
+    h.wait_for(Event.TURN_FINISHED)
+    h.session.submit("b")
+    h.wait_for(Event.TURN_FINISHED, min_count=2)
+    notices = [e for e in h.of(Event.NOTICE) if "turned off" in e["data"]["message"]]
+    assert len(notices) == 1 and "unavailable" in notices[0]["data"]["message"]
+    assert len(gateway.requests) == 2

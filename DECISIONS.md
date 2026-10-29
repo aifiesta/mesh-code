@@ -84,3 +84,18 @@ can move between a local and a cloud model mid-conversation. Tool calls a
 local model prints as text are promoted (never a cloud model's: quoted
 text stays text); an unparseable one gets a single nudge per turn.
 
+## 2026-10-22 — an upgraded install moves to local-first, keeping its cloud model as the fallback
+On the first launch with the local layer, a config whose `model` is a
+cloud id becomes `model: local/auto` with that cloud id as
+`local_fallback_model`, and a one-time notice says so. The migrated config
+is written back at once so it runs once; snapshots pinned to that old model
+move to `local/auto` too; Smart routing is reset to Pinned because it never
+applies to a local pin. Until the download finishes every turn still runs
+on the old model, so nothing breaks. A fresh install starts at `local/auto`
+with no notice.
+
+## 2026-10-22 — the gateway catalog cache stays gateway-only; local rows are merged on the way out
+`Engine._catalog` keeps its retry-when-empty rule; `merged_catalog()`
+prepends the local layer's synthetic zero-price rows wherever a catalog is
+handed to a session, the socket or `/api/models`.
+

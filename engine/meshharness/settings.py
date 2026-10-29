@@ -24,6 +24,7 @@ from typing import Any
 # Categories, in the order a settings screen should show them.
 CATEGORIES = [
     ("model", "Model", "Which model answers, and what it costs"),
+    ("local", "Local model", "A coding model that runs on this machine — free, private, works offline"),
     ("routing", "Routing", "Let Mesh choose per prompt, or pin one model"),
     ("behaviour", "Behaviour", "How the assistant works and writes"),
     ("limits", "Limits & recovery", "What happens on long or stuck turns"),
@@ -59,6 +60,100 @@ SCHEMA: list[dict] = [
         "label": "Never use",
         "help": "Models the router will never pick, even if the table rates them highly.",
         "why": "For models that are wrong for your work, priced badly for you, or that you are not allowed to send data to.",
+    },
+    {
+        "key": "local_enabled",
+        "category": "local",
+        "type": "bool",
+        "label": "Use a local model",
+        "default": True,
+        "help": "Run the recommended model on this machine for coding turns.",
+        "why": "Off hides local models and never starts the server; everything goes to the cloud.",
+    },
+    {
+        "key": "local_auto_setup",
+        "category": "local",
+        "type": "bool",
+        "label": "Download automatically on first run",
+        "default": True,
+        "help": "Fetch the recommended model (up to 8 GB) without asking; bigger ones always ask.",
+        "why": "A first run that just works, at the cost of a few GB of disk you were not asked about.",
+    },
+    {
+        "key": "local_model",
+        "category": "local",
+        "type": "local_model",
+        "label": "Local model",
+        "default": "",
+        "help": "Which downloaded model local/auto resolves to; only installed models are accepted. Empty means the tier recommendation.",
+        "why": "Pick a bigger model if you have the memory, a smaller one if the fan bothers you.",
+    },
+    {
+        "key": "local_fallback_model",
+        "category": "local",
+        "type": "model",
+        "label": "Until it's ready",
+        "default": "anthropic/claude-sonnet-4.5",
+        "help": "Cloud model used while the local one downloads, or if it fails to start.",
+        "why": "The download takes minutes; this is what answers meanwhile.",
+    },
+    {
+        "key": "local_context",
+        "category": "local",
+        "type": "enum",
+        "label": "Context window",
+        "default": "auto",
+        "options": [
+            _opt("auto", "Auto", "The largest that keeps memory free."),
+            _opt("16k", "16k", ""), _opt("32k", "32k", ""), _opt("64k", "64k", ""),
+            _opt("128k", "128k", ""), _opt("256k", "256k", ""),
+        ],
+        "help": "Bigger windows use more memory. Auto keeps the configured amount free.",
+        "why": "Long files need a big window; a laptop needs its memory back.",
+    },
+    {
+        "key": "local_gpu",
+        "category": "local",
+        "type": "enum",
+        "label": "GPU",
+        "default": "auto",
+        "options": [
+            _opt("auto", "Auto", "Use the GPU when it clearly helps."),
+            _opt("on", "On", "Offload every layer, even when memory is unknown."),
+            _opt("off", "Off", "CPU only."),
+        ],
+        "help": "Whether model layers are placed on the GPU.",
+        "why": "Auto is right on Apple Silicon; force it on for a discrete card the probe cannot size.",
+    },
+    {
+        "key": "local_keep_free_gb",
+        "category": "local",
+        "type": "int",
+        "label": "Memory to keep free",
+        "default": 4,
+        "min": 2, "max": 32,
+        "help": "Gigabytes of RAM the local model must leave untouched.",
+        "why": "Lower it for a bigger model; raise it if the rest of the machine starts swapping.",
+    },
+    {
+        "key": "local_idle_unload_min",
+        "category": "local",
+        "type": "int",
+        "label": "Unload after idle",
+        "default": 20,
+        "min": 0, "max": 240,
+        "zero_label": "Never",
+        "help": "Minutes of silence before the model is unloaded from memory.",
+        "why": "Unloading gives the memory back; reloading costs a few seconds on the next turn.",
+    },
+    {
+        "key": "local_use_when_slow",
+        "category": "local",
+        "type": "bool",
+        "label": "Use even when slow",
+        "default": False,
+        "help": "Run the local model on machines where it would be slow (no GPU, little memory).",
+        "why": "Free and private, but a turn may take minutes; off means the cloud fallback answers.",
     },
     {
         "key": "route_mode",
@@ -268,12 +363,12 @@ def coerce(key: str, value: Any) -> Any:
             raise InvalidSetting(f"{key} must be a list of model ids")
         return [x.strip() for x in value if x.strip()]
 
-    if kind in ("model", "text"):
+    if kind in ("model", "text", "local_model"):
         if value is None:
             return ""
         if not isinstance(value, str):
             raise InvalidSetting(f"{key} must be text")
-        return value.strip() if kind == "model" else value
+        return value.strip() if kind in ("model", "local_model") else value
 
     raise InvalidSetting(f"unhandled setting type {kind!r}")
 
