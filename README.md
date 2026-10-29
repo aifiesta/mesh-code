@@ -56,6 +56,10 @@ catalog usable instead of overwhelming:
 
 - **Pin a model** — fuzzy-search the browser (`son45` finds Sonnet 4.5),
   compare context windows and per-1M pricing, filter to free or text-only.
+- **Local first** — the default policy: the model on this machine writes
+  the code for free, and a strong cloud model (Sonnet 5.5, then Opus 5.5,
+  GPT-6.1 Sol, Gemini 4 Argon) takes over a stuck turn on evidence or when
+  you press **Escalate**, then hands back after its share of the turn.
 - **Gateway auto** — or let Mesh's Auto Router pick per prompt, honouring
   the models you have excluded.
 - **Fallback order** — if the primary model fails or is rate-limited, the
@@ -94,7 +98,7 @@ it. Your API key lives in an owner-only file (`~/.mesh-code/credentials`,
 
 CLI agents hide two dozen slash commands behind `/help`. Here the same power
 is layered: clickable pills for what you change often, **⌘K** for everything
-by name *or* by what it does (`rtga` matches Routing: Gateway auto), and
+by name *or* by what it does (`wwga` matches Who writes: Gateway auto), and
 **⌘,** for grouped settings. A guided tour is
 offered — never forced.
 

@@ -191,7 +191,7 @@ export function reduce(state: AppState, action: Action): AppState {
           busy: !!row.busy,
           label: row.label ?? sessions[row.id].label,
           status: sessions[row.id].status ?? {
-            model: row.model, mode: row.mode, route_mode: 'off',
+            model: row.model, mode: row.mode,
             session_cost: row.session_cost ?? 0, session_tokens: row.session_tokens ?? 0,
             workspace: row.workspace ?? '', busy: !!row.busy, servers: [],
           },
@@ -537,6 +537,14 @@ export function reduce(state: AppState, action: Action): AppState {
           }],
         }
 
+      case Ev.POLICY_CHANGED: {
+        // Only an escalation on a weak reply discards the bubble still streaming.
+        const last = s.messages[s.messages.length - 1]
+        return d.discard_reply && last && last.kind === 'assistant' && last.streaming
+          ? { ...s, messages: s.messages.slice(0, -1) }
+          : s
+      }
+
       case Ev.NOTICE:
       case Ev.COMPACTED: {
         const text =
@@ -592,7 +600,7 @@ export function reduce(state: AppState, action: Action): AppState {
           elapsed: d.elapsed, model: d.model, hops: d.hops,
           // Carry the estimate flag onto the permanent record so a computed
           // cost is shown as ~ here too, not just in the live bar.
-          estimated: !!d.cost_estimated, local: !!d.local,
+          estimated: !!d.cost_estimated, local: !!d.local, escalated: d.escalated ?? null,
         }]
         // The plan is the model's OWN bookkeeping, kept by calling
         // update_step. It can finish the work and simply stop ticking the

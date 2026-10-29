@@ -109,6 +109,8 @@ export class EngineClient {
   saveKey(key: string) {
     this.send(Req.SAVE_KEY, { key })
   }
+  escalate(session: string, harder = false) { this.send(Req.ESCALATE, { session, harder }) }
+  deescalate(session: string) { this.send(Req.DEESCALATE, { session }) }
   localInstall(model: string) { this.send(Req.LOCAL_INSTALL, { model }) }
   localCancel(job: string) { this.send(Req.LOCAL_CANCEL, { job }) }
   localDelete(model: string) { this.send(Req.LOCAL_DELETE, { model }) }

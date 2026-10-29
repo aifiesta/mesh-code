@@ -38,6 +38,8 @@ import httpx
 
 from .bridge import Cancelled, Pending
 from .core import compact, loopguard, memory, textcalls, verify
+from .core import policy as policy_mod
+from .core.policy import PolicyController, Tier
 from .core import journal, safety
 from .core import tools as tools_mod
 from .core.client import complete_chat, stream_chat
@@ -83,6 +85,7 @@ class Session:
         self.pending = Pending()
 
         self.cfg = dict(cfg)
+        self.policy = PolicyController(self.cfg)
         self.mode = mode
         self.created_at = time.time()
         # One project can hold several chats (sessions on the same
@@ -130,6 +133,7 @@ class Session:
         self._interrupt = threading.Event()
         self._closing = threading.Event()
         self._busy = threading.Event()
+        self._escalate_request: tuple | None = None   # (reason, harder) from the UI thread
         self._worker = threading.Thread(
             target=self._run, name=f"session-{self.id}", daemon=True)
         self._worker.start()
@@ -149,7 +153,7 @@ class Session:
             Event.STATUS,
             model=self.cfg.get("model"),
             mode=self.mode.value,
-            route_mode=self.cfg.get("route_mode", "off"),
+            policy=self.policy.describe(),
             reasoning_effort=self.cfg.get("reasoning_effort"),
             output_style=self.cfg.get("output_style", "default"),
             max_hops=self.cfg.get("max_hops", 0),
@@ -416,6 +420,93 @@ class Session:
         self.state["cfg"] = self.cfg
         self._status()
 
+    def escalate(self, *, harder: bool = False) -> None:
+        """Escalate was pressed: mid-turn the next hop goes to the strong
+        model; idle, the next turn starts on it."""
+        blocked = self._escalation_blocked()
+        if blocked:
+            self.emit(Event.NOTICE, level="warn", message=blocked)
+        elif self._busy.is_set():
+            self._escalate_request = ("requested", harder)   # the worker takes it at the next hop
+            self.emit(Event.NOTICE, level="info", message="escalating at the next step")
+        else:
+            model = self.policy.escalate_next_turn(harder=harder)
+            if model:
+                self.emit(Event.NOTICE, level="info", message=f"the next turn will run on {model}")
+        self._status()
+
+    def _escalation_blocked(self) -> str | None:
+        if self.policy.policy != "local-first":
+            return "escalation applies to the Local first policy"
+        if not self.cfg.get("api_key"):
+            return "escalation needs a Mesh API key; the local model keeps working"
+        if self.policy.tier is Tier.ESCALATED:
+            return "already on the strong model"
+        if not policy_mod.chain(self.policy.doc, "escalation", self.cfg):
+            return "every escalation model is excluded in Settings"
+        return None
+
+    def _take_escalate_request(self) -> bool:
+        req, self._escalate_request = self._escalate_request, None
+        if not req:
+            return False
+        reason, harder = req
+        if self.policy.request_escalation(reason, explicit=True, harder=harder):
+            self._announce_tier(reason)
+            return True
+        return False
+
+    def _auto_escalate(self, reason: str, *, discard_reply: bool = False) -> bool:
+        """Evidence-driven escalation: needs a key, auto_escalate, and the
+        policy's once-per-turn rule. True when the tier moved."""
+        if self.policy.policy != "local-first" or self.policy.tier is Tier.ESCALATED:
+            return False
+        if not self.cfg.get("auto_escalate", True):
+            return False
+        if not self.cfg.get("api_key"):
+            if not self.state.get("_no_key_said"):
+                self.state["_no_key_said"] = True
+                self.emit(Event.NOTICE, level="info", message=(
+                    f"the local model is struggling ({reason}); escalation needs a Mesh API key"))
+            return False
+        if self.policy.request_escalation(reason):
+            self._announce_tier(reason, discard_reply=discard_reply)
+            return True
+        return False
+
+    def _hand_back_after_failure(self, what: str, nudge: str | None = None) -> bool:
+        """A failed escalated hop goes back to the base tier; the turn goes on
+        (a session-sticky escalation is kept for the next turn)."""
+        if self.policy.tier is not Tier.ESCALATED or self.state.get("_escalation_failed"):
+            return False
+        self.state["_escalation_failed"] = True
+        if nudge:
+            self.state["stall_nudge_msg"] = nudge
+        if not self.state.get("_escalated_hop_done"):
+            self.turn_escalated = None
+        self.policy.hand_back()
+        self.emit(Event.POLICY_CHANGED, tier=self.policy.tier.value, model=None,
+                  reason=f"the strong model could not be reached ({what})")
+        self.emit(Event.NOTICE, level="warn",
+                  message=f"the strong model could not be reached ({what}) — continuing locally")
+        self._status()
+        return True
+
+    def deescalate(self) -> None:
+        if self.policy.deescalate():
+            self.emit(Event.POLICY_CHANGED, tier=self.policy.tier.value, model=None, reason="de-escalated")
+            self.emit(Event.NOTICE, level="info", message="back to the local model")
+        self._status()
+
+    def _announce_tier(self, reason: str, *, discard_reply: bool = False) -> None:
+        e = self.policy.escalation
+        model = e.model if e else None
+        self.turn_escalated = model
+        self.emit(Event.POLICY_CHANGED, tier=self.policy.tier.value, model=model, reason=reason,
+                  discard_reply=discard_reply)
+        self.emit(Event.NOTICE, level="info", message=f"escalating ({reason}) → {model}")
+        self._status()
+
     def close(self) -> None:
         self._closing.set()
         self._interrupt.set()
@@ -451,6 +542,11 @@ class Session:
                 self.emit(Event.ERROR, message=f"{type(e).__name__}: {e}",
                           fatal=False)
             finally:
+                if self._escalate_request is not None:
+                    self._escalate_request = None
+                    self.emit(Event.NOTICE, level="info",
+                              message="the turn ended before the escalation could start")
+                self.policy.end_turn()
                 self._busy.clear()
                 self._status()
 
@@ -484,6 +580,10 @@ class Session:
         self.state.pop("_verify_fired", None)
         self.state["_text_call_nudged"] = False
         self.turn_local = False
+        self.turn_escalated = None
+        self.state["_doomed_batches"] = 0
+        self.state.pop("_escalation_failed", None)
+        self.state.pop("_escalated_hop_done", None)
         self._turn_id = turn_id
 
         # Held on the session (not as locals) so _status() can publish the
@@ -495,6 +595,9 @@ class Session:
         self.turn_estimated = False
         self.turn_tokens = 0
         self.turn_model = None
+
+        if self.policy.begin_turn() is Tier.ESCALATED:
+            self._announce_tier(self.policy.escalation.reason if self.policy.escalation else "requested")
 
         model_used = self.cfg.get("model", "")
         self._status()
@@ -514,14 +617,18 @@ class Session:
 
             self.emit(Event.HOP_STARTED, turn_id=turn_id, hop=hop,
                       model=model_used)
+            self._take_escalate_request()
             try:
-                self._target_for(self._effective_cfg())
+                probe = self._target_for(self._effective_cfg())
             except TargetUnavailable as e:
                 self.emit(Event.ERROR, fatal=True, message=str(e))
                 break
             except KeyboardInterrupt:
                 aborted = True
                 break
+            if self._take_escalate_request() and probe.local:
+                hop -= 1
+                continue        # Escalate landed during the local load: re-resolve
             self._maybe_compact()
 
             extras = []
@@ -535,11 +642,15 @@ class Session:
                 aborted = True
                 break
             except httpx.HTTPStatusError as e:
+                if self._hand_back_after_failure(f"HTTP {e.response.status_code}", nudge):
+                    continue
                 self.emit(Event.ERROR, fatal=True, message=(
                     f"gateway returned HTTP {e.response.status_code}"),
                     detail=_safe_text(e.response))
                 break
             except httpx.RequestError as e:
+                if self._hand_back_after_failure(f"{type(e).__name__}", nudge):
+                    continue
                 self.emit(Event.ERROR, fatal=True,
                           message=f"network error: {type(e).__name__}: {e}")
                 break
@@ -554,7 +665,7 @@ class Session:
                 # it. (Same evidence-based rule as the CLI — never trust the
                 # catalog's supports_thinking flag.)
                 if ("reasoning_effort" in msg
-                        and self.cfg.get("reasoning_effort")
+                        and self._effective_cfg().get("reasoning_effort")
                         and self._effective_model() not in
                         (self.state.get("_reasoning_rejected") or set())):
                     self.state.setdefault("_reasoning_rejected", set()).add(
@@ -562,6 +673,10 @@ class Session:
                     self.emit(Event.NOTICE, level="info", message=(
                         "this model rejected the reasoning-effort setting — "
                         "retrying without it"))
+                    if nudge:
+                        self.state["stall_nudge_msg"] = nudge
+                    continue
+                if self._hand_back_after_failure(msg[:120], nudge):
                     continue
                 self.emit(Event.ERROR, fatal=True, message=msg)
                 break
@@ -570,6 +685,16 @@ class Session:
             self.turn_model = model_used
             usage = meta.get("usage") or {}
             self.turn_tokens += int(usage.get("total_tokens") or 0)
+            if self.policy.tier is Tier.ESCALATED:
+                self.state["_escalated_hop_done"] = True
+            handed_back = self.policy.after_hop(int(usage.get("total_tokens") or 0))
+            if handed_back:
+                self.emit(Event.POLICY_CHANGED, tier=self.policy.tier.value, model=None,
+                          reason=f"handed back to the local model {handed_back}")
+                self.emit(Event.NOTICE, level="info", message=f"handing back to the local model {handed_back}")
+                self.state["stall_nudge_msg"] = (
+                    "A stronger model worked on the previous steps; continue from its "
+                    "progress without redoing it.")
             # Billed figure by request id first (settles ~250ms after the
             # stream), then an in-body cost, then the catalog estimate.
             hop_cost, estimated = 0.0, False
@@ -647,6 +772,11 @@ class Session:
                     user_asked_action=verify.asks_for_action(text))
                 if weak and not self.state.get("_verify_fired"):
                     self.state["_verify_fired"] = weak
+                    can_retry = not hop_limit or hop < hop_limit
+                    if can_retry and self._auto_escalate(f"the reply looked weak: {weak}", discard_reply=True):
+                        if nudge:
+                            self.state["stall_nudge_msg"] = nudge
+                        continue      # the stronger model answers instead
                 if has_reply:
                     self.emit(Event.ASSISTANT_MESSAGE, turn_id=turn_id, hop=hop,
                               text=reply, model=model_used)
@@ -671,12 +801,17 @@ class Session:
                 break
 
             all_doomed = report["total"] > 0 and report["doomed"] == report["total"]
+            self.state["_doomed_batches"] = self.state.get("_doomed_batches", 0) + 1 if all_doomed else 0
+            if self.state["_doomed_batches"] >= 2:
+                self._auto_escalate("two batches of failed tool calls in a row")
 
             action = self.state["stall"].observe(
                 loopguard.batch_signature(tool_calls),
                 all_doomed=all_doomed,
             )
             if action in ("nudge", "renudge"):
+                # The stronger model gets the nudge, when there is one to call.
+                self._auto_escalate("the model kept repeating the same action")
                 self.state["stall_nudge_msg"] = (
                     "You appear to be repeating the same action without "
                     "making progress. Stop and either try a materially "
@@ -698,6 +833,7 @@ class Session:
                         f"{self.state['stall'].last_cycles} times in a row"))
                     break
 
+        self.policy.end_turn()
         self.session_cost += self.turn_cost
         self.session_tokens += self.turn_tokens
         elapsed = time.time() - started
@@ -713,12 +849,13 @@ class Session:
                       sealed=sealed, elapsed=round(elapsed, 2),
                       model=model_used, cost=round(turn_cost, 6),
                       cost_estimated=turn_estimated, tokens=turn_tokens,
-                      local=self.turn_local,
+                      local=self.turn_local, escalated=self.turn_escalated,
                       session_cost=round(self.session_cost, 6))
         else:
             self.emit(Event.TURN_FINISHED, turn_id=turn_id, hops=hop,
                       model=model_used, cost=round(turn_cost, 6),
                       cost_estimated=turn_estimated, local=self.turn_local,
+                      escalated=self.turn_escalated,
                       tokens=turn_tokens, elapsed=round(elapsed, 2),
                       session_cost=round(self.session_cost, 6),
                       plan=self.state["plan"].to_dict() if self.state["plan"] else None,
@@ -926,9 +1063,9 @@ class Session:
             self.state.pop("_hop_model", None)
             self.state.pop("_hop_ctx", None)
             return Target.from_cfg(cfg)
-        if self.local is None:
-            raise TargetUnavailable(f"{model} needs the local model layer, which this engine does not have")
         try:
+            if self.local is None:
+                raise LocalUnavailable("this engine has no local model layer", permanent=True)
             target = self.local.target_for(
                 model, cancel=self._interrupt,
                 notify=lambda msg: self.emit(Event.NOTICE, level="info", message=msg))
@@ -948,9 +1085,13 @@ class Session:
                     else f"Local model not ready ({e}) — using {fallback} for this turn"))
             self.state["_hop_model"] = fallback
             self.state["_hop_ctx"] = compact.context_limit(fallback, self.catalog)
+            if self.policy.tier is Tier.LOCAL:
+                self.policy.tier = Tier.CLOUD_FALLBACK
             return Target.from_cfg({**cfg, "model": fallback})
         self.state["_hop_model"] = target.display_id
         self.state["_hop_ctx"] = target.context_limit
+        if self.policy.tier is Tier.CLOUD_FALLBACK:
+            self.policy.tier = Tier.LOCAL
         return target
 
     def _compact_system_prompt(self) -> str:
@@ -971,14 +1112,12 @@ class Session:
     # routing / compaction
     # ------------------------------------------------------------------
     def _effective_model(self) -> str:
-        return self.cfg.get("model", "")
+        return self._effective_cfg()["model"]
 
     def _effective_cfg(self) -> dict:
-        """cfg for THIS hop: gateway auto routing when asked for (never over a
-        local pin), minus settings this model has already proven it can't take."""
-        cfg = dict(self.cfg)
-        cfg["model"] = self._effective_model()
-        cfg["auto_route"] = cfg.get("route_mode") == "auto" and not is_local(cfg["model"])
+        """cfg for THIS hop under the policy's current tier, minus settings
+        this model has already proven it can't take."""
+        cfg = self.policy.hop_cfg(self.cfg)
         rejected = self.state.get("_reasoning_rejected") or set()
         if cfg.get("reasoning_effort") and cfg["model"] in rejected:
             cfg.pop("reasoning_effort", None)

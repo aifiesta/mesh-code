@@ -657,10 +657,11 @@ def test_session_cost_and_tokens_survive_the_full_persistence_chain(gateway, har
         restored.close()
 
 
-def test_gateway_auto_routing_sends_auto_and_the_exclusions(gateway, harness):
+def test_gateway_auto_routing_sends_auto_the_exclusions_and_the_profile(gateway, harness):
     gateway.script(sse_turn("picked"))
-    h = harness(route_mode="auto", exclude_models=["bad/model"])
+    h = harness(policy="cloud-auto", exclude_models=["bad/model"], weight_profile="cost_first")
     h.session.submit("hello")
     h.wait_for(Event.TURN_FINISHED)
     sent = gateway.requests[-1]
     assert sent["model"] == "auto" and sent["exclude_models"] == ["bad/model"]
+    assert sent["weight_profile"] == "cost_first"

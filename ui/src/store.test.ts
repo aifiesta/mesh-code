@@ -57,3 +57,19 @@ describe('local layer in the store', () => {
     expect(s.appNotices).toHaveLength(1)
   })
 })
+
+
+describe('policy changes and the streaming bubble', () => {
+  const start = (s: AppState) => {
+    let n = fire(s, Ev.SESSION_STARTED, { title: 'w', workspace: '/w' }, 's1')
+    n = fire(n, Ev.ASSISTANT_DELTA, { text: "I've created" }, 's1')
+    return n
+  }
+  it('drops the streaming bubble only when the engine says the reply is discarded', () => {
+    let s = start(initialState)
+    s = fire(s, Ev.POLICY_CHANGED, { tier: 'escalated', model: 'x/y', reason: 'weak', discard_reply: false }, 's1')
+    expect(s.sessions.s1.messages).toHaveLength(1)
+    s = fire(s, Ev.POLICY_CHANGED, { tier: 'escalated', model: 'x/y', reason: 'weak', discard_reply: true }, 's1')
+    expect(s.sessions.s1.messages).toHaveLength(0)
+  })
+})

@@ -22,9 +22,11 @@ a = Analysis(
     ["../engine/meshharness/__main__.py"],
     pathex=["../engine"],
     binaries=[],
-    # The pinned local-model manifest: data the import scan cannot see.
+    # JSON the import scan cannot see: the local-model manifest, the policy chains.
     datas=[("../engine/meshharness/local/manifest.json",
-            "meshharness/local")],
+            "meshharness/local"),
+           ("../engine/meshharness/core/policy.json",
+            "meshharness/core")],
     hiddenimports=hidden,
     hookspath=[],
     runtime_hooks=[],

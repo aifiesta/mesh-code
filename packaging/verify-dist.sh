@@ -48,6 +48,8 @@ for f in "Contents/Resources/engine/mesh-code-engine" "Contents/Resources/ui/ind
 done
 MANIFEST=$(find "$MOUNTED/$APP_NAME.app/Contents/Resources/engine" -path '*meshharness/local/manifest.json' | wc -l | tr -d ' ')
 [ "$MANIFEST" = "1" ] && ok "local manifest.json bundled" || bad "local manifest missing (no local model can be chosen)"
+POLICY=$(find "$MOUNTED/$APP_NAME.app/Contents/Resources/engine" -path '*meshharness/core/policy.json' | wc -l | tr -d ' ')
+[ "$POLICY" = "1" ] && ok "policy.json bundled" || bad "policy.json missing (every session would fail to start)"
 LLAMA="$MOUNTED/$APP_NAME.app/Contents/Resources/llama/llama-server"
 if [ -x "$LLAMA" ] && "$LLAMA" --version >/dev/null 2>&1; then
   ok "llama-server runs ($("$LLAMA" --version 2>&1 | head -1)) · $(cat "$(dirname "$LLAMA")/variant" "$(dirname "$LLAMA")/tag" 2>/dev/null | tr '\n' ' ')"

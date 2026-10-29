@@ -148,3 +148,38 @@ between. The refusal and claimed-work checks live on in `core/verify.py`:
 they are the cheapest audit triggers there are, so a weak reply is recorded
 per turn now and acted on once the auditor exists. The old `route` key
 (cheapest/fastest/balanced, pre-0.5.0) is still dropped on load.
+
+## 2026-10-22 — the policy ladder is explicit: local writes, the cloud escalates on evidence, and hands back
+
+`core/policy.py` holds one tier per turn: local, cloud fallback, gateway
+auto, pinned, or escalated. Escalation happens on the same evidence the loop
+already produces (a repeated action, two failed tool batches, a refusal or
+claimed work) or on the Escalate button, at most once per turn when
+automatic, and hands back after 8 hops or 300k tokens with a note so the
+local model continues instead of restarting. The old router escalated on a
+hidden difficulty ladder nobody could see; this one names its reason in the
+transcript and the control bar every time.
+
+## 2026-10-22 — model chains ship as data, picked by benchmark, with the user's choice first
+
+`core/policy.json` carries the audit and escalation chains chosen from the
+Artificial Analysis indices cross-checked against the Mesh catalog; the
+user's own pick and fallbacks go in front, exclusions come out, and the rest
+of the chain rides as the gateway's `models` field so a provider outage fails
+over server-side. The file can be re-pinned without touching code.
+
+## 2026-10-22 — Harder is one effort level above the configured one, for that escalation only
+
+"Escalate harder" raises the reasoning effort by one step over the user's
+escalation effort (capped at max) and applies to the escalation it was
+pressed for; a session-sticky escalation continues at the configured effort.
+A fixed "xhigh" could lower a user's "max", and a sticky Harder would quietly
+bill every later turn at the top rate.
+
+## 2026-10-22 — a failed escalated hop hands back the turn but keeps a session-sticky escalation
+
+When the strong model cannot be reached (transport error, HTTP error or an
+in-band gateway error) the current turn continues on the local model with
+the pending nudge intact, and the turn is not summarised as escalated unless
+an escalated hop actually completed. The user's "stay escalated this
+session" choice survives one bad hop; only "Back to local" clears it.

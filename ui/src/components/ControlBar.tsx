@@ -15,13 +15,15 @@ import { Field } from './Field'
  * Every popover ends with the same escape hatch to the full settings, so the
  * bar teaches that more exists without having to show it.
  */
-export function ControlBar({ status, settings, catalog, local, onSet, onOpenSettings }: {
+export function ControlBar({ status, settings, catalog, local, onSet, onOpenSettings, onEscalate, onDeescalate }: {
   status: Status | null
   settings: SettingsDoc | null
   catalog: CatalogModel[]
   local: LocalStatus | null
   onSet: (key: string, value: any) => void
   onOpenSettings: (tab?: string) => void
+  onEscalate: (harder: boolean) => void
+  onDeescalate: () => void
 }) {
   const [open, setOpen] = useState<string | null>(null)
   const ref = useRef<HTMLDivElement>(null)
@@ -31,29 +33,35 @@ export function ControlBar({ status, settings, catalog, local, onSet, onOpenSett
   const spec = (key: string): SettingSpec | undefined =>
     settings?.settings.find((s) => s.key === key)
 
-  const routeMode = String(spec('route_mode')?.value ?? 'off')
-  const routeLabel = spec('route_mode')?.options?.find((o) => o.value === routeMode)?.label ?? 'Pinned'
+  const policy = status?.policy ?? null
+  const mode = policy?.policy ?? String(spec('policy')?.value ?? 'local-first')
   const model = String(spec('model')?.value ?? status?.model ?? '—')
   const row = catalog.find((m) => String(m.id) === model)
   const inPrice = row ? pricePerM(row, 'prompt') : null
 
-  // What runs right now versus what is configured: with routing on they
-  // differ for a whole turn.
+  // What runs right now versus what is configured: under gateway routing or
+  // an escalation they differ for a whole turn.
   const live = !!status?.busy
   const turnModel = status?.turn_model || null
-  const isLocal = model.startsWith('local/')
-  const routing = routeMode !== 'off' && !isLocal      // a local pin is never routed
-  const routedAway = !!turnModel && turnModel !== model
-  // With routing on and nothing run yet, naming the pinned model is simply
-  // wrong — the router has not chosen, and it usually will not choose that
-  // one. Name what DECIDES until there is a real answer to show.
-  const pending = routing && !turnModel
-  const localId = row?.resolves_to ?? model
+  const localId = local?.default_model ?? 'local/auto'
   const localJob = local?.jobs.find((j) => j.kind === 'model' && j.target === localId) ?? null
   const localInstalled = !!local?.models.find((m) => m.id === localId)?.installed
   const localName = local?.models.find((m) => m.id === localId)?.label ?? shortModel(localId)
-  const shownModel = turnModel
-    ?? (routing ? 'Gateway picks' : model)
+  const escalated = policy?.escalated ?? null
+  const tier = policy?.tier ?? (mode === 'cloud-auto' ? 'cloud_auto' : mode === 'pinned' ? 'pinned' : 'local')
+  const pending = mode === 'cloud-auto' && !turnModel
+  const lit = tier === 'escalated' || mode === 'cloud-auto'
+  const value = tier === 'escalated' && escalated ? `Escalated · ${shortModel(escalated)}`
+    : mode === 'cloud-auto' ? (turnModel ? shortModel(turnModel) : 'Gateway picks')
+    : mode === 'pinned' ? shortModel(turnModel ?? model)
+    : localJob ? `Local (${Math.round((100 * localJob.bytes) / Math.max(localJob.total, 1))}%)`
+    : !localInstalled && local ? 'Local (download needed)'
+    : `Local · ${shortModel(localId)}`
+  const writerLine = mode === 'local-first'
+    ? (localInstalled ? `${localName} on this machine · free` : 'Local model not ready · cloud fallback answers')
+    : mode === 'cloud-auto' ? 'Mesh’s Auto Router picks per prompt'
+    : row ? `${shortModel(model)} · ${fmtUsd(inPrice)} in · ${fmtUsd(pricePerM(row, 'completion'))} out, per 1M`
+          : shortModel(model)
   // Session totals only advance when a turn ENDS, so the in-flight turn has
   // to be added in or the numbers sit frozen for the whole run.
   const tokens = (status?.session_tokens ?? 0) + (live ? (status?.turn_tokens ?? 0) : 0)
@@ -64,57 +72,48 @@ export function ControlBar({ status, settings, catalog, local, onSet, onOpenSett
 
   return (
     <div className="controlbar" ref={ref}>
-      {/* One pill names what decides the model; its popover holds the
-          routing switch and the pinned model. */}
+      {/* One pill names who writes right now; its popover holds the policy
+          switch, the ladder and the Escalate controls. */}
       <div className="ctl ctl-model">
-        <button className={`ctl-btn ${open === 'model' ? 'on' : ''} ${pending ? 'pending' : ''} ${routing ? 'lit' : ''}`}
+        <button className={`ctl-btn ${open === 'model' ? 'on' : ''} ${pending ? 'pending' : ''} ${lit ? 'lit' : ''}`}
                 onClick={() => toggle('model')}
-                title={pending
-                  ? `${routeLabel} routing — the model is chosen per prompt (fallback: ${model})`
-                  : routedAway ? `Routed to ${turnModel} (pinned: ${model})` : shownModel}>
-          <span className="ctl-label">Model</span>
-          <span className="ctl-value">
-            {pending ? 'Auto routing'
-              : isLocal && !turnModel && localJob ? `Local (${Math.round((100 * localJob.bytes) / Math.max(localJob.total, 1))}%)`
-              : isLocal && !turnModel && !localInstalled && local ? 'Local (download needed)'
-              : isLocal && !turnModel ? `Local · ${shortModel(localId)}`
-              : shortModel(shownModel)}
-          </span>
-          {routedAway && <span className="ctl-flag" title="chosen by the gateway">routed</span>}
-          {(status?.turn_local || (isLocal && !turnModel && localInstalled)) && <span className="tag local" title="Runs on this machine, free">local</span>}
+                title={policy?.escalated_reason ? `Escalated: ${policy.escalated_reason}` : writerLine}>
+          <span className="ctl-label">{tier === 'escalated' ? 'Cloud' : mode === 'local-first' ? 'Writer' : 'Model'}</span>
+          <span className="ctl-value">{value}</span>
+          {status?.turn_local && <span className="tag local" title="Runs on this machine, free">local</span>}
+          {policy?.escalation_pending && tier !== 'escalated' && <span className="ctl-flag" title="the next turn runs on the strong model">next</span>}
         </button>
         {open === 'model' && (
-          <Pop title="Model" onSettings={() => { setOpen(null); onOpenSettings(routing ? 'routing' : 'model') }}>
-            {spec('route_mode') && <Field spec={spec('route_mode')!} onChange={onSet} compact label="Who picks" />}
+          <Pop title="Policy" onSettings={() => { setOpen(null); onOpenSettings('routing') }}>
+            {spec('policy') && <Field spec={spec('policy')!} onChange={onSet} compact label="Who writes" />}
 
-            {!routing && (
-              <div className="pinned-model">
-                <span className="pinned-name" title={isLocal ? localId : model}>{isLocal ? localName : shortModel(model)}</span>
-                <span className="pinned-price">
-                  {isLocal ? 'free · on this machine'
-                    : row ? <>{fmtUsd(inPrice)} in · {fmtUsd(pricePerM(row, 'completion'))} out, per 1M</>
-                         : 'Pricing loads with the catalog.'}
-                </span>
-                <button className="btn subtle" onClick={() => { setOpen(null); onOpenSettings('model') }}>
-                  Change model
-                </button>
+            <div className="ladder">
+              <div className="ladder-row"><span>Writes</span><b>{writerLine}</b></div>
+              {mode === 'local-first' && (
+                <>
+                  <div className="ladder-row"><span>Audits</span><b>{policy?.audit_model ? shortModel(policy.audit_model) : '—'} <i>soon</i></b></div>
+                  <div className="ladder-row"><span>Escalates to</span><b>{policy?.escalation_model ? shortModel(policy.escalation_model) : '—'}</b></div>
+                </>
+              )}
+            </div>
+
+            {mode === 'local-first' && (
+              <div className="ladder-actions">
+                {tier === 'escalated' || policy?.escalation_pending
+                  ? <button className="btn subtle" onClick={() => { setOpen(null); onDeescalate() }}>Back to local</button>
+                  : <>
+                      <button className="btn primary" onClick={() => { setOpen(null); onEscalate(false) }}>
+                        {live ? 'Escalate now' : 'Escalate next turn'}
+                      </button>
+                      <button className="btn subtle" onClick={() => { setOpen(null); onEscalate(true) }} title="One reasoning level higher, for this escalation">Harder</button>
+                    </>}
               </div>
             )}
-
-            {routeMode === 'auto' && (
-              <p className="pop-note">{isLocal
-                ? 'A local model pin is never routed; pick a cloud model for the gateway to route.'
-                : 'Mesh’s Auto Router picks upstream, so the model is known once the first hop answers.'}</p>
+            {mode === 'pinned' && (
+              <button className="btn subtle" onClick={() => { setOpen(null); onOpenSettings('model') }}>Change model</button>
             )}
-
-            {routing && (
-              <p className="pop-fallback">
-                {routedAway
-                  ? <>This turn ran on <b>{shortModel(turnModel!)}</b>. </>
-                  : null}
-                Fallback when the gateway can’t pick: <b>{shortModel(model)}</b>
-                <button className="link" onClick={() => { setOpen(null); onOpenSettings('model') }}>change</button>
-              </p>
+            {mode === 'cloud-auto' && (
+              <p className="pop-note">Mesh’s Auto Router picks upstream, so the model is known once the first hop answers.</p>
             )}
           </Pop>
         )}
