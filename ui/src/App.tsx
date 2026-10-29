@@ -583,6 +583,7 @@ export default function App() {
             setTheme,
             (m: string) => session && client?.setMode(session.id, m),
             () => setSheet('local'),
+            () => setSheet('budget'),
             state.local?.default_model ? () => client?.localServer('restart') : null,
           )}
         />
@@ -655,6 +656,7 @@ export default function App() {
             ? client.fileUrl(session.id, session.file.root ?? session.workspace, session.file.path)
             : null}
           onInterrupt={() => { dispatch({ t: 'stopping', id: session.id }); client?.interrupt(session.id) }}
+          onRunCommand={(command) => client?.runCommand(session.id, command)}
           onEscalate={session.status?.policy?.policy === 'local-first' ? () => client?.escalate(session.id) : undefined}
           escalated={session.status?.policy?.tier === 'escalated'}
           onMode={(m) => client?.setMode(session.id, m)}
@@ -710,7 +712,7 @@ export default function App() {
   )
 }
 
-function SessionView({ s, controls, banner, profile, local, railOpen, onRailResize, railResizing, onSend, onInterrupt, onEscalate, escalated, onMode, onCommands, onLoadJournal, onDecide, approvalIsTop, onAnswer, onDismissAsk, onStopServer, onManageKey, onManageLocal, onHideRail, onShowRail, onTermRun, onTermInterrupt, onTermClear, onCloseFile, onMention, onNeedFiles, onOpenRef, fileUrl }: {
+function SessionView({ s, controls, banner, profile, local, railOpen, onRailResize, railResizing, onSend, onInterrupt, onRunCommand, onEscalate, escalated, onMode, onCommands, onLoadJournal, onDecide, approvalIsTop, onAnswer, onDismissAsk, onStopServer, onManageKey, onManageLocal, onHideRail, onShowRail, onTermRun, onTermInterrupt, onTermClear, onCloseFile, onMention, onNeedFiles, onOpenRef, fileUrl }: {
   s: SessionState
   controls: React.ReactNode
   /** App-level notices and the local download banner, above the transcript. */
@@ -723,6 +725,7 @@ function SessionView({ s, controls, banner, profile, local, railOpen, onRailResi
   onOpenRef: (path: string) => void
   fileUrl: string | null
   onInterrupt: () => void
+  onRunCommand: (command: string) => void
   onEscalate?: () => void
   escalated?: boolean
   onMode: (m: Mode) => void
@@ -821,6 +824,17 @@ function SessionView({ s, controls, banner, profile, local, railOpen, onRailResi
                 )
               case 'tool':
                 return <ToolCardView key={m.id} card={m.card} />
+              case 'shell':
+                return (
+                  <div className={`tool-card shell-card ${m.running ? 'running' : m.ok ? 'ok' : 'error'}`} key={m.id} id={`m-${m.id}`}>
+                    <div className="tool-head">
+                      <span className="tool-icon">$</span>
+                      <span className="tool-summary mono">{m.command}</span>
+                      <span className="tool-state">{m.running ? <span className="pulse">running…</span> : m.ok ? 'done' : 'failed'}</span>
+                    </div>
+                    {m.output && <pre className="tool-body">{m.output}</pre>}
+                  </div>
+                )
               case 'plan':
                 return <PlanCard key={m.id} plan={m.plan} />
               case 'ask':
@@ -872,6 +886,7 @@ function SessionView({ s, controls, banner, profile, local, railOpen, onRailResi
           controls={controls}
           onSend={onSend}
           onInterrupt={onInterrupt}
+          onRunCommand={onRunCommand}
           onEscalate={onEscalate}
           escalated={escalated}
           onMode={onMode}
@@ -936,6 +951,7 @@ function paletteActions(
   setTheme: (t: 'system' | 'light' | 'dark') => void,
   setMode: (m: string) => void,
   manageLocal: () => void,
+  manageBudget: () => void,
   restartLocal: (() => void) | null,
 ): Action[] {
   return [
@@ -952,6 +968,9 @@ function paletteActions(
     { id: 'tour', title: 'Take the guided tour', group: 'Actions',
       hint: 'A two-minute walkthrough anchored to the real UI',
       keywords: 'walkthrough onboarding help intro getting started features', run: startTour },
+    { id: 'budget', title: 'Set the monthly budget', group: 'Actions',
+      hint: 'How much the cloud may spend; today’s share follows from it',
+      keywords: 'budget limit spend monthly cost money usage cap dollars', run: manageBudget },
     { id: 'local', title: 'Manage local models', group: 'Actions',
       hint: 'Download, delete or switch the model that runs on this machine',
       keywords: 'local offline llama gguf download free machine', run: manageLocal },

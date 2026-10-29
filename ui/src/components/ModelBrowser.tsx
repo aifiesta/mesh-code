@@ -1,6 +1,6 @@
 import { useMemo, useState, useRef, useEffect } from 'react'
 import { fuzzyFilter, type Match } from '../fuzzy'
-import { fmtCtx, fmtUsd, pricePerM, type CatalogModel } from '../types'
+import { fmtBytes, fmtCtx, fmtUsd, pricePerM, type CatalogModel } from '../types'
 import { Highlight } from './Highlight'
 
 type Sort = 'name' | 'cheapest' | 'context'
@@ -130,8 +130,10 @@ export function ModelBrowser({ catalog, current, excluded, onPick, onExclude, on
           return (
             <div className={`browser-row ${id === current ? 'current' : ''} ${off ? 'off' : ''}`} key={id}>
               <span className="m-id" title={m.local && m.name ? `${id} — ${m.name}` : id}>
-                <Highlight text={id} positions={match.positions} />
-                {m.local && <span className="tag local" title="Runs on this machine, free">{m.installed ? 'local' : 'not downloaded'}</span>}
+                <span className="m-name"><Highlight text={id} positions={match.positions} /></span>
+                {m.local && (m.installed || !m.size_bytes
+                  ? <span className="tag local" title="Runs on this machine, free">local</span>
+                  : <span className="tag local" title="Not downloaded yet">↓ {fmtBytes(m.size_bytes)}</span>)}
                 {m.supports_thinking && <span className="tag think" title="Supports a reasoning budget">think</span>}
                 {id === current && <span className="tag now">in use</span>}
                 {off && <span className="tag never">never</span>}

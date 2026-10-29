@@ -64,7 +64,7 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 }
 
 export function Composer({ busy, stopping, mode, controls, onSend, onInterrupt, onMode, onCommands,
-                          fileIndex, onNeedFiles, onEscalate, escalated }: {
+                          fileIndex, onNeedFiles, onEscalate, escalated, onRunCommand }: {
   busy: boolean
   /** Stop was clicked; the engine has not confirmed the abort yet. */
   stopping?: boolean
@@ -73,6 +73,8 @@ export function Composer({ busy, stopping, mode, controls, onSend, onInterrupt, 
   controls?: React.ReactNode
   onSend: (text: string, attachments: { name: string; data_url: string }[], refs: string[]) => void
   onInterrupt: () => void
+  /** `!command`: run it in the project folder, like Claude Code's bash mode. */
+  onRunCommand: (command: string) => void
   /** Present under the local-first policy: hand the rest of the turn to the strong model. */
   onEscalate?: () => void
   escalated?: boolean
@@ -83,6 +85,7 @@ export function Composer({ busy, stopping, mode, controls, onSend, onInterrupt, 
   onNeedFiles: () => void
 }) {
   const [text, setText] = useState('')
+  const [shellMode, setShellMode] = useState(false)
   const [files, setFiles] = useState<{ name: string; data_url: string }[]>([])
   /** Workspace files referenced in this message — badges above the box. */
   const [refs, setRefs] = useState<string[]>([])
@@ -96,13 +99,15 @@ export function Composer({ busy, stopping, mode, controls, onSend, onInterrupt, 
 
   useDismissable(modeOpen, () => setModeOpen(false), modeRef)
 
-  const addRef = (path: string) =>
-    setRefs((r) => (r.includes(path) ? r : [...r, path]))
+  // A command has no attachments: in shell mode a path is typed into it.
+  const shellRef = useRef(false)
+  shellRef.current = shellMode
+  const addRef = (path: string) => {
+    if (shellRef.current) setText((t) => (t && !t.endsWith(' ') ? `${t} ${shellQuote(path)}` : t + shellQuote(path)))
+    else setRefs((r) => (r.includes(path) ? r : [...r, path]))
+  }
 
-  // The explorer drops a path in here rather than opening an editor —
-  // pointing the agent at a file is the thing you actually want to do next.
-  // It lands as a badge, not as text: a path pasted mid-sentence was easy
-  // to mangle and the model could not tell it from prose.
+  // An explorer path lands as a badge the model can tell from prose; shell mode types it.
   useEffect(() => {
     const onMention = (e: Event) => {
       addRef((e as CustomEvent).detail as string)
@@ -113,7 +118,8 @@ export function Composer({ busy, stopping, mode, controls, onSend, onInterrupt, 
   }, [])
 
   // ---- @ picker -------------------------------------------------------
-  const at = useMemo(() => atQuery(text, caret), [text, caret])
+  // No picker in shell mode: `@` there is part of the command (`@types/node`).
+  const at = useMemo(() => (shellMode ? null : atQuery(text, caret)), [shellMode, text, caret])
   useEffect(() => {
     if (at && !fileIndex) onNeedFiles()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -161,6 +167,13 @@ export function Composer({ busy, stopping, mode, controls, onSend, onInterrupt, 
 
   function send() {
     const t = text.trim()
+    if (shellMode) {
+      if (!t) return
+      onRunCommand(t)
+      setText('')
+      setShellMode(false)   // one command per `!`, as in Claude Code
+      return
+    }
     if (!t && files.length === 0 && refs.length === 0) return
     onSend(t, files, refs)
     setText('')
@@ -169,7 +182,7 @@ export function Composer({ busy, stopping, mode, controls, onSend, onInterrupt, 
   }
 
   async function absorb(list: FileList | null) {
-    if (!list) return
+    if (!list || shellMode) return
     for (const f of Array.from(list)) {
       if (!f.type.startsWith('image/')) continue
       const raw: string = await new Promise((res) => {
@@ -201,7 +214,7 @@ export function Composer({ busy, stopping, mode, controls, onSend, onInterrupt, 
         absorb(e.dataTransfer.files)
       }}
     >
-      {(files.length > 0 || refs.length > 0) && (
+      {!shellMode && (files.length > 0 || refs.length > 0) && (
         <div className="attachments">
           {refs.map((p) => (
             <FileBadge key={p} path={p}
@@ -232,17 +245,20 @@ export function Composer({ busy, stopping, mode, controls, onSend, onInterrupt, 
         </div>
       )}
 
-      {/* The box is the box: border, focus ring and the send affordance all
-          belong to the field itself. Everything else moved OUT of it and
-          below, so a narrow window squeezes a quiet meta row rather than
-          wrapping "Ask every time" onto three lines inside the input. */}
-      <div className="composer-input">
+      {/* Only the border, focus ring and send button live in the box, so a
+          narrow window squeezes the meta row below rather than the input. */}
+      <div className={`composer-input ${shellMode ? 'shell' : ''}`}>
+        {shellMode && <span className="shell-badge" title="Runs in the project folder; the output goes to the chat and the model">shell</span>}
         <textarea
           ref={ref}
           value={text}
           rows={1}
-          placeholder={busy ? 'Queue another message…' : 'Ask for anything, @ a file, or / for commands'}
-          onChange={(e) => { setText(e.target.value); setCaret(e.target.selectionStart ?? 0) }}
+          placeholder={shellMode ? 'Command to run in the project folder · ⌫ to leave' : busy ? 'Queue another message…' : 'Ask anything · @ a file · / commands · ! shell'}
+          onChange={(e) => {
+            const v = e.target.value
+            if (!shellMode && !text && v.startsWith('!')) { setShellMode(true); setText(v.slice(1)); return }
+            setText(v); setCaret(e.target.selectionStart ?? 0)
+          }}
           onSelect={(e) => setCaret((e.target as HTMLTextAreaElement).selectionStart ?? 0)}
           onPaste={(e) => absorb(e.clipboardData.files)}
           onKeyDown={(e) => {
@@ -254,10 +270,9 @@ export function Composer({ busy, stopping, mode, controls, onSend, onInterrupt, 
               if (e.key === 'Escape') { e.preventDefault(); setText((t) => t.slice(0, at.start) + t.slice(caret)); return }
             }
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
-            // "/" on an empty field opens the palette. This replaces the two
-            // labelled buttons that used to sit in the bar — one fewer thing
-            // on screen, and the placeholder teaches it.
-            if (e.key === '/' && !text) { e.preventDefault(); onCommands() }
+            // "/" on an empty field opens the palette; the placeholder teaches it.
+            if (e.key === '/' && !text && !shellMode) { e.preventDefault(); onCommands() }
+            if (shellMode && !text && (e.key === 'Backspace' || e.key === 'Escape')) { e.preventDefault(); setShellMode(false); return }
             // Escape from the composer interrupts the run — matching the
             // Stop button's advertised shortcut. Only when focus is here, so
             // it never competes with an overlay's own Escape.
@@ -313,12 +328,12 @@ export function Composer({ busy, stopping, mode, controls, onSend, onInterrupt, 
         {/* Drawn, not typed: a "+" glyph renders at the cap height of a
             13px font, which is about 7px of actual mark — invisible next
             to a text label. This is a 16px stroke in a 30px target. */}
-        <button className="meta-icon" title="Attach images"
+        {!shellMode && <button className="meta-icon" title="Attach images"
                 onClick={() => fileRef.current?.click()} aria-label="Attach images">
           <svg viewBox="0 0 16 16" aria-hidden="true">
             <path d="M8 3.2v9.6M3.2 8h9.6" />
           </svg>
-        </button>
+        </button>}
         <input ref={fileRef} type="file" accept="image/*" multiple hidden
                onChange={(e) => { absorb(e.target.files); e.target.value = '' }} />
 
@@ -328,4 +343,8 @@ export function Composer({ busy, stopping, mode, controls, onSend, onInterrupt, 
       </div>
     </div>
   )
+}
+
+function shellQuote(path: string): string {
+  return /^[\w./-]+$/.test(path) ? path : `'${path.replace(/'/g, `'\\''`)}'`
 }

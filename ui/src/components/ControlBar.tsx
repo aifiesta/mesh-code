@@ -52,6 +52,7 @@ export function ControlBar({ status, settings, catalog, local, budget, onSet, on
   const localName = local?.models.find((m) => m.id === localId)?.label ?? shortModel(localId)
   const escalated = policy?.escalated ?? null
   const tier = policy?.tier ?? (mode === 'cloud-auto' ? 'cloud_auto' : mode === 'pinned' ? 'pinned' : 'local')
+  const writesLocally = tier === 'local' && mode === 'local-first' && localInstalled
   const pending = mode === 'cloud-auto' && !turnModel
   const lit = tier === 'escalated' || mode === 'cloud-auto'
   const value = tier === 'escalated' && escalated ? `Escalated · ${shortModel(escalated)}`
@@ -94,7 +95,6 @@ export function ControlBar({ status, settings, catalog, local, budget, onSet, on
               <div className="ladder-row"><span>Writes</span><b>{writerLine}</b></div>
               {mode === 'local-first' && (
                 <>
-                  <div className="ladder-row"><span>Audits</span><b>{policy?.audit_model ? shortModel(policy.audit_model) : '—'} <i>soon</i></b></div>
                   <div className="ladder-row"><span>Escalates to</span><b>{policy?.escalation_model ? shortModel(policy.escalation_model) : '—'}</b></div>
                 </>
               )}
@@ -195,11 +195,11 @@ export function ControlBar({ status, settings, catalog, local, budget, onSet, on
               <div><dt>This turn</dt><dd>${(status?.turn_cost ?? 0).toFixed(6)}</dd></div>
               <div><dt>Session</dt><dd>${(status?.session_cost ?? 0).toFixed(6)}</dd></div>
               <div><dt>Tokens</dt><dd>{tokens.toLocaleString()}</dd></div>
-              <div><dt>Rate</dt><dd>{fmtUsd(inPrice)} / 1M in</dd></div>
+              <div><dt>Rate</dt><dd>{writesLocally ? 'free here' : `${fmtUsd(inPrice)} / 1M in`}</dd></div>
             </dl>
             <p className="pop-note">
-              {status?.turn_local && (status.turn_cost ?? 0) === 0
-                ? 'This turn ran on your machine — nothing was billed.'
+              {(status?.turn_local || writesLocally) && cost <= 0
+                ? 'Work on this machine is free; nothing was billed. Cloud spend shows here and in the usage ring.'
                 : estimated
                 ? 'Marked ~ because this model reported no cost, so this is '
                   + 'computed from the catalog’s own per-token rates.'
@@ -227,7 +227,7 @@ function Ring({ pct, tone }: { pct: number; tone: string }) {
   return (
     <svg className={`ring ${tone}`} viewBox="0 0 16 16" width="16" height="16" aria-hidden>
       <circle cx="8" cy="8" r={r} className="ring-track" />
-      <circle cx="8" cy="8" r={r} className="ring-fill" strokeDasharray={`${c * fill} ${c}`} transform="rotate(-90 8 8)" />
+      {fill > 0 && <circle cx="8" cy="8" r={r} className="ring-fill" strokeDasharray={`${Math.max(c * fill, 1.5)} ${c}`} transform="rotate(-90 8 8)" />}
     </svg>
   )
 }
