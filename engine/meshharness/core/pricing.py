@@ -74,6 +74,8 @@ def estimate_cost(model_id: str, usage: dict,
     row = find_model(model_id, models)
     if not row:
         return None
+    if row.get("local"):
+        return 0.0
     pricing = row.get("pricing") or {}
     prompt_rate = _dec(pricing.get("prompt_usd_per_1m"))
     completion_rate = _dec(pricing.get("completion_usd_per_1m"))

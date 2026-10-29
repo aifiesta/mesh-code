@@ -127,7 +127,8 @@ class ToolCallAccumulator:
         return named
 
 
-def build_payload(messages: list, cfg: dict, tools: Optional[list] = None) -> dict:
+def build_payload(messages: list, cfg: dict, tools: Optional[list] = None,
+                  target=None) -> dict:
     """Build the /chat/completions request body from session config.
 
     Pure function (unit-testable without a network). Mesh extensions:
@@ -136,15 +137,19 @@ def build_payload(messages: list, cfg: dict, tools: Optional[list] = None) -> di
       - reasoning_effort -> passed through when set ("none" is a real level;
         None means "don't send")
     """
+    local = bool(target and target.local)
     payload: dict = {
-        "model": "auto" if cfg.get("auto_route") else cfg["model"],
+        "model": target.model if target else ("auto" if cfg.get("auto_route") else cfg["model"]),
         "messages": messages,
         "stream": True,
     }
-    if cfg.get("fallback_models"):
+    if cfg.get("fallback_models") and not local:
         payload["models"] = list(cfg["fallback_models"])
-    if cfg.get("reasoning_effort"):
+    if cfg.get("reasoning_effort") and (target is None or target.supports_reasoning_effort):
         payload["reasoning_effort"] = cfg["reasoning_effort"]
+    if target:
+        for k, v in target.request_defaults.items():
+            payload.setdefault(k, v)
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
@@ -173,10 +178,25 @@ def _drop_empty_assistant(messages: list) -> list:
     ]
 
 
+def _endpoint(cfg: dict, target, *, blocking: bool = False) -> tuple:
+    """(url, headers, timeout) for one hop. A cloud target uses 120 s
+    streaming / 300 s blocking; a local target gets a long read timeout
+    because CPU prefill of a 30k-token context takes minutes."""
+    base = target.base_url if target else cfg["base_url"]
+    key = target.api_key if target else cfg["api_key"]
+    if target and target.local:
+        timeout = httpx.Timeout(connect=10.0, read=target.read_timeout, write=60.0, pool=10.0)
+    else:
+        timeout = 300 if blocking else 120
+    return (f"{base.rstrip('/')}/chat/completions",
+            {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}, timeout)
+
+
 def stream_chat(
     messages: list,
     cfg: dict,
     tools: Optional[list] = None,
+    target=None,
 ) -> Iterable:
     """Yield content deltas, then a final dict with usage/cost/model/tool_calls.
 
@@ -191,19 +211,19 @@ def stream_chat(
     optimized request, we retry the raw request once, so the beta can never
     be the reason a turn fails.
     """
-    url = f"{cfg['base_url']}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {cfg['api_key']}",
-        "Content-Type": "application/json",
-    }
+    url, headers, timeout = _endpoint(cfg, target)
+    local = bool(target and target.local)
     # Strip any empty assistant message BEFORE both the raw payload and the
     # optimize path — one poisons every subsequent turn (see the helper).
     messages = _drop_empty_assistant(messages)
-    payload = build_payload(messages, cfg, tools)
+    payload = build_payload(messages, cfg, tools, target)
+    if local:
+        payload["stream_options"] = {"include_usage": True}
 
     plan: dict = {}
     attempts = [payload]
-    dial = float(cfg.get("optimize") or 0)
+    # The optimize levers are cache-oriented; a local server has no cache tiers.
+    dial = 0.0 if local else float(cfg.get("optimize") or 0)
     if dial > 0:
         # Pass the model string actually being sent ("auto" falls back to
         # optimize's default cache-minimum heuristic — harmless).
@@ -241,7 +261,7 @@ def stream_chat(
         accum = ToolCallAccumulator()
         progress_tool = ""
         progress_chars = 0
-        with httpx.stream("POST", url, json=body, headers=headers, timeout=120) as r:
+        with httpx.stream("POST", url, json=body, headers=headers, timeout=timeout) as r:
             if r.status_code >= 400:
                 r.read()  # so e.response.text works in the caller
                 if not is_last_attempt:
@@ -334,6 +354,8 @@ def stream_chat(
                 cost = obj.get("cost")
                 if usage or cost:
                     last_meta.update({"usage": usage, "cost": cost})
+                if obj.get("timings"):
+                    last_meta["timings"] = obj["timings"]
         if retry_raw:
             # Discard whatever the aborted optimized attempt streamed so the
             # caller doesn't keep its partial text or half tool call.
@@ -343,6 +365,9 @@ def stream_chat(
 
     if last_model:
         last_meta["model"] = last_model
+    if local:
+        last_meta["local"] = True
+        last_meta["model"] = target.display_id
     if request_ids:
         last_meta["request_ids"] = request_ids
     if dropped_chunks:
@@ -360,7 +385,7 @@ def stream_chat(
 
 
 def complete_chat(messages: list, cfg: dict, tools: "Optional[list]" = None,
-                  max_tokens: "int | None" = None) -> tuple:
+                  max_tokens: "int | None" = None, target=None) -> tuple:
     """Non-streaming fallback for one hop. Returns (reply_text, meta).
 
     Why this exists: Mesh's own retry + provider fallback is documented to
@@ -372,18 +397,14 @@ def complete_chat(messages: list, cfg: dict, tools: "Optional[list]" = None,
     Same meta shape as stream_chat's final yield, so callers need no special
     casing: {usage, cost, model, tool_calls?, error?, elapsed}.
     """
-    url = f"{cfg['base_url'].rstrip('/')}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {cfg['api_key']}",
-        "Content-Type": "application/json",
-    }
-    payload = build_payload(_drop_empty_assistant(messages), cfg, tools)
+    url, headers, timeout = _endpoint(cfg, target, blocking=True)
+    payload = build_payload(_drop_empty_assistant(messages), cfg, tools, target)
     payload["stream"] = False
     if max_tokens:
         payload["max_tokens"] = int(max_tokens)
 
     started = time.time()
-    r = httpx.post(url, json=payload, headers=headers, timeout=300)
+    r = httpx.post(url, json=payload, headers=headers, timeout=timeout)
     r.raise_for_status()
     data = r.json()
     meta: dict = {"elapsed": time.time() - started, "non_streaming": True}
@@ -413,6 +434,9 @@ def complete_chat(messages: list, cfg: dict, tools: "Optional[list]" = None,
     meta["model"] = (
         r.headers.get("x-resolved-model-id") or data.get("model") or ""
     )
+    if target and target.local:
+        meta["local"] = True
+        meta["model"] = target.display_id
     rid = r.headers.get("x-request-id")
     if rid:
         meta["request_id"] = rid

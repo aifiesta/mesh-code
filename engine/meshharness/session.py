@@ -38,16 +38,26 @@ from pathlib import Path
 import httpx
 
 from .bridge import Cancelled, Pending
-from .core import compact, loopguard, memory, router
+from .core import compact, loopguard, memory, router, textcalls
 from .core import journal, safety
 from .core import tools as tools_mod
 from .core.client import complete_chat, stream_chat
 from .core.permissions import AUTO_APPROVE, Mode
 from .core.plan import Plan
 from .core.tools import TOOLS, build_system_prompt, find_stub_markers, summarize_call
+from .local import prompt as local_prompt
+from .local.manager import LocalUnavailable
+from .local.provider import Target, is_local
 from .terminal import Terminal
 from .protocol import Decision, Event, event
 
+TOOL_NAMES = {t["function"]["name"] for t in TOOLS}
+TOOL_SCHEMAS = {t["function"]["name"]: (t["function"].get("parameters") or {}).get("properties", {})
+                for t in TOOLS}
+
+
+class TargetUnavailable(RuntimeError):
+    """No model can serve this hop; the turn ends with a clear error."""
 PLAN_TOOLS = {"create_plan", "update_step"}
 INTERACTIVE_TOOLS = {"ask_user"}
 UNGATED_TOOLS = PLAN_TOOLS | INTERACTIVE_TOOLS | {"remember"}
@@ -65,8 +75,9 @@ class Session:
     """One conversation against one workspace directory."""
 
     def __init__(self, session_id: str, workspace: str | Path, cfg: dict,
-                 emit, *, title: str = "", mode: Mode = Mode.DEFAULT):
+                 emit, *, title: str = "", mode: Mode = Mode.DEFAULT, local=None):
         self.id = session_id
+        self.local = local          # the LocalModels layer, or None in a cloud-only engine
         self.workspace = Path(workspace).expanduser().resolve()
         self.title = title or self.workspace.name
         self._emit_raw = emit
@@ -90,6 +101,8 @@ class Session:
         self.turn_cost = 0.0
         self.turn_tokens = 0
         self.turn_estimated = False
+        self.turn_local = False     # the last hop ran on this machine
+        self._turn_id = ""
         self.servers: list[dict] = []
         self.catalog: list | None = None
         # The user's own shell, created on first use. Not gated by permission
@@ -158,6 +171,7 @@ class Session:
             turn_cost=round(self.turn_cost, 6),
             turn_tokens=self.turn_tokens,
             turn_estimated=self.turn_estimated,
+            turn_local=self.turn_local,
             workspace=str(self.workspace),
             busy=self._busy.is_set(),
             servers=[{k: s.get(k) for k in ("pid", "port", "url", "cmd")}
@@ -285,11 +299,11 @@ class Session:
             pass  # persistence must never break a turn
 
     @classmethod
-    def restore(cls, data: dict, cfg: dict, emit) -> "Session":
+    def restore(cls, data: dict, cfg: dict, emit, local=None) -> "Session":
         """Rebuild a session from its snapshot — conversation intact."""
         s = cls(data["id"], data["workspace"], cfg, emit,
                 title=data.get("title") or "",
-                mode=mode_from_str_safe(data.get("mode")))
+                mode=mode_from_str_safe(data.get("mode")), local=local)
         s.created_at = data.get("created_at") or s.created_at
         s.chat_label = data.get("label") or ""
         s.session_cost = float(data.get("session_cost") or 0)
@@ -479,6 +493,9 @@ class Session:
         self.state["_turn_tool_calls"] = 0
         self.state["_turn_files"] = []
         self.state.pop("_verify_fired", None)
+        self.state["_text_call_nudged"] = False
+        self.turn_local = False
+        self._turn_id = turn_id
 
         # Held on the session (not as locals) so _status() can publish the
         # running totals mid-turn. turn_model starts EMPTY on purpose: under
@@ -513,6 +530,14 @@ class Session:
 
             self.emit(Event.HOP_STARTED, turn_id=turn_id, hop=hop,
                       model=model_used)
+            try:
+                self._target_for(self._effective_cfg())
+            except TargetUnavailable as e:
+                self.emit(Event.ERROR, fatal=True, message=str(e))
+                break
+            except KeyboardInterrupt:
+                aborted = True
+                break
             self._maybe_compact()
 
             extras = []
@@ -533,6 +558,9 @@ class Session:
             except httpx.RequestError as e:
                 self.emit(Event.ERROR, fatal=True,
                           message=f"network error: {type(e).__name__}: {e}")
+                break
+            except TargetUnavailable as e:
+                self.emit(Event.ERROR, fatal=True, message=str(e))
                 break
 
             if meta.get("error"):
@@ -566,9 +594,11 @@ class Session:
             # Billed figure by request id first (settles ~250ms after the
             # stream), then an in-body cost, then the catalog estimate.
             hop_cost, estimated = 0.0, False
+            local_hop = bool(meta.get("local"))
+            self.turn_local = local_hop
             rids = meta.get("request_ids") or (
                 [meta["request_id"]] if meta.get("request_id") else [])
-            if rids and usage:
+            if rids and usage and not local_hop:
                 try:
                     from .core import pricing
                     billed = pricing.fetch_request_cost(self.cfg, rids)
@@ -576,12 +606,12 @@ class Session:
                     billed = None
                 if billed is not None:
                     hop_cost = float(billed)
-            if hop_cost <= 0:
+            if hop_cost <= 0 and not local_hop:
                 try:
                     hop_cost = float(meta.get("cost") or 0)
                 except (TypeError, ValueError):
                     hop_cost = 0.0
-            if hop_cost <= 0 and usage:
+            if hop_cost <= 0 and usage and not local_hop:
                 try:
                     from .core import pricing
                     # Price the model we ASKED for first: that is the catalog
@@ -590,10 +620,10 @@ class Session:
                     # deepseek/deepseek-v4.1-flash), which matched nothing and
                     # left 1.3M tokens showing as $0.0000.
                     guess = None
-                    for candidate in (self._effective_model(),
+                    for candidate in (self.state.get("_hop_model"), self._effective_model(),
                                       meta.get("model") or model_used):
-                        if not candidate:
-                            continue
+                        if not candidate or is_local(candidate):
+                            continue    # a cloud fallback hop must never price as the local row
                         guess = pricing.estimate_cost(candidate, usage, self.catalog)
                         if guess is not None:
                             break
@@ -606,6 +636,25 @@ class Session:
                 self.turn_estimated = True
             # Publish the running tally now, while the turn is still going.
             self._status()
+
+            if local_hop and not meta.get("tool_calls") and textcalls.looks_like_tool_call(reply or ""):
+                # Only a small local model earns this: a cloud reply quoting a
+                # call (a file, the user's question) is text, never an action.
+                clean, calls, _why = textcalls.extract(reply, TOOL_NAMES, schemas=TOOL_SCHEMAS,
+                                                       id_prefix=f"text_{hop}")
+                if calls:
+                    meta["tool_calls"] = calls
+                    reply = clean
+                    for c in calls:
+                        self.emit(Event.TOOL_REPAIRED, call_id=c["id"], name=c["name"], kind="text_parsed")
+                elif not self.state["_text_call_nudged"]:
+                    self.state["_text_call_nudged"] = True
+                    self.state["messages"].append({"role": "user", "content": (
+                        "You printed a tool call as text instead of calling the function:\n\n"
+                        + (reply or "")[:2000]
+                        + "\n\nCall the function instead; do not write <tool_call> or "
+                          "<function=...> in your reply.")})
+                    continue
 
             tool_calls = meta.get("tool_calls") or []
             has_reply = bool(reply and reply.strip())
@@ -704,11 +753,12 @@ class Session:
                       sealed=sealed, elapsed=round(elapsed, 2),
                       model=model_used, cost=round(turn_cost, 6),
                       cost_estimated=turn_estimated, tokens=turn_tokens,
+                      local=self.turn_local,
                       session_cost=round(self.session_cost, 6))
         else:
             self.emit(Event.TURN_FINISHED, turn_id=turn_id, hops=hop,
                       model=model_used, cost=round(turn_cost, 6),
-                      cost_estimated=turn_estimated,
+                      cost_estimated=turn_estimated, local=self.turn_local,
                       tokens=turn_tokens, elapsed=round(elapsed, 2),
                       session_cost=round(self.session_cost, 6),
                       plan=self.state["plan"].to_dict() if self.state["plan"] else None,
@@ -753,8 +803,13 @@ class Session:
             cfg = self._effective_cfg()
             if self.state.get("_max_tokens_shrunk"):
                 cfg["max_tokens"] = self.state["_max_tokens_shrunk"]
+            target = self._target_for(cfg)
+            if target.local and msgs and msgs[0].get("role") == "system":
+                # Request-only swap: history keeps the full prompt, a small
+                # model gets the short one.
+                msgs = [{"role": "system", "content": self._compact_system_prompt()}] + msgs[1:]
             try:
-                reply, meta = self._consume(stream_chat(msgs, cfg, tools=TOOLS))
+                reply, meta = self._consume(stream_chat(msgs, cfg, tools=TOOLS, target=target))
             except KeyboardInterrupt:
                 raise
             except httpx.HTTPStatusError as e:
@@ -773,6 +828,11 @@ class Session:
                         compacted_for_context = True
                         if self._compact_now("context limit reached", aggressive=True):
                             continue
+                if (400 <= code < 500 and loopguard.classify_inband_error(body) == "context"
+                        and not compacted_for_context and self.cfg.get("auto_compact", True)):
+                    compacted_for_context = True   # llama-server says it over HTTP 400
+                    if self._compact_now("context limit reached", aggressive=True):
+                        continue
                 if (attempt < loopguard.MAX_STREAM_ATTEMPTS
                         and loopguard.is_retryable_status(code)):
                     self._wait_retry(attempt, f"gateway returned {code}",
@@ -780,17 +840,21 @@ class Session:
                     continue
                 if not tried_non_streaming and loopguard.is_retryable_status(code):
                     tried_non_streaming = True
-                    got = self._non_streaming(msgs)
+                    got = self._non_streaming(msgs, target)
                     if got is not None:
                         return got
                 raise
             except httpx.RequestError as e:
+                if target.local and self.local is not None:
+                    # A dead server is restarted by the next ensure; one that is
+                    # alive but silent is stopped first so that restart happens.
+                    self.local.recover(force=isinstance(e, httpx.ReadTimeout))
                 if attempt < loopguard.MAX_STREAM_ATTEMPTS:
                     self._wait_retry(attempt, f"network error ({type(e).__name__})")
                     continue
                 if not tried_non_streaming:
                     tried_non_streaming = True
-                    got = self._non_streaming(msgs)
+                    got = self._non_streaming(msgs, target)
                     if got is not None:
                         return got
                 raise
@@ -891,17 +955,52 @@ class Session:
             meta["ttft"] = ttft
         return "".join(buf), meta
 
-    def _non_streaming(self, msgs):
+    def _non_streaming(self, msgs, target=None):
         """Last-resort blocking request — Mesh's own retry and provider
         fallback only cover non-streaming calls, so this is where a run of
         streaming failures can still recover."""
         try:
             self.emit(Event.NOTICE, level="info",
                       message="streaming keeps failing — trying one non-streaming request")
-            return complete_chat(msgs, self.cfg, tools=TOOLS,
+            return complete_chat(msgs, self._effective_cfg(), tools=TOOLS, target=target,
                                  max_tokens=self.state.get("_max_tokens_shrunk"))
         except Exception:
             return None
+
+    def _target_for(self, cfg: dict) -> Target:
+        """Where this hop goes. A local id that cannot be served right now
+        falls back to the configured cloud model, with one notice per reason."""
+        model = cfg.get("model", "")
+        if not is_local(model):
+            self.state.pop("_hop_model", None)
+            self.state.pop("_hop_ctx", None)
+            return Target.from_cfg(cfg)
+        if self.local is None:
+            raise TargetUnavailable(f"{model} needs the local model layer, which this engine does not have")
+        try:
+            target = self.local.target_for(
+                model, cancel=self._interrupt,
+                notify=lambda msg: self.emit(Event.NOTICE, level="info", message=msg))
+        except LocalUnavailable as e:
+            if self._interrupt.is_set():
+                raise KeyboardInterrupt      # Stop during the load is a stop, not a fallback
+            fallback = cfg.get("local_fallback_model") or ""
+            if not fallback or is_local(fallback):
+                raise TargetUnavailable(f"local model not ready ({e}) and no cloud fallback is set") from e
+            if self.state.get("_local_fellback_turn") != self._turn_id:
+                self.state["_local_fellback_turn"] = self._turn_id
+                self.emit(Event.NOTICE, level="warn",
+                          message=f"Local model not ready ({e}) — using {fallback} for this turn")
+            self.state["_hop_model"] = fallback
+            self.state["_hop_ctx"] = compact.context_limit(fallback, self.catalog)
+            return Target.from_cfg({**cfg, "model": fallback})
+        self.state["_hop_model"] = target.display_id
+        self.state["_hop_ctx"] = target.context_limit
+        return target
+
+    def _compact_system_prompt(self) -> str:
+        block = journal.prompt_block(self.workspace) if self.cfg.get("repo_memory", True) else ""
+        return local_prompt.build_compact_system_prompt(self.cfg, cwd=str(self.workspace), journal_block=block)
 
     def _wait_retry(self, attempt: int, reason: str, delay=None) -> None:
         wait = delay if delay is not None else loopguard.backoff_delay(attempt)
@@ -936,10 +1035,11 @@ class Session:
     _MAX_ESCALATIONS = 2
 
     def _effective_model(self) -> str:
+        pinned = self.cfg.get("model", "")
         pick = self.state.get("_smart_pick")
-        if pick and self.cfg.get("route_mode") == "smart":
+        if pick and self.cfg.get("route_mode") == "smart" and not is_local(pinned):
             return pick
-        return self.cfg.get("model", "")
+        return pinned
 
     def _effective_cfg(self) -> dict:
         """cfg for THIS hop: the live smart pick as the model, minus settings
@@ -976,8 +1076,8 @@ class Session:
         """Initial per-turn pick. Fail-open: any miss leaves _smart_pick unset
         and the pinned model rides."""
         self.state["_smart_pick"] = None
-        if self.cfg.get("route_mode") != "smart":
-            return
+        if self.cfg.get("route_mode") != "smart" or is_local(self.cfg.get("model", "")):
+            return      # a local pin is the user's choice; the table knows no local rows
         try:
             table = router.load_table()
             if not table or not self.catalog:
@@ -1026,7 +1126,7 @@ class Session:
         for the rest of this turn and re-pick. Bounded to _MAX_ESCALATIONS so
         a hard task reaches a frontier model but a broken one can't spend
         forever."""
-        if self.cfg.get("route_mode") != "smart":
+        if self.cfg.get("route_mode") != "smart" or is_local(self.cfg.get("model", "")):
             return False
         if self.state.get("_smart_escalations", 0) >= self._MAX_ESCALATIONS:
             return False
@@ -1067,7 +1167,7 @@ class Session:
         """After a run of clean hops, settle back down the effort ladder so a
         single escalation doesn't tax the whole rest of the turn at frontier
         prices. Never below the turn's original predicted difficulty."""
-        if self.cfg.get("route_mode") != "smart" or not self.state.get("_smart_escalations"):
+        if self.cfg.get("route_mode") != "smart" or is_local(self.cfg.get("model", "")):
             return
         if self.cfg.get("route_effort", "auto") != "auto":
             return
@@ -1173,7 +1273,9 @@ class Session:
             return
         # Use the EFFECTIVE model's window — a mid-turn escalation may have
         # moved to a model with a different context limit.
-        limit = compact.context_limit(self._effective_model(), self.catalog)
+        model = self._effective_model()
+        limit = (self.state.get("_hop_ctx") if is_local(model) and self.state.get("_hop_ctx")
+                 else compact.context_limit(model, self.catalog))
         if compact.should_compact(self.state["messages"], limit):
             # Pass the limit so the FOLD phase is reachable. Without it,
             # compact_history only truncates; the second call finds nothing

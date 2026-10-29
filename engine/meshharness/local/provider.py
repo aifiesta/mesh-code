@@ -21,8 +21,8 @@ class Target:
 
     @classmethod
     def from_cfg(cls, cfg: dict) -> "Target":
-        return cls(base_url=cfg["base_url"], api_key=cfg["api_key"],
-                   model=cfg["model"], display_id=cfg["model"])
+        model = "auto" if cfg.get("auto_route") else cfg["model"]
+        return cls(base_url=cfg["base_url"], api_key=cfg["api_key"], model=model, display_id=model)
 
     @classmethod
     def for_local(cls, *, port: int, api_key: str, alias: str, model_id: str,
