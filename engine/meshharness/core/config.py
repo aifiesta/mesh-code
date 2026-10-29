@@ -71,14 +71,8 @@ DEFAULT_CONFIG = {
     "auto_route": False,        # model:"auto" — gateway Auto Router picks per prompt
     "repo_memory": True,        # warm-start repo map + remember notes (/memory off)
     "fallback_models": [],      # ordered `models` fallback list sent in the payload
-    # Models the smart router must never pick, whatever the table says.
-    # The CLI only ever built this implicitly (a session blacklist after a
-    # model failed live); the harness lets the user state it up front.
-    "exclude_models": [],
+    "exclude_models": [],      # gateway auto routing never picks these
     "reasoning_effort": None,   # high|medium|low|none, or None = not sent
-    # Mesh Optimize dial (BETA). 0 = off. 0 to 0.95: how aggressively to
-    # cut token spend. See /optimize in the REPL and README for details.
-    "optimize": 0.0,
     # Agentic loop controls. max_hops 0 = unlimited (stall detection still
     # stops runaway loops); auto_compact keeps long turns under the model's
     # context limit; stall_policy "pause" ends the turn at the prompt after
@@ -87,14 +81,8 @@ DEFAULT_CONFIG = {
     "max_hops": 0,
     "auto_compact": True,
     "stall_policy": "pause",
-    # Smart routing (local table-driven picker). route_mode: "off" (pin),
-    # "auto" (gateway picks — mirrors auto_route), "smart" (local pick).
-    # Weights steer smart picks along each cohort's efficiency frontier.
+    # "off" pins `model`; "auto" sends model:"auto" so the gateway picks.
     "route_mode": "off",
-    "route_weights": {"cost": 0.5, "cap": 0.3, "speed": 0.2},
-    # Effort: "auto" detects prompt difficulty (low/mid/high) and tilts the
-    # weights; low|medium|high|xhigh|max forces the tilt for every prompt.
-    "route_effort": "auto",
     # How the assistant writes (prose only — never tool access or scope).
     "output_style": "default",
     # Last version whose "what's new" line was shown (see whatsnew.py).
@@ -201,9 +189,6 @@ def save_api_key(key: str) -> None:
     secure_file(CREDENTIALS_FILE)  # tighten a pre-existing looser file
 
 
-_OLD_ROUTE_WEIGHTS = {"cost": 0.5, "cap": 0.3, "speed": 0.2}
-
-
 def _migrate_home() -> None:
     """Move a pre-rename ~/.mesh-harness to ~/.mesh-code, once.
 
@@ -249,21 +234,18 @@ def load_config() -> dict:
         )
         loaded = {}
     cfg = {**DEFAULT_CONFIG, **loaded}
-    # 0.5.9-dev migration: two short-lived route_weights shapes (cap="auto",
-    # difficulty sensitivity key) collapsed back to numeric cost/cap/speed +
-    # route_effort. Reset any non-numeric shape to the default.
-    rw = cfg.get("route_weights") or {}
-    if rw.get("cap") == "auto" or "difficulty" in rw:
-        cfg["route_weights"] = dict(DEFAULT_CONFIG["route_weights"])
+    # Keys outside the schema leave the file on save; an unknown route
+    # mode means pinned.
+    for gone in ("route_weights", "route_effort", "optimize"):
+        cfg.pop(gone, None)
+    if cfg.get("route_mode") not in ("off", "auto"):
+        cfg["route_mode"] = "off"
     # A hand-edited or stale output_style must degrade to default rather
     # than silently injecting nothing while the UI claims a style is on.
     from . import styles as _styles
     cfg["output_style"] = (_styles.normalize(cfg.get("output_style"))
                            or _styles.DEFAULT)
-    # `route` (cheapest/fastest/balanced) never existed gateway-side and was
-    # replaced by auto_route in 0.5.0 — drop the stale key from old configs
-    # (it disappears from disk on the next save_config).
-    cfg.pop("route", None)
+    cfg.pop("route", None)   # a pre-0.5.0 key with no gateway meaning
     # Resolution order: env > credentials file > legacy hand-edited
     # config.json. MESH_API_KEY kept as fallback for one release.
     file_key = (cfg.get("api_key") or "").strip()
@@ -294,15 +276,13 @@ def load_config() -> dict:
 
 def _migrate_to_local(cfg: dict, loaded: dict) -> "str | None":
     """A cloud `model` with no `local_fallback_model` becomes local-first with
-    that model as the fallback; smart routing never applies to a local pin."""
+    that model as the fallback."""
     if "local_fallback_model" in loaded or str(loaded.get("model", "")).startswith("local/"):
         return None
     old = loaded.get("model") or ""
     if old:
         cfg["local_fallback_model"] = old
     cfg["model"] = "local/auto"
-    if cfg.get("route_mode") == "smart":
-        cfg["route_mode"] = "off"
     try:
         save_config(cfg)
     except OSError:

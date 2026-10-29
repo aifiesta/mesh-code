@@ -248,7 +248,7 @@ class Engine:
 
     async def catalog(self, force: bool = False, *, announce: bool = True) -> list:
         """Model catalog, fetched and shared by every session (it feeds the
-        picker, the router's feasibility filter, and context limits).
+        picker and context limits).
 
         A FAILED fetch used to cache [] for the life of the process, so an
         app launched offline (or before a key was entered) never got a
@@ -719,8 +719,6 @@ async def handle_request(engine: Engine, msg: dict) -> None:
             s.set_mode(mode_from_str(msg.get("mode") or "default"))
         elif kind == Request.SET_MODEL:
             s.set_model(msg.get("model") or s.cfg.get("model"))
-        elif kind == Request.SET_ROUTE:
-            s.update_cfg(route_mode=msg.get("route_mode", "off"))
         elif kind == Request.SET_STYLE:
             s.update_cfg(output_style=msg.get("style", "default"))
         elif kind == Request.LIST_DIR:
@@ -776,9 +774,6 @@ async def handle_request(engine: Engine, msg: dict) -> None:
             if s._term is not None:
                 s._term.close()
                 s._term = None
-        elif kind == Request.ROUTE_PREVIEW:
-            engine.emit(event(Event.ROUTE_EXPLAIN, sid,
-                              **s.explain_route(msg.get("text") or "")))
         elif kind == Request.COMPACT:
             s._compact_now("requested by the user")
         elif kind == Request.STOP_SERVER:

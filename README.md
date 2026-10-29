@@ -30,7 +30,7 @@ curl -fsSL https://code.meshapi.ai/install.sh | sh
 Most coding agents make you choose: a terminal you can script, or a GUI you
 can trust. Mesh Code refuses the trade. It is the
 [`meshapi` CLI](https://github.com/aifiesta/meshapi-code)'s agent loop — the
-same streaming client, routing table, repo memory and safety gates — lifted
+same streaming client, repo memory and safety gates — lifted
 into a window where you can *see* what the agent is doing and stop it with
 your eyes open:
 
@@ -56,19 +56,16 @@ catalog usable instead of overwhelming:
 
 - **Pin a model** — fuzzy-search the browser (`son45` finds Sonnet 4.5),
   compare context windows and per-1M pricing, filter to free or text-only.
-- **Smart routing (local)** — a bundled table classifies each prompt and
-  picks a model per turn in microseconds, with zero classifier tokens
-  billed and no extra network hop. The bar explains what it would pick and
-  why *before* you spend anything.
-- **Gateway auto** — or let Mesh's upstream Auto Router decide.
+- **Gateway auto** — or let Mesh's Auto Router pick per prompt, honouring
+  the models you have excluded.
 - **Fallback order** — if the primary model fails or is rate-limited, the
   gateway tries your fallbacks in order. A long run survives one provider's
   bad day.
 - **Exclusions** — mark a model "Never" once, and no mode of routing will
   touch it again.
 
-Honesty is a feature: with routing on, the bar reads "Router picks" until a
-hop has actually answered, then shows the real model with a `ROUTED` tag.
+Honesty is a feature: with routing on, the bar reads "Auto routing" until a
+hop has actually answered, then shows the real model with a `routed` flag.
 When a model reports no cost, the app computes an estimate from the
 catalog's own rates and marks it `~` — a guess is never presented as a bill.
 
@@ -97,8 +94,8 @@ it. Your API key lives in an owner-only file (`~/.mesh-code/credentials`,
 
 CLI agents hide two dozen slash commands behind `/help`. Here the same power
 is layered: clickable pills for what you change often, **⌘K** for everything
-by name *or* by what it does (typing "cheap" finds token savings, `rtsm`
-matches Routing: Smart), and **⌘,** for grouped settings. A guided tour is
+by name *or* by what it does (`rtga` matches Routing: Gateway auto), and
+**⌘,** for grouped settings. A guided tour is
 offered — never forced.
 
 ## Built for long sessions

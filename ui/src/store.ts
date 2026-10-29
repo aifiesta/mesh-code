@@ -1,4 +1,4 @@
-import { Ev, type Approval, type Ask, type CatalogModel, type DirEntry, type FilePreview, type LocalJob, type LocalStatus, type Root, type Msg, type Plan, type Profile, type RouteExplain, type SettingsDoc, type Status, type ToolCard, type WireEvent } from './types'
+import { Ev, type Approval, type Ask, type CatalogModel, type DirEntry, type FilePreview, type LocalJob, type LocalStatus, type Root, type Msg, type Plan, type Profile, type SettingsDoc, type Status, type ToolCard, type WireEvent } from './types'
 
 /**
  * Turning the event stream into renderable state.
@@ -54,7 +54,6 @@ export type AppState = {
   catalog: CatalogModel[]
   roots: Root[]
   activeRoot: string | null
-  routeExplain: RouteExplain | null
   profile: Profile | null
   /** Last key.result. `at` is what lets the UI react to a repeat
    *  of the same outcome — two successes in a row are two events. */
@@ -78,7 +77,6 @@ export const initialState: AppState = {
   catalog: [],
   roots: [],
   activeRoot: null,
-  routeExplain: null,
   profile: null,
   keyResult: null,
   configError: null,
@@ -88,8 +86,6 @@ export const initialState: AppState = {
 
 let uid = 0
 const nid = () => `m${++uid}`
-// provider/model -> model (matches the ControlBar helper)
-const shortModel = (m: string) => (m && m.includes('/') ? m.split('/').slice(1).join('/') : (m || ''))
 
 function blank(id: string, title: string, workspace: string,
                createdAt?: number): SessionState {
@@ -252,9 +248,6 @@ export function reduce(state: AppState, action: Action): AppState {
 
     case Ev.CATALOG:
       return { ...state, catalog: d.models ?? [] }
-
-    case Ev.ROUTE_EXPLAIN:
-      return { ...state, routeExplain: d as RouteExplain }
 
     case Ev.CONFIG_ERROR:
       return { ...state, configError: { key: d.key, message: d.message } }
@@ -545,18 +538,11 @@ export function reduce(state: AppState, action: Action): AppState {
         }
 
       case Ev.NOTICE:
-      case Ev.COMPACTED:
-      case Ev.ROUTED: {
+      case Ev.COMPACTED: {
         const text =
           ev.type === Ev.COMPACTED
             ? `Compacted history (${d.before_tok}→${d.after_tok} tokens) — ${d.reason}`
-            : ev.type === Ev.ROUTED
-              ? (d.escalated
-                  ? `Escalated to ${shortModel(d.model)} — ${d.reason ?? 'the model was struggling'}`
-                  : d.settled
-                    ? `Settled back to ${shortModel(d.model)} after clean progress`
-                    : `Routed to ${shortModel(d.model)} (${d.cohort}${d.difficulty && d.difficulty !== 'mid' ? ` · ${d.difficulty}` : ''})`)
-              : d.message
+            : d.message
         return {
           ...s,
           messages: [...s.messages, {

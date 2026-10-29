@@ -46,8 +46,6 @@ info "bundled payload"
 for f in "Contents/Resources/engine/mesh-code-engine" "Contents/Resources/ui/index.html"; do
   [ -e "$MOUNTED/$APP_NAME.app/$f" ] && ok "$f" || bad "missing $f"
 done
-TABLE=$(find "$MOUNTED/$APP_NAME.app/Contents/Resources/engine" -name routing_table.json | wc -l | tr -d ' ')
-[ "$TABLE" = "1" ] && ok "routing_table.json bundled" || bad "routing table missing (smart routing degrades silently)"
 MANIFEST=$(find "$MOUNTED/$APP_NAME.app/Contents/Resources/engine" -path '*meshharness/local/manifest.json' | wc -l | tr -d ' ')
 [ "$MANIFEST" = "1" ] && ok "local manifest.json bundled" || bad "local manifest missing (no local model can be chosen)"
 LLAMA="$MOUNTED/$APP_NAME.app/Contents/Resources/llama/llama-server"

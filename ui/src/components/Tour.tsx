@@ -51,17 +51,17 @@ export const TOUR: TourStep[] = [
   },
   {
     id: 'model',
-    target: '.controlbar .ctl-route',
+    target: '.controlbar .ctl-model',
     placement: 'top',
-    title: 'Routing picks the model',
-    body: 'Smart routing chooses per prompt from a bundled table — locally, in microseconds, with no extra tokens billed. Click to see which model it would choose and why, before you spend anything.',
+    title: 'Who answers',
+    body: 'Pin one model, or let Mesh’s Auto Router pick a cloud model per prompt. The pill reads “Auto routing” until a hop answers, then names the real model. A local model pin is never routed.',
   },
   {
     id: 'cost',
     target: '.controlbar .ctl-cost',
     placement: 'top',
     title: 'Cost and tokens, live',
-    body: 'The session spend and token count, updated per hop as the agent works — not just at the end. When a model reports no price it is computed from the catalog and marked ~. The popover holds the token-savings dial for long runs.',
+    body: 'The session spend and token count, updated per hop as the agent works — not just at the end. When a model reports no price it is computed from the catalog and marked ~. A turn on the local model shows as free.',
   },
   {
     id: 'rail',

@@ -4,7 +4,6 @@
 export const Ev = {
   SETTINGS: 'settings',
   CATALOG: 'catalog',
-  ROUTE_EXPLAIN: 'route.explain',
   DIR_LISTING: 'dir.listing',
   FILE_PREVIEW: 'file.preview',
   FILE_INDEX: 'file.index',
@@ -38,7 +37,6 @@ export const Ev = {
   NOTICE: 'notice',
   ERROR: 'error',
   COMPACTED: 'compacted',
-  ROUTED: 'routed',
   ENGINE_READY: 'engine.ready',
   HISTORY: 'history',
   CHAT_CLEARED: 'chat.cleared',
@@ -56,7 +54,6 @@ export const Req = {
   ASK_RESPONSE: 'ask.response',
   SET_MODE: 'set.mode',
   SET_MODEL: 'set.model',
-  SET_ROUTE: 'set.route',
   SET_STYLE: 'set.style',
   OPEN_WORKSPACE: 'open.workspace',
   ADD_FOLDER: 'add.folder',
@@ -80,7 +77,6 @@ export const Req = {
   TERM_RUN: 'term.run',
   TERM_INTERRUPT: 'term.interrupt',
   TERM_CLOSE: 'term.close',
-  ROUTE_PREVIEW: 'route.preview',
   LIST_MODELS: 'list.models',
   LOCAL_STATUS: 'local.status',
   LOCAL_INSTALL: 'local.install',
@@ -151,9 +147,9 @@ export type Ask = { token: string; questions: AskQuestion[] }
 export type Status = {
   model: string; mode: Mode; route_mode: string; session_cost: number
   session_tokens: number; workspace: string; busy: boolean
-  /** The turn IN FLIGHT: the model a hop actually ran on (the router may
-   *  have picked it, so it is not necessarily `model`), and the spend so
-   *  far. Session totals only move when a turn ends. */
+  /** The turn IN FLIGHT: the model a hop actually ran on (the gateway or a
+   *  local pin may differ from `model`), and the spend so far. Session
+   *  totals only move when a turn ends. */
   turn_model?: string | null
   turn_cost?: number
   turn_tokens?: number
@@ -178,7 +174,7 @@ export type SettingOption = { value: any; label: string; blurb?: string }
 export type SettingSpec = {
   key: string
   category: string
-  /** enum | bool | int | dial | weights | text | model | model_list */
+  /** enum | bool | int | text | model | model_list | local_model */
   type: string
   label: string
   help?: string
@@ -188,7 +184,6 @@ export type SettingSpec = {
   value?: any
   min?: number
   max?: number
-  step?: number
   beta?: boolean
   multiline?: boolean
   zero_label?: string
@@ -301,17 +296,6 @@ export const fmtBytes = (n: number) =>
   n >= 1e9 ? `${(n / 1e9).toFixed(n >= 1e10 ? 0 : 1)} GB`
     : n >= 1e6 ? `${Math.round(n / 1e6)} MB`
       : n >= 1e3 ? `${Math.round(n / 1e3)} KB` : `${n} B`
-
-export type RouteExplain = {
-  available: boolean
-  mode: string
-  cohort: string | null
-  difficulty?: string
-  weights?: Record<string, number>
-  pick?: string
-  ranked: any[]
-  reason?: string
-}
 
 /** $/1M tokens for a catalog row, preferring discounted then per-1M then per-1k. */
 export function pricePerM(m: CatalogModel, kind: 'prompt' | 'completion'): number | null {

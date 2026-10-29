@@ -4,7 +4,6 @@ This is the CLI's `cli.py` with the drawing taken out. The turn structure
 is deliberately unchanged, because that structure is the part that works:
 
     submit a prompt
-      -> route the turn (smart picker, local, zero tokens)
       -> hop: stream one model round trip, with retry/compaction recovery
       -> if the model asked for tools: classify, gate, execute, feed back
       -> loop until the model stops asking for tools, or a guard stops it
@@ -38,7 +37,7 @@ from pathlib import Path
 import httpx
 
 from .bridge import Cancelled, Pending
-from .core import compact, loopguard, memory, router, textcalls
+from .core import compact, loopguard, memory, textcalls, verify
 from .core import journal, safety
 from .core import tools as tools_mod
 from .core.client import complete_chat, stream_chat
@@ -112,7 +111,7 @@ class Session:
         self._term: Terminal | None = None
 
         # The state dict the vendored engine modules expect. Keeping the
-        # exact shape is what lets compact.py / memory.py / router.py run
+        # exact shape is what lets compact.py / memory.py run
         # here untouched.
         self.state: dict = {
             "cfg": self.cfg,
@@ -151,11 +150,8 @@ class Session:
             model=self.cfg.get("model"),
             mode=self.mode.value,
             route_mode=self.cfg.get("route_mode", "off"),
-            route_effort=self.cfg.get("route_effort", "auto"),
-            route_weights=self.cfg.get("route_weights"),
             reasoning_effort=self.cfg.get("reasoning_effort"),
             output_style=self.cfg.get("output_style", "default"),
-            optimize=self.cfg.get("optimize", 0.0),
             max_hops=self.cfg.get("max_hops", 0),
             stall_policy=self.cfg.get("stall_policy", "pause"),
             auto_compact=self.cfg.get("auto_compact", True),
@@ -165,8 +161,8 @@ class Session:
             session_cost=round(self.session_cost, 6),
             session_tokens=self.session_tokens,
             # What is actually happening right now: the model the last hop
-            # really ran on (which the router may have chosen, and which is
-            # NOT cfg["model"]), and the spend so far this turn.
+            # really ran on (gateway routing and local pins differ from
+            # cfg["model"]), and the spend so far this turn.
             turn_model=self.turn_model,
             turn_cost=round(self.turn_cost, 6),
             turn_tokens=self.turn_tokens,
@@ -483,13 +479,6 @@ class Session:
         self.state["stall_nudge_msg"] = None
         self.state["_compact_exhausted"] = False
         self.state["doom_streak"] = {}
-        # Per-turn cascade counters (see the smart-routing section). Persist
-        # across the turn but reset each turn: escalations climb from 0, clean
-        # hops count fresh, the once-per-turn guards re-arm. `_smart_cohort`,
-        # `_smart_last`, `_smart_bad` deliberately survive between turns —
-        # continuation inheritance and session blacklists depend on them.
-        self.state["_smart_escalations"] = 0
-        self.state["_smart_clean_hops"] = 0
         self.state["_turn_tool_calls"] = 0
         self.state["_turn_files"] = []
         self.state.pop("_verify_fired", None)
@@ -506,11 +495,6 @@ class Session:
         self.turn_estimated = False
         self.turn_tokens = 0
         self.turn_model = None
-
-        # Smart routing resolves locally and stores its pick in
-        # _smart_pick (NOT cfg["model"], which stays the user's pin). After
-        # this the effective pick is known — _route_turn sets turn_model.
-        self._route_turn(text, had_image=bool(attachments))
 
         model_used = self.cfg.get("model", "")
         self._status()
@@ -578,11 +562,6 @@ class Session:
                     self.emit(Event.NOTICE, level="info", message=(
                         "this model rejected the reasoning-effort setting — "
                         "retrying without it"))
-                    continue
-                # If a SMART PICK errored, abandon it and retry on the pinned
-                # model — the model answering now beats the table's opinion.
-                # Only a pinned-model error (nothing to fall back to) is fatal.
-                if self._smart_abandon("returned a gateway error"):
                     continue
                 self.emit(Event.ERROR, fatal=True, message=msg)
                 break
@@ -660,19 +639,14 @@ class Session:
             has_reply = bool(reply and reply.strip())
 
             if not tool_calls:
-                # Verify a no-tool answer before accepting it. A refusal, or a
-                # claim of work with no tool call behind it, is a routing miss
-                # the pick couldn't predict — escalate ONCE and let a stronger
-                # model answer instead of shipping it.
-                weak = router.verify_reply(
+                # A refusal, or work claimed with no tool call behind it, is
+                # recorded once per turn for the policy ladder to act on.
+                weak = verify.verify_reply(
                     reply,
                     tool_calls_this_turn=self.state.get("_turn_tool_calls", 0),
-                    user_asked_action=router.asks_for_action(text))
-                if (weak and self.state.get("_smart_pick")
-                        and not self.state.get("_verify_fired")):
-                    self.state["_verify_fired"] = True
-                    if self._smart_escalate(f"answer rejected ({weak})"):
-                        continue  # retry the hop on the stronger model
+                    user_asked_action=verify.asks_for_action(text))
+                if weak and not self.state.get("_verify_fired"):
+                    self.state["_verify_fired"] = weak
                 if has_reply:
                     self.emit(Event.ASSISTANT_MESSAGE, turn_id=turn_id, hop=hop,
                               text=reply, model=model_used)
@@ -696,27 +670,13 @@ class Session:
                 aborted = True
                 break
 
-            # A hop that ran real tools with no failure signal is CLEAN;
-            # enough of them and the turn settles back down the effort ladder.
-            # A doomed batch or fresh stub markers reset the streak and, for
-            # the doom case, escalate — evidence the model is out of its depth.
             all_doomed = report["total"] > 0 and report["doomed"] == report["total"]
-            if report["doomed"] == 0 and not self.state.get("stub_files"):
-                self.state["_smart_clean_hops"] = self.state.get("_smart_clean_hops", 0) + 1
-                self._smart_de_escalate()
-            else:
-                self.state["_smart_clean_hops"] = 0
-                if all_doomed:
-                    self._smart_escalate("repeated malformed tool calls")
 
             action = self.state["stall"].observe(
                 loopguard.batch_signature(tool_calls),
                 all_doomed=all_doomed,
             )
             if action in ("nudge", "renudge"):
-                # Repeating the same action is the clearest struggle signal —
-                # escalate before nudging, so a stronger model gets the nudge.
-                self._smart_escalate("model is repeating the same action")
                 self.state["stall_nudge_msg"] = (
                     "You appear to be repeating the same action without "
                     "making progress. Stop and either try a materially "
@@ -797,9 +757,7 @@ class Session:
         while True:
             attempt += 1
             msgs = self.state["messages"] + extras if extras else self.state["messages"]
-            # Effective cfg: the LIVE smart pick as this hop's model (it may
-            # have escalated since the turn began), reasoning stripped for
-            # models that rejected it.
+            # Effective cfg: reasoning stripped for models that rejected it.
             cfg = self._effective_cfg()
             if self.state.get("_max_tokens_shrunk"):
                 cfg["max_tokens"] = self.state["_max_tokens_shrunk"]
@@ -942,13 +900,6 @@ class Session:
                     self.emit(Event.ASSISTANT_PROGRESS, tool=p.get("tool"),
                               chars=p.get("chars", 0))
                     continue
-                if ev.get("stream_reset"):
-                    # The optimized attempt aborted in-band and the raw retry
-                    # is starting over: drop its partial text so the stored
-                    # reply isn't the two attempts concatenated.
-                    buf.clear()
-                    ttft = None
-                    continue
                 meta.update(ev)
         meta["elapsed"] = time.time() - started
         if ttft is not None:
@@ -1019,264 +970,26 @@ class Session:
     # ------------------------------------------------------------------
     # routing / compaction
     # ------------------------------------------------------------------
-    # ------------------------------------------------------------------
-    # smart routing — a within-turn cascade, not a one-shot pick
-    #
-    # Prediction picks the first model from the prompt; EVIDENCE picks the
-    # next. The initial route reads difficulty from the message; then, per
-    # hop, the same instrumentation the loop already runs (stall detector,
-    # doom streak, stub markers, reply verification) escalates to a stronger
-    # model when the current one is visibly struggling, and settles back down
-    # after a run of clean hops. This is the single biggest reason the CLI
-    # feels efficient: a hard task climbs to a frontier model only when it
-    # needs to, and the boilerplate tail runs cheap again.
-    #
-    # `_smart_pick` holds the CURRENT hop's model. It is kept SEPARATE from
-    # cfg["model"] (the user's pin) so the pin is never clobbered and the pick
-    # can be abandoned back to it. None = ride the pinned model.
-    # ------------------------------------------------------------------
-    _CLEAN_HOPS_TO_SETTLE = 3
-    _MAX_ESCALATIONS = 2
-
     def _effective_model(self) -> str:
-        pinned = self.cfg.get("model", "")
-        pick = self.state.get("_smart_pick")
-        if pick and self.cfg.get("route_mode") == "smart" and not is_local(pinned):
-            return pick
-        return pinned
+        return self.cfg.get("model", "")
 
     def _effective_cfg(self) -> dict:
-        """cfg for THIS hop: the live smart pick as the model, minus settings
-        this model has already proven it can't take."""
+        """cfg for THIS hop: gateway auto routing when asked for (never over a
+        local pin), minus settings this model has already proven it can't take."""
         cfg = dict(self.cfg)
         cfg["model"] = self._effective_model()
+        cfg["auto_route"] = cfg.get("route_mode") == "auto" and not is_local(cfg["model"])
         rejected = self.state.get("_reasoning_rejected") or set()
         if cfg.get("reasoning_effort") and cfg["model"] in rejected:
             cfg.pop("reasoning_effort", None)
         return cfg
-
-    def _switch_cost_bonus(self) -> float:
-        """Stickiness bonus for the incumbent, scaled by cached context.
-        Switching re-sends the whole history and throws away the prompt cache
-        — cheap early in a turn, a real bill 40k tokens in."""
-        try:
-            tok = compact.est_history_tokens(self.state.get("messages") or [])
-        except Exception:
-            return 0.0
-        return min(12.0, tok / 2500.0)
-
-    def _needs_ctx(self) -> int:
-        return int(compact.est_history_tokens(self.state.get("messages") or []) * 1.3) + 4096
-
-    def _apply_pick(self, info: dict, difficulty: str) -> None:
-        info["difficulty"] = difficulty
-        self.state["_smart_difficulty"] = difficulty
-        self.state["_smart_pick"] = info["model"]
-        self.state["_smart_last"] = info["model"]
-        self.state["_smart_pick_info"] = info
-        self.turn_model = info["model"]
-
-    def _route_turn(self, text: str, had_image: bool = False) -> None:
-        """Initial per-turn pick. Fail-open: any miss leaves _smart_pick unset
-        and the pinned model rides."""
-        self.state["_smart_pick"] = None
-        if self.cfg.get("route_mode") != "smart" or is_local(self.cfg.get("model", "")):
-            return      # a local pin is the user's choice; the table knows no local rows
-        try:
-            table = router.load_table()
-            if not table or not self.catalog:
-                return
-            history_chars = sum(
-                len(m.get("content") or "") if isinstance(m.get("content"), str) else 0
-                for m in self.state.get("messages") or [])
-            cohort, conf = router.classify(
-                text, has_image=had_image, has_tools=True,
-                history_chars=history_chars)
-            # Short follow-ups ("yes", "2", "continue") are answers WITHIN the
-            # ongoing task, not new tasks — inherit its cohort/difficulty
-            # rather than reclassifying three characters. Judged by shape, not
-            # a bare length rule.
-            inherit = bool(
-                self.state.get("_smart_cohort") and not had_image
-                and (router.is_continuation(text)
-                     or (conf <= 0.5 and len(text.strip()) < 25)))
-            forced = self.cfg.get("route_effort", "auto")
-            if forced != "auto":
-                difficulty = forced
-            elif inherit:
-                difficulty = self.state.get("_smart_difficulty") or "mid"
-            else:
-                difficulty = router.estimate_difficulty(text)
-            if inherit:
-                cohort = self.state["_smart_cohort"]
-            self.state["_smart_cohort"] = cohort
-            self.state["_smart_base_difficulty"] = difficulty   # de-escalation floor
-            weights = router.effective_weights(self.cfg.get("route_weights"), difficulty)
-            exclude = set(self.cfg.get("exclude_models") or []) | set(self.state.get("_smart_bad") or set())
-            got = router.pick(cohort, weights, table, self.catalog,
-                              needs_tools=True, needs_ctx=self._needs_ctx(),
-                              incumbent=self.state.get("_smart_last"),
-                              exclude=exclude)
-            if got and got.get("model"):
-                self._apply_pick(got, difficulty)
-                self.emit(Event.ROUTED, model=got["model"], cohort=cohort,
-                          confidence=conf, difficulty=difficulty,
-                          ranked=(got.get("ranked") or [])[:5])
-        except Exception:
-            self.state["_smart_pick"] = None  # never let routing break a turn
-
-    def _smart_escalate(self, reason: str) -> bool:
-        """The current model is visibly struggling — climb the effort ladder
-        for the rest of this turn and re-pick. Bounded to _MAX_ESCALATIONS so
-        a hard task reaches a frontier model but a broken one can't spend
-        forever."""
-        if self.cfg.get("route_mode") != "smart" or is_local(self.cfg.get("model", "")):
-            return False
-        if self.state.get("_smart_escalations", 0) >= self._MAX_ESCALATIONS:
-            return False
-        if self.cfg.get("route_effort", "auto") != "auto":
-            return False  # user pinned the effort — respect it
-        try:
-            table = router.load_table()
-            if not table or not self.catalog:
-                return False
-            cohort = self.state.get("_smart_cohort") or "chat"
-            cur = self.state.get("_smart_difficulty") or "mid"
-            nxt = router.escalate(cur)
-            if nxt == cur:
-                return False  # already at the top
-            weights = router.effective_weights(self.cfg.get("route_weights"), nxt)
-            got = router.pick(cohort, weights, table, self.catalog,
-                              needs_tools=True, needs_ctx=self._needs_ctx(),
-                              incumbent=None,  # escalating: no stickiness
-                              exclude=set(self.state.get("_smart_bad") or set()))
-            if not got or not got.get("model"):
-                return False
-            prev = self.state.get("_smart_pick")
-            self.state["_smart_escalations"] = self.state.get("_smart_escalations", 0) + 1
-            self.state["_smart_clean_hops"] = 0
-            got["escalated"] = True
-            self._apply_pick(got, nxt)
-            if got["model"] != prev:
-                self.emit(Event.ROUTED, model=got["model"], cohort=cohort,
-                          difficulty=nxt, escalated=True, reason=reason,
-                          ranked=(got.get("ranked") or [])[:5])
-                self.emit(Event.NOTICE, level="info",
-                          message=f"escalating ({reason}) → {_short_model(got['model'])}")
-            return True
-        except Exception:
-            return False
-
-    def _smart_de_escalate(self) -> None:
-        """After a run of clean hops, settle back down the effort ladder so a
-        single escalation doesn't tax the whole rest of the turn at frontier
-        prices. Never below the turn's original predicted difficulty."""
-        if self.cfg.get("route_mode") != "smart" or is_local(self.cfg.get("model", "")):
-            return
-        if self.cfg.get("route_effort", "auto") != "auto":
-            return
-        if self.state.get("_smart_clean_hops", 0) < self._CLEAN_HOPS_TO_SETTLE:
-            return
-        floor = self.state.get("_smart_base_difficulty") or "low"
-        cur = self.state.get("_smart_difficulty") or "mid"
-        nxt = router.de_escalate(cur, floor=floor)
-        if nxt == cur:
-            return
-        try:
-            table = router.load_table()
-            if not table or not self.catalog:
-                return
-            cohort = self.state.get("_smart_cohort") or "chat"
-            weights = router.effective_weights(self.cfg.get("route_weights"), nxt)
-            got = router.pick(cohort, weights, table, self.catalog,
-                              needs_tools=True, needs_ctx=self._needs_ctx(),
-                              incumbent=self.state.get("_smart_last"),
-                              exclude=set(self.state.get("_smart_bad") or set()),
-                              incumbent_bonus=self._switch_cost_bonus())
-            if not got or not got.get("model"):
-                return
-            prev = self.state.get("_smart_pick")
-            self.state["_smart_escalations"] = max(0, self.state.get("_smart_escalations", 1) - 1)
-            self.state["_smart_clean_hops"] = 0
-            self._apply_pick(got, nxt)
-            if got["model"] != prev:
-                self.emit(Event.ROUTED, model=got["model"], cohort=cohort,
-                          difficulty=nxt, settled=True,
-                          ranked=(got.get("ranked") or [])[:5])
-                self.emit(Event.NOTICE, level="info",
-                          message=f"settling → {_short_model(got['model'])}")
-        except Exception:
-            pass
-
-    def _smart_abandon(self, reason: str) -> bool:
-        """The smart pick failed LIVE (empty replies / fatal). Blacklist it
-        for the session and fall back to the pinned model — outcome beats the
-        table's opinion. True if there was a pick to abandon."""
-        bad = self.state.get("_smart_pick")
-        if not bad:
-            return False
-        self.state.setdefault("_smart_bad", set()).add(bad)
-        self.state["_smart_pick"] = None
-        self.state["_smart_last"] = None
-        self.turn_model = self.cfg.get("model")
-        self.emit(Event.NOTICE, level="warn", message=(
-            f"smart pick {_short_model(bad)} {reason} — falling back to "
-            f"{_short_model(self.cfg.get('model',''))} (skipped for this session)"))
-        return True
-
-    def explain_route(self, text: str) -> dict:
-        """What would smart routing pick for this prompt, and why?
-
-        The CLI answered this with `/route why` after the fact. Answering it
-        BEFORE the turn is what makes routing legible rather than magic: you
-        see the cohort, the candidates and the prices you are choosing
-        between, while you can still change your mind.
-        """
-        out = {"available": False, "cohort": None, "ranked": [],
-               "mode": self.cfg.get("route_mode", "off")}
-        try:
-            # Classify FIRST. Cohort and difficulty are computed locally from
-            # the prompt alone — they cost nothing and are worth showing even
-            # when the catalog has not arrived and no pick is possible yet.
-            cohort, confidence = router.classify(text or "", has_tools=True)
-            level = self.cfg.get("route_effort", "auto")
-            difficulty = router.estimate_difficulty(text or "")
-            weights = router.effective_weights(
-                self.cfg.get("route_weights"),
-                difficulty if level == "auto" else level)
-            out.update({"cohort": cohort, "confidence": confidence,
-                        "difficulty": difficulty, "weights": weights})
-
-            table = router.load_table()
-            if not table or not self.catalog:
-                out["reason"] = ("the model catalog has not loaded yet"
-                                 if table else "no routing table is bundled")
-                return out
-            got = router.pick(cohort, weights, table, self.catalog,
-                              needs_tools=True, incumbent=self.cfg.get("model"),
-                              exclude=set(self.cfg.get("exclude_models") or []))
-            out.update({
-                "available": bool(got),
-                "pick": (got or {}).get("model"),
-                "ranked": ((got or {}).get("ranked") or [])[:8],
-            })
-            if not got:
-                excluded = len(self.cfg.get("exclude_models") or [])
-                out["reason"] = (
-                    "no model on your account is rated for this kind of work"
-                    + (f" once the {excluded} you excluded are removed" if excluded else "")
-                )
-        except Exception as e:
-            out["reason"] = f"{type(e).__name__}: {e}"
-        return out
 
     def _maybe_compact(self) -> None:
         if not self.cfg.get("auto_compact", True):
             return
         if self.state.get("_compact_exhausted"):
             return
-        # Use the EFFECTIVE model's window — a mid-turn escalation may have
-        # moved to a model with a different context limit.
+        # The effective model's window: a fallback or routed model differs from the pin.
         model = self._effective_model()
         limit = (self.state.get("_hop_ctx") if is_local(model) and self.state.get("_hop_ctx")
                  else compact.context_limit(model, self.catalog))
@@ -1551,8 +1264,7 @@ class Session:
         abspath = str(abspath)
         stub = None
         try:
-            stub = memory.dedupe_read(self.state, abspath,
-                                      float(self.cfg.get("optimize") or 0))
+            stub = memory.dedupe_read(self.state, abspath)
         except Exception:
             stub = None
         if stub is not None:
@@ -1866,11 +1578,6 @@ def mode_from_str_safe(v) -> Mode:
         return from_str(str(v or "default"))
     except Exception:
         return Mode.DEFAULT
-
-
-def _short_model(m: str) -> str:
-    """Drop the provider prefix for a compact notice: openai/gpt-x -> gpt-x."""
-    return m.split("/", 1)[1] if "/" in (m or "") else (m or "")
 
 
 def _retire_old_images(messages: list) -> None:

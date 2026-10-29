@@ -18,10 +18,10 @@ export type Action = {
  *
  * Two things make it work better than the slash commands it replaces.
  * First, every enum setting is expanded into one action PER OPTION —
- * "Routing: Smart (local)" is directly runnable, so you never have to learn
- * that routing has three values before you can change it. Second, matching
- * runs over the engine's own help text, so typing "cheap" finds token
- * savings and smart routing without either of them containing the word.
+ * "Routing: Gateway auto" is directly runnable, so you never have to learn
+ * what routing's values are before you can change it. Second, matching
+ * runs over the engine's own help text, so typing "cheap" finds the
+ * settings about spend without any of them containing the word.
  */
 export function CommandPalette({ settings, extra, onSet, onClose }: {
   settings: SettingsDoc | null
@@ -99,7 +99,7 @@ export function CommandPalette({ settings, extra, onSet, onClose }: {
             return { a, score: a.title.toLowerCase().includes(needle) ? 0 : 1 }
           }
           // Fall back to a fuzzy title match so abbreviations land too —
-          // `rtsm` reaches "Routing: Smart (local)".
+          // `rtga` reaches "Routing: Gateway auto".
           const m = fuzzyMatch(needle, a.title)
           return m ? { a, score: 2 + m.rank } : null
         })

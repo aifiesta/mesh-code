@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import { useDismissable } from '../useDismissable'
-import type { LocalStatus, RouteExplain, SettingSpec, SettingsDoc, Status } from '../types'
+import type { LocalStatus, SettingSpec, SettingsDoc, Status } from '../types'
 import { fmtTokens, fmtUsd, pricePerM, type CatalogModel } from '../types'
 import { Field } from './Field'
 
@@ -15,15 +15,13 @@ import { Field } from './Field'
  * Every popover ends with the same escape hatch to the full settings, so the
  * bar teaches that more exists without having to show it.
  */
-export function ControlBar({ status, settings, catalog, local, routeExplain, onSet, onOpenSettings, onExplain }: {
+export function ControlBar({ status, settings, catalog, local, onSet, onOpenSettings }: {
   status: Status | null
   settings: SettingsDoc | null
   catalog: CatalogModel[]
   local: LocalStatus | null
-  routeExplain: RouteExplain | null
   onSet: (key: string, value: any) => void
   onOpenSettings: (tab?: string) => void
-  onExplain: () => void
 }) {
   const [open, setOpen] = useState<string | null>(null)
   const ref = useRef<HTMLDivElement>(null)
@@ -43,19 +41,19 @@ export function ControlBar({ status, settings, catalog, local, routeExplain, onS
   // differ for a whole turn.
   const live = !!status?.busy
   const turnModel = status?.turn_model || null
-  const routing = routeMode !== 'off'
+  const isLocal = model.startsWith('local/')
+  const routing = routeMode !== 'off' && !isLocal      // a local pin is never routed
   const routedAway = !!turnModel && turnModel !== model
   // With routing on and nothing run yet, naming the pinned model is simply
   // wrong — the router has not chosen, and it usually will not choose that
   // one. Name what DECIDES until there is a real answer to show.
   const pending = routing && !turnModel
-  const isLocal = model.startsWith('local/')
   const localId = row?.resolves_to ?? model
   const localJob = local?.jobs.find((j) => j.kind === 'model' && j.target === localId) ?? null
   const localInstalled = !!local?.models.find((m) => m.id === localId)?.installed
   const localName = local?.models.find((m) => m.id === localId)?.label ?? shortModel(localId)
   const shownModel = turnModel
-    ?? (routing ? (routeMode === 'auto' ? 'Gateway picks' : 'Router picks') : model)
+    ?? (routing ? 'Gateway picks' : model)
   // Session totals only advance when a turn ENDS, so the in-flight turn has
   // to be added in or the numbers sit frozen for the whole run.
   const tokens = (status?.session_tokens ?? 0) + (live ? (status?.turn_tokens ?? 0) : 0)
@@ -67,22 +65,22 @@ export function ControlBar({ status, settings, catalog, local, routeExplain, onS
   return (
     <div className="controlbar" ref={ref}>
       {/* One pill names what decides the model; its popover holds the
-          routing switch, the effort dial and the router's pick. */}
+          routing switch and the pinned model. */}
       <div className="ctl ctl-model">
         <button className={`ctl-btn ${open === 'model' ? 'on' : ''} ${pending ? 'pending' : ''} ${routing ? 'lit' : ''}`}
-                onClick={() => { toggle('model'); if (routing) onExplain() }}
+                onClick={() => toggle('model')}
                 title={pending
                   ? `${routeLabel} routing — the model is chosen per prompt (fallback: ${model})`
                   : routedAway ? `Routed to ${turnModel} (pinned: ${model})` : shownModel}>
           <span className="ctl-label">Model</span>
           <span className="ctl-value">
-            {pending ? (routeMode === 'auto' ? 'Auto routing' : 'Smart routing')
+            {pending ? 'Auto routing'
               : isLocal && !turnModel && localJob ? `Local (${Math.round((100 * localJob.bytes) / Math.max(localJob.total, 1))}%)`
               : isLocal && !turnModel && !localInstalled && local ? 'Local (download needed)'
               : isLocal && !turnModel ? `Local · ${shortModel(localId)}`
               : shortModel(shownModel)}
           </span>
-          {routedAway && <span className="ctl-flag" title="chosen by the router">routed</span>}
+          {routedAway && <span className="ctl-flag" title="chosen by the gateway">routed</span>}
           {(status?.turn_local || (isLocal && !turnModel && localInstalled)) && <span className="tag local" title="Runs on this machine, free">local</span>}
         </button>
         {open === 'model' && (
@@ -103,11 +101,10 @@ export function ControlBar({ status, settings, catalog, local, routeExplain, onS
               </div>
             )}
 
-            {routeMode === 'smart' && spec('route_effort') &&
-              <Field spec={spec('route_effort')!} onChange={onSet} compact label="Effort" />}
-            {routeMode === 'smart' && <Explain explain={routeExplain} />}
             {routeMode === 'auto' && (
-              <p className="pop-note">Mesh’s Auto Router picks upstream, so the model is known once the first hop answers.</p>
+              <p className="pop-note">{isLocal
+                ? 'A local model pin is never routed; pick a cloud model for the gateway to route.'
+                : 'Mesh’s Auto Router picks upstream, so the model is known once the first hop answers.'}</p>
             )}
 
             {routing && (
@@ -115,7 +112,7 @@ export function ControlBar({ status, settings, catalog, local, routeExplain, onS
                 {routedAway
                   ? <>This turn ran on <b>{shortModel(turnModel!)}</b>. </>
                   : null}
-                Fallback when the router can’t pick: <b>{shortModel(model)}</b>
+                Fallback when the gateway can’t pick: <b>{shortModel(model)}</b>
                 <button className="link" onClick={() => { setOpen(null); onOpenSettings('model') }}>change</button>
               </p>
             )}
@@ -175,7 +172,6 @@ export function ControlBar({ status, settings, catalog, local, routeExplain, onS
                     + 'be priced from the catalog, so this is not what you were billed.'
                   : 'What the gateway actually billed, not an estimate.'}
             </p>
-            {spec('optimize') && <Field spec={spec('optimize')!} onChange={onSet} compact />}
           </Pop>
         )}
       </div>
@@ -196,43 +192,5 @@ function Pop({ title, children, onSettings }: {
   )
 }
 
-/** Why the router would pick what it picks — before you spend anything. */
-function Explain({ explain }: { explain: RouteExplain | null }) {
-  if (!explain) return null
-  if (!explain.available) {
-    return (
-      <p className="pop-note">
-        {explain.cohort
-          ? <>Reads as a <b>{pretty(explain.cohort)}</b> prompt
-              {explain.difficulty && <> ({explain.difficulty} difficulty)</>}.
-              {explain.reason && <> Can’t pick yet — {explain.reason}.</>}</>
-          : explain.reason}
-      </p>
-    )
-  }
-  const ranked = explain.ranked.map((r: any) => shortModel(String(r.model ?? r.id ?? r)))
-  const [top, ...rest] = ranked
-  return (
-    <div className="explain">
-      <div className="explain-top">
-        <span className="explain-cap">For this prompt the router would pick</span>
-        <span className="explain-model">{top}</span>
-        <span className="explain-cap">
-          Reads as <b>{pretty(explain.cohort)}</b>
-          {explain.difficulty && <> · {explain.difficulty} difficulty</>}
-        </span>
-      </div>
-      {rest.length > 0 && (
-        <p className="explain-rest">
-          Then {rest.slice(0, 3).join(', ')}
-        </p>
-      )}
-    </div>
-  )
-}
-
 const shortModel = (m: string) => (m.includes('/') ? m.split('/').slice(1).join('/') : m)
 
-/** Engine data is rendered as-is: a non-string here must not throw. */
-const pretty = (v: unknown) =>
-  typeof v === 'string' ? v.replace(/[-_]/g, ' ') : String(v ?? '')

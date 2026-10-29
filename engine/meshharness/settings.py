@@ -58,7 +58,7 @@ SCHEMA: list[dict] = [
         "category": "model",
         "type": "model_list",
         "label": "Never use",
-        "help": "Models the router will never pick, even if the table rates them highly.",
+        "help": "Models the gateway's auto routing must never pick.",
         "why": "For models that are wrong for your work, priced badly for you, or that you are not allowed to send data to.",
     },
     {
@@ -163,39 +163,10 @@ SCHEMA: list[dict] = [
         "default": "off",
         "options": [
             _opt("off", "Pinned", "Always use the model above."),
-            _opt("smart", "Smart (local)", "A bundled table picks per prompt. No extra tokens, no extra network hop."),
-            _opt("auto", "Gateway auto", "Mesh's own Auto Router picks. Costs a classifier hop."),
+            _opt("auto", "Gateway auto", "Mesh's own Auto Router picks per prompt. Costs a classifier hop, cached a day."),
         ],
         "help": "Who chooses the model for each prompt.",
-        "why": "Smart routing spends less on easy prompts and reaches for a stronger model on hard ones, deciding locally in microseconds.",
-    },
-    {
-        "key": "route_effort",
-        "category": "routing",
-        "type": "enum",
-        "label": "Effort",
-        "default": "auto",
-        "depends_on": {"route_mode": "smart"},
-        "options": [
-            _opt("auto", "Auto", "Detect difficulty from the prompt."),
-            _opt("low", "Low", "Favour cheap models."),
-            _opt("medium", "Medium", ""),
-            _opt("high", "High", ""),
-            _opt("xhigh", "Very high", ""),
-            _opt("max", "Max", "Always reach for the strongest capable model."),
-        ],
-        "help": "How hard the router leans on capability rather than price.",
-        "why": "Auto is usually right. Force it up for a gnarly refactor, down for a batch of small edits.",
-    },
-    {
-        "key": "route_weights",
-        "category": "routing",
-        "type": "weights",
-        "label": "Balance",
-        "default": {"cost": 0.5, "cap": 0.3, "speed": 0.2},
-        "depends_on": {"route_mode": "smart"},
-        "help": "How the router trades cost against capability and speed.",
-        "why": "Weights move the pick along each cohort's efficiency frontier — no setting can select a model the table says cannot do the task.",
+        "why": "Auto spends less on easy prompts and reaches for a stronger model on hard ones; a local pin is never routed.",
     },
     {
         "key": "reasoning_effort",
@@ -227,17 +198,6 @@ SCHEMA: list[dict] = [
         ],
         "help": "Affects prose only — never what the assistant is allowed to do.",
         "why": "Concise is good once you trust it; explanatory is good when reviewing unfamiliar code.",
-    },
-    {
-        "key": "optimize",
-        "category": "behaviour",
-        "type": "dial",
-        "label": "Token savings",
-        "default": 0.0,
-        "min": 0.0, "max": 0.95, "step": 0.05,
-        "beta": True,
-        "help": "How aggressively to trim what gets re-sent each turn.",
-        "why": "Cuts spend on long sessions. Higher values prune more context, so raise it gradually and watch quality.",
     },
     {
         "key": "system",
@@ -332,29 +292,6 @@ def coerce(key: str, value: Any) -> Any:
         if not lo <= n <= hi:
             raise InvalidSetting(f"{key} must be between {lo} and {hi}")
         return n
-
-    if kind == "dial":
-        try:
-            f = float(value)
-        except (TypeError, ValueError):
-            raise InvalidSetting(f"{key} must be a number")
-        lo, hi = spec.get("min", 0.0), spec.get("max", 1.0)
-        if not lo <= f <= hi:
-            raise InvalidSetting(f"{key} must be between {lo} and {hi}")
-        return round(f, 4)
-
-    if kind == "weights":
-        if not isinstance(value, dict):
-            raise InvalidSetting("balance must be an object")
-        out = {}
-        for k in ("cost", "cap", "speed"):
-            try:
-                out[k] = max(0.0, float(value.get(k, 0)))
-            except (TypeError, ValueError):
-                raise InvalidSetting(f"balance.{k} must be a number")
-        if sum(out.values()) <= 0:
-            raise InvalidSetting("at least one balance weight must be above zero")
-        return out
 
     if kind in ("model_list",):
         if value in (None, "", "off"):

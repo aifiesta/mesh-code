@@ -638,9 +638,7 @@ export default function App() {
               settings={state.settings}
               catalog={state.catalog}
               local={state.local}
-              routeExplain={state.routeExplain}
               onSet={setConfig}
-              onExplain={() => client?.send(Req.ROUTE_PREVIEW, { session: session.id, text: '' })}
               onOpenSettings={(tab) => tab === '__palette' ? setPalette(true) : setSheet(tab ?? 'model')}
             />
           }

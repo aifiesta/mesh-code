@@ -58,3 +58,14 @@ def test_a_hand_edited_key_reaches_the_credentials_file_despite_the_migration():
     assert cfg["api_key"] == "rsk_legacy_key"
     assert cfg_mod.CREDENTIALS_FILE.read_text().strip() == "rsk_legacy_key"
     assert "api_key" not in json.loads(cfg_mod.CONFIG_FILE.read_text())
+
+
+def test_a_local_config_with_the_dead_router_keys_loses_them_on_save():
+    _write({"model": "local/qwen3.5-9b-q4", "route_mode": "smart", "optimize": 0.8,
+            "route_weights": {"cost": 1}, "route_effort": "max", "local_fallback_model": "x/y"})
+    cfg = cfg_mod.load_config()
+    assert cfg["route_mode"] == "off"
+    assert not {"optimize", "route_weights", "route_effort"} & set(cfg)
+    cfg_mod.save_config(cfg)
+    on_disk = json.loads(cfg_mod.CONFIG_FILE.read_text())
+    assert not {"optimize", "route_weights", "route_effort"} & set(on_disk) and on_disk["route_mode"] == "off"

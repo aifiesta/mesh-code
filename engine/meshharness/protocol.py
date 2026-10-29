@@ -78,10 +78,8 @@ class Event:
     NOTICE = "notice"                  # info | warn — non-fatal
     ERROR = "error"
     COMPACTED = "compacted"
-    ROUTED = "routed"                  # smart router picked a model
     SETTINGS = "settings"              # schema + current values
     CATALOG = "catalog"                # model list with context + pricing
-    ROUTE_EXPLAIN = "route.explain"    # ranked candidates for a draft prompt
     CONFIG_ERROR = "config.error"      # a rejected setting, with the reason
     DIR_LISTING = "dir.listing"        # children of one workspace directory
     FILE_PREVIEW = "file.preview"      # a workspace file, for the viewer
@@ -104,7 +102,6 @@ class Request:
     ASK_RESPONSE = "ask.response"             # reply to ASK_USER
     SET_MODE = "set.mode"
     SET_MODEL = "set.model"
-    SET_ROUTE = "set.route"
     SET_STYLE = "set.style"
     OPEN_WORKSPACE = "open.workspace"
     ADD_FOLDER = "add.folder"        # another browsable root, same window
@@ -120,7 +117,6 @@ class Request:
     SAVE_KEY = "save.key"
     CLEAR_KEY = "clear.key"       # forget the key this app stored
     SET_CONFIG = "set.config"        # one validated setting, from any surface
-    ROUTE_PREVIEW = "route.preview"  # "which model would you pick, and why?"
     LIST_DIR = "list.dir"            # one directory of the workspace tree
     READ_FILE = "read.file"          # preview a workspace file in the viewer
     FIND_FILES = "find.files"        # flat list of a root's files, for the @ picker

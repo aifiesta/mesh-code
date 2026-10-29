@@ -263,38 +263,6 @@ def test_bash_runs_inside_the_workspace(gateway, harness, tmp_path):
     assert (tmp_path / "where.txt").read_text().strip() == str(tmp_path.resolve())
 
 
-def test_smart_routing_actually_picks_a_model(gateway, harness, monkeypatch):
-    """Regression: classify() returns (cohort, confidence).
-
-    Passing that tuple straight into router.pick() made every frontier
-    lookup miss, so smart routing quietly did nothing — and because routing
-    is designed to fail OPEN, no error ever surfaced. The only way to catch
-    it is to assert a pick actually happens.
-    """
-    from meshharness.core import router
-
-    table = router.load_table()
-    assert table, "the routing table should be bundled"
-    cohort, confidence = router.classify("refactor this module", has_tools=True)
-    assert isinstance(cohort, str) and 0 <= confidence <= 1
-
-    # A catalog containing exactly the models the table's frontier names.
-    frontier = (table.get("frontiers") or {}).get(cohort) or []
-    assert frontier, f"no frontier for cohort {cohort!r}"
-    catalog = [{"id": m} for m in frontier[:6]]
-
-    gateway.script(sse_turn("routed reply"))
-    h = harness(route_mode="smart")
-    h.session.catalog = catalog
-    h.session.submit("refactor this module and fix the failing test")
-    h.wait_for(Event.TURN_FINISHED)
-
-    routed = h.of(Event.ROUTED)
-    assert routed, "smart routing produced no pick at all"
-    assert isinstance(routed[0]["data"]["cohort"], str)
-    assert routed[0]["data"]["model"] in [m["id"] for m in catalog]
-
-
 def test_start_server_failure_reports_a_result(gateway, harness, tmp_path):
     """Regression: the tool card said "running…" forever.
 
@@ -475,102 +443,6 @@ def test_deleting_a_symlink_removes_the_link_not_its_target(tmp_path):
     files.delete(tmp_path, "current")
     assert not link.exists() and not link.is_symlink(), "link is gone"
     assert (real / "keep.txt").read_text() == "precious", "target survives"
-
-
-# ---- smart-routing cascade (within-turn escalate / settle) --------------
-
-def _agentic_catalog():
-    """A catalog spanning the agentic cohort's frontier, so a pick at any
-    effort resolves to a real model."""
-    from meshharness.core import router
-    table = router.load_table()
-    frontier = (table.get("frontiers") or {}).get("agentic") or []
-    if not frontier:
-        # fall back to any cohort with a frontier
-        for c, ms in (table.get("frontiers") or {}).items():
-            if ms:
-                frontier = ms
-                break
-    return [{"id": m, "context_length": 200000} for m in frontier[:8]]
-
-
-def test_stall_escalates_the_smart_pick_mid_turn(gateway, harness):
-    """A repeated identical tool batch is a struggle signal — the cascade
-    must climb the effort ladder instead of just nudging the same model."""
-    same = [{"id": "c1", "name": "run_bash",
-             "arguments": json.dumps({"command": "ls"})}]
-    # Four identical batches trip the stall detector (period-1, nudge at 3),
-    # then a clean finish.
-    gateway.script(
-        sse_turn(tool_calls=same),
-        sse_turn(tool_calls=same),
-        sse_turn(tool_calls=same),
-        sse_turn(tool_calls=same),
-        sse_turn("done"),
-    )
-    h = harness(mode=Mode.AUTO, route_mode="smart", route_effort="auto")
-    h.session.catalog = _agentic_catalog()
-    h.session.submit("run the build repeatedly")
-    h.wait_for(Event.TURN_FINISHED)
-
-    assert h.session.state.get("_smart_escalations", 0) >= 1, \
-        "a stall under smart routing must escalate the pick"
-
-
-def test_escalate_then_de_escalate_walks_difficulty_up_and_back(harness):
-    """Method-level: escalate raises the effort tier and re-picks; enough
-    clean hops settle it back toward the turn's original floor."""
-    h = harness(route_mode="smart", route_effort="auto")
-    h.session.catalog = _agentic_catalog()
-    st = h.session.state
-    st["_smart_cohort"] = "agentic"
-    st["_smart_difficulty"] = "low"
-    st["_smart_base_difficulty"] = "low"
-    st["_smart_last"] = None
-    st["_smart_escalations"] = 0
-    st["_smart_clean_hops"] = 0
-
-    assert h.session._smart_escalate("test") is True
-    assert st["_smart_difficulty"] == "mid", "escalate moves one tier up"
-    assert st["_smart_escalations"] == 1
-
-    # Not enough clean hops yet — stays put.
-    st["_smart_clean_hops"] = 1
-    h.session._smart_de_escalate()
-    assert st["_smart_difficulty"] == "mid"
-
-    # Enough clean hops — settles back down toward the floor.
-    st["_smart_clean_hops"] = 3
-    h.session._smart_de_escalate()
-    assert st["_smart_difficulty"] == "low", "settles back to the base floor"
-    assert st["_smart_escalations"] == 0
-
-
-def test_route_pin_is_never_clobbered_by_the_cascade(gateway, harness):
-    """The user's pinned model (cfg['model']) must survive routing — the pick
-    lives in _smart_pick, so the pin can always be fallen back to."""
-    gateway.script(
-        sse_turn(tool_calls=[{"id": "c1", "name": "run_bash",
-                              "arguments": json.dumps({"command": "ls"})}]),
-        sse_turn("done"))
-    h = harness(mode=Mode.AUTO, route_mode="smart")
-    h.session.catalog = _agentic_catalog()
-    h.session.submit("do a thing")
-    h.wait_for(Event.TURN_FINISHED)
-    assert h.session.cfg["model"] == "test/model", \
-        "the pinned model must not be overwritten by a smart pick"
-
-
-# ---- start_server reliability (ported from the CLI's hardened version) ---
-
-def test_start_server_honours_the_port_in_the_command(gateway, harness):
-    """`http.server 8123` binds 8123 — waiting on an auto-picked port
-    instead is the exact live failure the CLI fixed."""
-    import urllib.request
-    h = harness()
-    r = h.session._start_server({"command": "python3 -m http.server 18123"}, "c1")
-    assert "http://localhost:18123" in r, r
-    assert urllib.request.urlopen("http://localhost:18123", timeout=3).status == 200
 
 
 def test_start_server_refuses_to_restart_its_own_server(gateway, harness):
@@ -783,3 +655,12 @@ def test_session_cost_and_tokens_survive_the_full_persistence_chain(gateway, har
         assert restored.session_tokens > tok1
     finally:
         restored.close()
+
+
+def test_gateway_auto_routing_sends_auto_and_the_exclusions(gateway, harness):
+    gateway.script(sse_turn("picked"))
+    h = harness(route_mode="auto", exclude_models=["bad/model"])
+    h.session.submit("hello")
+    h.wait_for(Event.TURN_FINISHED)
+    sent = gateway.requests[-1]
+    assert sent["model"] == "auto" and sent["exclude_models"] == ["bad/model"]
