@@ -70,7 +70,8 @@ true, that is a bug — file it against this document.
 - **Plan** — live step list.
 - **Preview** — dev servers the agent starts render in-app; stop from the
   RUNNING list.
-- **Shell** — a real persistent zsh (your shell, not the agent's): arrow
+- **Shell** — a real persistent shell (`$SHELL`, run non-interactively, so no
+  rc/profile files; yours, not the agent's): arrow
   history, ⌃C, `cd` persists. Deliberately ungated — it is you typing.
   Being a pipe (not a PTY), full-screen programs like vim/top won't run.
 - **Account** — key status (hint + source, never the key itself), models
@@ -89,22 +90,25 @@ true, that is a bug — file it against this document.
   while the agent works queues the message for the next turn.
 - Images paste/drop/attach into the composer (multimodal).
 - Dark, light, or follow-system — full token coverage both ways.
-- Guided tour: opt-in from the "New here?" card in the sidebar, the
+- Guided tour: opt-in from the "Take the tour" link in the sidebar, the
   palette, or the account menu. Never auto-starts.
 
 ## Install & identity
 
-- macOS: `curl -fsSL https://code.meshapi.ai/install.sh | sh` — checksum-
-  verified, no quarantine, no dialogs. (A directly-shared .dmg needs
+- macOS/Linux: `curl -fsSL https://code.meshapi.ai/install.sh | sh`;
+  Windows: `irm https://code.meshapi.ai/install.ps1 | iex`. Both verify the
+  download against `SHA256SUMS`. (A directly-shared .dmg needs
   notarisation; see packaging/SHARING.md.)
-- Sign in with a Mesh API key; it is stored in the system keychain, never
-  in config files, and the UI only ever sees a hint (`…a1b2`).
+- Sign in with a Mesh API key; it is stored in an owner-only file
+  (`~/.mesh-code/credentials`, 0600 on macOS/Linux), never in config files, and the
+  UI only ever sees a hint (`…a1b2`).
 
 ## Current limits (honest list)
 
 - One agent turn at a time per session (queued input, no parallel turns).
 - The shell tab is a pipe: no TTY programs, no ANSI cursor apps.
 - Web search/fetch goes through the gateway's tools — no local browsing.
-- No Windows/Linux builds shipped yet (packaging targets exist, untested).
+- Windows and Linux builds ship since 0.2.4 but are lightly tested; on
+  Windows the Shell panel needs a POSIX `sh` on `PATH`.
 - Models the gateway prices at zero and omits from the catalog show `$0` —
   the app cannot invent a rate for them.

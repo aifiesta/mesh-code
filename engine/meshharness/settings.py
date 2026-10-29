@@ -193,7 +193,7 @@ SCHEMA: list[dict] = [
         "label": "Repo memory",
         "default": True,
         "help": "Remember durable facts and file structure for this project between sessions.",
-        "why": "Next session starts warm. Stored in ~/.mesh-harness/context/, never inside your repo.",
+        "why": "Next session starts warm. Stored in ~/.mesh-code/context/, never inside your repo.",
     },
 ]
 

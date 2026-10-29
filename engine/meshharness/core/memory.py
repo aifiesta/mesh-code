@@ -1,11 +1,11 @@
-"""Repo memory — persistent per-repo context under ~/.meshapi/context/.
+"""Repo memory — persistent per-repo context under ~/.mesh-code/context/.
 
 Zero-token capture: on every successful write_file/read_file the content is
 already in hand, so a structural summary (symbols, size, lines, hash) is
 extracted deterministically and stored OUTSIDE the user's repo:
 
-  ~/.meshapi/context/<repo-key>/repomap.json   structural map (0600)
-  ~/.meshapi/context/<repo-key>/memory.md      model-authored notes (0600)
+  ~/.mesh-code/context/<repo-key>/repomap.json   structural map (0600)
+  ~/.mesh-code/context/<repo-key>/memory.md      model-authored notes (0600)
   repo-key = sha256(normcase(resolved cwd))[:16]
 
 Next session in the same directory starts warm: build_system_prompt appends

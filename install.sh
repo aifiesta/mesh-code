@@ -160,7 +160,7 @@ DESKTOP
       *) warn "$bindir is not on your PATH — add it, or run $bindir/mesh-code directly." ;;
     esac
     if ! ldconfig -p 2>/dev/null | grep -q 'libfuse.so.2'; then
-      warn "AppImages need libfuse2 to launch (e.g. 'sudo apt install libfuse2'),
+      warn "AppImages need libfuse2 to launch (e.g. 'sudo apt install libfuse2'; libfuse2t64 on Ubuntu 24.04+),
   or run: $bindir/mesh-code --appimage-extract-and-run"
     fi
     info "Installed to $bindir/mesh-code"
