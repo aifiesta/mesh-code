@@ -81,7 +81,7 @@ DEFAULT_CONFIG = {
     "max_hops": 0,
     "auto_compact": True,
     "stall_policy": "pause",
-    # Who writes: the local model with cloud audit/escalation, Mesh's
+    # Who writes: the local model with cloud escalation, Mesh's
     # auto router, or the pinned `model`.
     "policy": "local-first",
     "escalation_model": "",        # empty = the shipped chain's first

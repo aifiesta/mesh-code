@@ -24,7 +24,7 @@ from typing import Any
 # Categories, in the order a settings screen should show them.
 CATEGORIES = [
     ("model", "Model", "Which model answers, and what it costs"),
-    ("local", "Local model", "A coding model that runs on this machine — free, private, works offline"),
+    ("local", "Local model", "A coding model that runs on this machine — free, offline, private while it answers"),
     ("routing", "Policy", "Who writes the code, and when the cloud steps in"),
     ("budget", "Budget", "What the cloud may spend; work on this machine is always free"),
     ("behaviour", "Behaviour", "How the assistant works and writes"),
@@ -77,7 +77,7 @@ SCHEMA: list[dict] = [
         "type": "bool",
         "label": "Download automatically on first run",
         "default": True,
-        "help": "Fetch the recommended model (up to 8 GB) without asking; bigger ones always ask.",
+        "help": "Fetch the recommended model without asking when it is 8 GB or less and runs on the GPU (or on the CPU with Use even when slow on); otherwise ask.",
         "why": "A first run that just works, at the cost of a few GB of disk you were not asked about.",
     },
     {
@@ -154,7 +154,7 @@ SCHEMA: list[dict] = [
         "label": "Use even when slow",
         "default": False,
         "help": "Run the local model on machines where it would be slow (no GPU, little memory).",
-        "why": "Free and private, but a turn may take minutes; off means the cloud fallback answers.",
+        "why": "Free and kept on this machine, but a turn may take minutes; off means the cloud fallback answers.",
     },
     {
         "key": "policy",
@@ -163,7 +163,7 @@ SCHEMA: list[dict] = [
         "label": "Who writes",
         "default": "local-first",
         "options": [
-            _opt("local-first", "Local first", "The model on this machine writes; the cloud audits and takes over when it is stuck."),
+            _opt("local-first", "Local first", "The model on this machine writes; a strong cloud model takes over when it is stuck."),
             _opt("cloud-auto", "Gateway auto", "Mesh's Auto Router picks a cloud model per prompt."),
             _opt("pinned", "Pinned", "Always the pinned model."),
         ],
@@ -255,7 +255,7 @@ SCHEMA: list[dict] = [
         "min": 0.0, "max": 10000.0,
         "zero_label": "No limit",
         "help": "Cloud spend this app allows per calendar month. Today's share is what is left this month divided by the days left; past it, cloud work pauses until midnight unless you allow more from the usage ring.",
-        "why": "Ten dollars covers a month of six-hour days when the local model writes and the cloud only audits and rescues.",
+        "why": "Ten dollars covers a month of six-hour days when the local model writes and the cloud only rescues stuck turns.",
     },
     {
         "key": "reasoning_effort",
