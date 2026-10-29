@@ -93,7 +93,7 @@ def test_ensure_after_a_cancelled_load_waits_for_the_same_process(local_dir, fak
 
 
 def test_crash_triggers_a_restart_then_gives_up_after_the_budget(local_dir, fake_bin, monkeypatch):
-    monkeypatch.setenv("FAKE_LLAMA_CRASH_AFTER_S", "0.8")
+    monkeypatch.setenv("FAKE_LLAMA_CRASH_AFTER_S", "2")
     monkeypatch.setattr(srv_mod, "RESTART_DELAYS_S", (0.1, 0.1))
     monkeypatch.setattr(srv_mod, "WATCH_INTERVAL_S", 0.1)
     states = []
@@ -109,7 +109,7 @@ def test_crash_triggers_a_restart_then_gives_up_after_the_budget(local_dir, fake
 
 
 def test_stop_during_a_restart_is_not_blocked_by_the_load(local_dir, fake_bin, monkeypatch):
-    monkeypatch.setenv("FAKE_LLAMA_CRASH_AFTER_S", "0.5")
+    monkeypatch.setenv("FAKE_LLAMA_CRASH_AFTER_S", "2")   # past the first ready, even on a slow runner
     monkeypatch.setenv("FAKE_LLAMA_LOAD_S", "0")
     monkeypatch.setattr(srv_mod, "RESTART_DELAYS_S", (0.2, 0.2))
     monkeypatch.setattr(srv_mod, "WATCH_INTERVAL_S", 0.1)
@@ -118,6 +118,7 @@ def test_stop_during_a_restart_is_not_blocked_by_the_load(local_dir, fake_bin, m
     deadline = time.time() + 5
     while s.state != "restarting" and time.time() < deadline:
         time.sleep(0.02)
+    assert s.state == "restarting"
     monkeypatch.setenv("FAKE_LLAMA_LOAD_S", "20")   # the restarted process will load slowly
     t0 = time.time()
     s.stop()
