@@ -43,6 +43,7 @@ export default function App() {
   // conversation you are leaving keeps running, and people assumed it was
   // being thrown away. Confirm it, and say plainly what happens.
   const [confirmSwitch, setConfirmSwitch] = useState<{ path: string; name: string } | null>(null)
+  const [confirmClose, setConfirmClose] = useState<string | null>(null)
   // The rail is 300px of permanent chrome; on a laptop that is a third of
   // the transcript. Hiding it is remembered per machine.
   // The left sidebar collapses too (⌘B, or the chevron in its header) —
@@ -202,13 +203,13 @@ export default function App() {
   // The two confirm dialogs had no Escape handling; every other modal
   // closes on it. One effect dismisses whichever is open.
   useEffect(() => {
-    if (!confirmDelete && !confirmSwitch) return
+    if (!confirmDelete && !confirmSwitch && !confirmClose) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { setConfirmDelete(null); setConfirmSwitch(null) }
+      if (e.key === 'Escape') { setConfirmDelete(null); setConfirmSwitch(null); setConfirmClose(null) }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [confirmDelete, confirmSwitch])
+  }, [confirmDelete, confirmSwitch, confirmClose])
 
   // Opening the key dialog clears any stale rejection first, so reopening
   // "Replace API key" never greets a pristine form with the old red error.
@@ -459,7 +460,7 @@ export default function App() {
               })()}
               activeChat={session.id}
               onSwitchChat={(id) => dispatch({ t: 'activate', id })}
-              onCloseSession={(id) => client?.send(Req.CLOSE_SESSION, { session: id })}
+              onCloseSession={setConfirmClose}
               onNewChat={(path) => client?.send(Req.NEW_SESSION, { workspace: path })}
             />
             <button className="add-folder" onClick={addFolder}>+ Add folder…</button>
@@ -525,6 +526,38 @@ export default function App() {
           </div>
         </div>
       )}
+      {confirmClose && state.sessions[confirmClose] && (() => {
+        const x = state.sessions[confirmClose]
+        const last = !Object.values(state.sessions).some((o) => o.id !== x.id && o.workspace === x.workspace)
+        return (
+          <div className="modal-scrim" onClick={() => setConfirmClose(null)}>
+            <div className="modal confirm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+              <header>
+                <span className="tool-chip run_bash">close</span>
+                <h2>Close “{x.label || x.title}”?</h2>
+              </header>
+              <div className="approval-body">
+                <p className="confirm-text">
+                  {x.busy ? <>It is still working; closing stops it. </> : null}
+                  The conversation is removed and cannot be reopened.
+                  {last ? <> This is the last chat in <b>{x.title}</b>, so the project leaves the sidebar too.</> : null}
+                </p>
+                <pre className="command-block">{x.workspace}</pre>
+              </div>
+              <footer>
+                <button className="btn ghost" onClick={() => setConfirmClose(null)}>Keep it</button>
+                <div className="spacer" />
+                <button className="btn danger-solid" onClick={() => {
+                  client?.send(Req.CLOSE_SESSION, { session: x.id })
+                  // The project node exists for its chats: the last one closing takes it along.
+                  if (last) client?.send(Req.REMOVE_FOLDER, { path: x.workspace })
+                  setConfirmClose(null)
+                }}>Close chat</button>
+              </footer>
+            </div>
+          </div>
+        )
+      })()}
       {tour && <Tour onDone={endTour} />}
       {keyDialog && (
         <KeyGate
@@ -649,7 +682,7 @@ export default function App() {
           onShowRail={() => setRailOpen(true)}
           onCloseFile={() => dispatch({ t: 'closeFile', id: session.id })}
           onMention={mentionPath}
-          approvalIsTop={!palette && !sheet && !keyDialog && !tour && !confirmDelete && !confirmSwitch}
+          approvalIsTop={!palette && !sheet && !keyDialog && !tour && !confirmDelete && !confirmSwitch && !confirmClose}
         />
       ) : (
         <main className="empty">
@@ -741,6 +774,7 @@ function SessionView({ s, controls, banner, profile, local, railOpen, onRailResi
           </div>
         </header>
 
+        {banner}
         <div
           className="transcript"
           ref={scroller}
@@ -749,7 +783,6 @@ function SessionView({ s, controls, banner, profile, local, railOpen, onRailResi
             pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
           }}
         >
-          {banner}
           {s.messages.length === 0 && (
             <div className="starter">
               <h2>Ready when you are.</h2>

@@ -8,12 +8,17 @@ import pytest
 from meshharness.local import runtime
 
 
-def _tar(path, members):
+def _tar(path, members, links=()):
     with tarfile.open(path, "w:gz") as t:
         for name, data in members.items():
             info = tarfile.TarInfo(name)
             info.size = len(data)
             t.addfile(info, io.BytesIO(data))
+        for name, target in links:
+            info = tarfile.TarInfo(name)
+            info.type = tarfile.SYMTYPE
+            info.linkname = target
+            t.addfile(info)
 
 
 def test_tar_extract_keeps_only_the_server_and_libraries_and_refuses_escapes(tmp_path):
@@ -31,6 +36,27 @@ def test_tar_extract_keeps_only_the_server_and_libraries_and_refuses_escapes(tmp
     assert names == sorted(["LICENSE", "libggml.0.dylib", "libllama.so.0.7.0", runtime.SERVER]) or \
         sys.platform == "win32"
     assert not (tmp_path / "escape.dylib").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="tarballs are the mac/linux format")
+def test_tar_extract_recreates_the_loader_symlinks_but_never_links_outside(tmp_path):
+    archive = tmp_path / "llama.tar.gz"
+    _tar(archive, {"llama-b1/llama-server": b"bin", "llama-b1/libllama.0.7.0.dylib": b"lib"},
+         links=[("llama-b1/libllama.dylib", "libllama.0.dylib"),       # a chain, listed first
+                ("llama-b1/libllama.0.dylib", "libllama.0.7.0.dylib"),
+                ("llama-b1/evil.dylib", "../../outside.dylib"),
+                ("llama-b1/abs.dylib", "/etc/hosts"),
+                ("llama-b1/dangling.dylib", "missing.dylib"),
+                ("llama-b1/up.dylib", ".."),
+                ("llama-b1/libllama.0.7.0.dylib", "libllama.0.7.0.dylib")])
+    into = tmp_path / "rt"
+    runtime.install_from_archive(archive, into)
+    assert (into / "libllama.0.dylib").is_symlink() and (into / "libllama.0.dylib").read_bytes() == b"lib"
+    assert (into / "libllama.dylib").is_symlink() and (into / "libllama.dylib").read_bytes() == b"lib"
+    assert not (into / "evil.dylib").exists() and not (into / "abs.dylib").exists()
+    assert not (into / "dangling.dylib").is_symlink()
+    assert not (into / "up.dylib").is_symlink()
+    assert not (into / "libllama.0.7.0.dylib").is_symlink()   # a self-link never replaces the file
 
 
 def test_zip_extract_works_the_same_way(tmp_path):
@@ -61,6 +87,7 @@ def test_locate_prefers_env_then_a_downloaded_variant_then_a_matching_bundle(tmp
     monkeypatch.delenv("MESH_LLAMA_SERVER", raising=False)
     monkeypatch.delenv("MESH_LLAMA_DIR", raising=False)
     monkeypatch.delenv("MESH_LLAMA_VARIANT", raising=False)
+    monkeypatch.delenv("MESH_LLAMA_TAG", raising=False)
     assert runtime.locate(rt, "b1", "darwin-arm64-metal") == downloaded
 
     bundle = tmp_path / "bundle"
@@ -68,7 +95,9 @@ def test_locate_prefers_env_then_a_downloaded_variant_then_a_matching_bundle(tmp
     (bundle / runtime.SERVER).write_text("x")
     monkeypatch.setenv("MESH_LLAMA_DIR", str(bundle))
     monkeypatch.setenv("MESH_LLAMA_VARIANT", "linux-x64-cpu")
+    monkeypatch.setenv("MESH_LLAMA_TAG", "b1")
     assert runtime.locate(rt, "b1", "linux-x64-cpu") == bundle / runtime.SERVER
+    assert runtime.locate(rt, "b2", "linux-x64-cpu") is None           # a re-pinned tag must download
     assert runtime.locate(rt, "b1", "linux-x64-vulkan") is None      # a CPU bundle never serves a GPU plan
     assert runtime.locate(rt, "b1", "darwin-arm64-metal") == downloaded   # downloaded beats bundled
 

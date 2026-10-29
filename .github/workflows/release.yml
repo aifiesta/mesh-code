@@ -45,6 +45,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      # The pinned llama-server archive: re-downloaded only when the manifest changes.
+      - uses: actions/cache@v4
+        with:
+          path: packaging/llama-cache
+          key: llama-${{ matrix.target }}-${{ hashFiles('engine/meshharness/local/manifest.json') }}
       - name: Build (${{ matrix.target }})
         shell: bash
         run: ./packaging/build.sh ${{ matrix.target }}

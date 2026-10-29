@@ -271,7 +271,7 @@ export type LocalJob = {
 
 export type LocalModelRow = {
   id: string; label: string; bytes: number; ctx_max: number; ctx: number | null
-  installed: boolean; fits: boolean; slow: boolean; recommended: boolean
+  installed: boolean; fits: boolean; slow: boolean; tight?: boolean; recommended: boolean
   family?: string; license?: string; job: LocalJob | null
 }
 

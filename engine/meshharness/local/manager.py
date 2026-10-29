@@ -88,7 +88,21 @@ class LocalModels:
         if chosen and self.manifest and manifest_mod.model(self.manifest, chosen):
             return chosen
         plan = self._recommend()
+        if plan and plan.model["id"] not in self.installed_ids():
+            # Something already on disk that runs comfortably beats a download.
+            comfortable = self._comfortable_installed()
+            if comfortable:
+                return comfortable[0]
         return plan.model["id"] if plan else None
+
+    def _comfortable_installed(self) -> list[str]:
+        """Installed models whose plan is neither tight nor slow, best first."""
+        out = []
+        for mid in self.installed_ids():
+            plan = self._plan_for(mid)
+            if plan and not plan.tight and not plan.slow:
+                out.append((plan.model.get("quality_rank", 0), mid))
+        return [mid for _, mid in sorted(out, reverse=True)]
 
     def installed_ids(self) -> set:
         with self._lock:
@@ -161,6 +175,7 @@ class LocalModels:
                 for p in (Path(path), Path(path + ".sha256")):
                     p.unlink(missing_ok=True)
             self._save_state()
+            self.plan = self._plan_for(self.default_id())   # the default can follow what is installed
         self._on_catalog_change()
         self._emit_status()
 
@@ -239,7 +254,8 @@ class LocalModels:
 
     def _auto_install(self) -> None:
         if (self.cfg.get("local_auto_setup", True) and not self.state.get("declined")
-                and not self.installed_ids() and self.plan and not self._blocked(self.plan)):
+                and not self._comfortable_installed() and self.plan
+                and self.plan.model["id"] not in self.installed_ids() and not self._blocked(self.plan)):
             self.install(self.plan.model["id"])
 
     def target_for(self, model_id: str, *, cancel: threading.Event | None = None,
@@ -305,7 +321,8 @@ class LocalModels:
         entry = manifest_mod.model(self.manifest, model_id)
         if not entry:
             return None
-        return tiers.choose({"runtime": self.manifest["runtime"], "models": [entry]}, self.hw, **self._tier_kw())
+        return tiers.choose({"runtime": self.manifest["runtime"], "models": [entry]}, self.hw,
+                            conservative=False, **self._tier_kw())
 
     def _blocked(self, plan: tiers.TierPlan) -> str | None:
         """Why this plan is not auto-installed: too big to fetch unasked, or
@@ -373,6 +390,7 @@ class LocalModels:
                 first = not self.state.get("adopted_default")
                 self.state["adopted_default"] = True
                 self._save_state()
+                self.plan = self._plan_for(self.default_id())
             self._on_catalog_change()
             self._emit("local.ready", {"model": model_id, "first": first})
         self._emit_status()
@@ -401,7 +419,8 @@ class LocalModels:
         return {"id": m["id"], "label": m["label"], "bytes": m["bytes"], "ctx_max": m["ctx_max"],
                 "ctx": plan.ctx if plan else None,
                 "installed": m["id"] in self.installed_ids(), "fits": plan is not None,
-                "slow": bool(plan and plan.slow), "recommended": m["id"] == self.default_id(),
+                "slow": bool(plan and plan.slow), "tight": bool(plan and plan.tight),
+                "recommended": m["id"] == self.default_id(),
                 "family": m.get("family"), "license": m.get("license"),
                 "job": self._job_for(m["id"])}
 

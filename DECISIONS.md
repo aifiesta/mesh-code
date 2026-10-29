@@ -116,3 +116,22 @@ state, on the key gate and inside the settings sheet. They are kept out of
 session messages because HISTORY skips a session that already has any,
 so a notice appended during the replay window would hide the restored
 conversation.
+
+## 2026-10-22 — one baseline llama-server per platform is bundled; GPU variants download on demand
+
+The installer carries the Metal build on macOS and the CPU build on Windows
+and Linux (16–24 MB each), fetched at build time from the manifest's pin so
+the bundled binary and the one the engine would download are the same
+bytes. Vulkan and later CUDA builds are tens to hundreds of MB and only
+pay off on some machines, so the engine downloads them when its plan asks
+for one. A machine with weights on disk therefore works offline, and the
+installer grows by one small archive.
+
+## 2026-10-22 — runtime assets are hashed at pin time; models are pinned from Hugging Face LFS metadata
+
+llama.cpp publishes no checksums, so `packaging/pin-local-manifest.py`
+downloads each release asset once and writes its sha256 and size into the
+manifest. Hugging Face exposes every LFS file's sha256 and size through its
+tree API, so model pins are refreshed without downloading gigabytes. Either
+can be re-pinned and shipped through the remote manifest without an app
+build.

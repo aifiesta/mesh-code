@@ -98,8 +98,8 @@ export function SettingsSheet({ settings, catalog, local, localActions, notices,
             </div>
           )}
           {notices.map((n) => (
-            <div className={`sheet-error ${n.level}`} key={n.id}>
-              {n.text}
+            <div className={`notice ${n.level} app-notice`} key={n.id}>
+              <span>{n.text}</span>
               <button className="link" onClick={() => onDismissNotice(n.id)}>Dismiss</button>
             </div>
           ))}

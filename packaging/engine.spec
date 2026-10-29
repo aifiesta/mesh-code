@@ -26,7 +26,10 @@ a = Analysis(
     # import analysis, and without it smart routing silently degrades to the
     # pinned model.
     datas=[("../engine/meshharness/core/routing_table.json",
-            "meshharness/core")],
+            "meshharness/core"),
+           # The pinned local-model manifest: data the import scan cannot see.
+           ("../engine/meshharness/local/manifest.json",
+            "meshharness/local")],
     hiddenimports=hidden,
     hookspath=[],
     runtime_hooks=[],

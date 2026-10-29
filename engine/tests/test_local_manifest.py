@@ -145,3 +145,12 @@ def test_urls_follow_the_manifest_templates():
     m = _bundled()
     assert manifest.runtime_url(m, "darwin-arm64-metal").endswith("/b11796/llama-b11796-bin-macos-arm64.tar.gz")
     assert manifest.model_url(m["models"][0]).startswith("https://huggingface.co/unsloth/")
+
+
+def test_each_desktop_platform_has_a_bundled_runtime():
+    """fetch-llama.sh bundles exactly these; a plan on any other variant
+    downloads its build on demand."""
+    assets = _bundled()["runtime"]["assets"]
+    bundled = {k for k, a in assets.items() if a.get("bundled")}
+    assert bundled == {"darwin-arm64-metal", "win32-x64-cpu", "linux-x64-cpu"}
+    assert all(assets[k]["file"].startswith(f"llama-{_bundled()['runtime']['tag']}-bin-") for k in assets)

@@ -67,9 +67,10 @@ exports.default = async function afterSign(context) {
   }
 
   const app = path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`)
-  const engine = path.join(app, 'Contents', 'Resources', 'engine')
+  const resources = path.join(app, 'Contents', 'Resources')
 
-  const inner = machOFiles(engine)
+  // llama-server and its dylibs are nested code too.
+  const inner = [...machOFiles(path.join(resources, 'engine')), ...machOFiles(path.join(resources, 'llama'))]
   for (const f of inner) {
     try { sign(f) } catch (e) { console.warn('  ! could not sign', path.basename(f)) }
   }

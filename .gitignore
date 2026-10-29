@@ -8,6 +8,9 @@ packaging/out/
 packaging/build/
 packaging/engine-dist/
 packaging/out-prev/
+
+packaging/llama-dist/
+packaging/llama-cache/
 .pytest_cache/
 .DS_Store
 *.egg-info/
