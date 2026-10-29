@@ -22,6 +22,27 @@ true, that is a bug — file it against this document.
   (nudge → renudge → stop on repeated identical tool batches), retry ladder
   with Retry-After respect, max_tokens overflow shrink-and-retry.
 
+## Local model
+
+- A bundled `llama-server` (llama.cpp, pinned build and sha256) serves an
+  open coding model on this machine. The tier is picked from RAM and GPU,
+  keeping three eighths of memory, at least 4 GB and at most 8 GB, for
+  everything else: 8 GB →
+  Qwen3.5 4B (slow, CPU only), 16–18 GB → Qwen3.5 9B Q4, 24 GB → Qwen3.5 9B
+  Q8, 32 GB → North Mini Code 1.0, 36 GB+ → Qwen3.8 27B Q6.
+- First run downloads the weights (resumable, sha256-checked, a progress bar
+  above the transcript). A model of 8 GB or less that runs on the GPU
+  downloads on its own; a bigger one, or one that would run on the CPU,
+  asks first.
+- Settings › Local model: machine and runtime, every pinned model with
+  Install / Make default / Delete / Cancel, the server's state with Stop /
+  Restart, context, GPU, memory to keep free, idle unload, and the cloud
+  model that answers until it is ready. A bigger model than the machine
+  comfortably holds can still be picked; it is marked "tight".
+- Local turns cost nothing and say so ("free · local"). The model browser
+  lists local models first, with their download size when not yet installed.
+- With a local model installed, the app works with no API key at all.
+
 ## Model control
 
 - **Pinned model** — pick any model from the live catalog; fuzzy-searchable
@@ -87,13 +108,17 @@ true, that is a bug — file it against this document.
   history, ⌃C, `cd` persists. Deliberately ungated — it is you typing.
   Being a pipe (not a PTY), full-screen programs like vim/top won't run.
 - **Account** — key status (hint + source, never the key itself), models
-  available, lifetime spend.
+  available, lifetime spend, and the local model's default and server state.
 - All panels live in a resizable, hideable right rail; the sidebar is
   resizable too, and both clamp against the window so no layout can crush
   the transcript.
 
 ## Interface
 
+- `!` at the start of an empty composer switches to shell mode: the command
+  runs in the project folder, its output shows as a card in the chat, and
+  whichever model answers next reads it, which may be a cloud one. Backspace on an empty box leaves
+  shell mode.
 - ⌘K palette: every setting expanded to one runnable action per option,
   grouped with sticky headers, matched against the engine's own help text
   fuzzy abbreviations (`wwga` → Who writes: Gateway auto).
@@ -102,7 +127,9 @@ true, that is a bug — file it against this document.
 - Images paste/drop/attach into the composer (multimodal).
 - Dark, light, or follow-system — full token coverage both ways.
 - Guided tour: opt-in from the "Take the tour" link in the sidebar, the
-  palette, or the account menu. Never auto-starts.
+  palette, or the account menu. Never auto-starts. It covers projects, the
+  composer and `!`, permissions, who writes and escalation, the budget
+  ring, cost, the side panel and the palette.
 
 ## Install & identity
 
@@ -123,3 +150,6 @@ true, that is a bug — file it against this document.
   Windows the Shell panel needs a POSIX `sh` on `PATH`.
 - Models the gateway prices at zero and omits from the catalog show `$0` —
   the app cannot invent a rate for them.
+- A small local model needs the escalation on hard multi-file work; on a
+  machine with no usable GPU it is slow, so the cloud answers unless you
+  opt in.

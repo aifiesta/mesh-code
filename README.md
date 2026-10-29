@@ -4,7 +4,8 @@
 
 # Mesh Code
 
-**An agentic coding app for your desktop — with 1,000+ models behind one key.**
+**An agentic coding app for your desktop. A coding model runs on your own
+machine for free; a strong cloud model steps in when it gets stuck.**
 
 It plans, writes files, runs commands and starts dev servers inside a project
 folder you choose. Every step is either auto-approved by a mode you picked,
@@ -43,6 +44,42 @@ your eyes open:
 - **Live cost, during the turn.** Token and dollar readouts move while the
   model works, hop by hop — not a surprise at the end of the month.
 
+## A coding model on your own machine
+
+New in 0.3.0. On first launch Mesh Code reads this machine's memory and GPU
+and picks the strongest open coding model that leaves room for everything
+else you run. When that model is 8 GB or less and runs on the GPU it
+downloads straight away (also on the CPU if you turned on Use even when
+slow); otherwise the app asks first. The download is
+resumable and checked against a pinned sha256. From then on the model on
+your machine writes the code: free, offline, and private while it is the
+one answering. The `llama-server` runtime that serves it ships inside the
+app on macOS and in the CPU builds; Windows and Linux machines with a GPU
+download a GPU build of it on first use.
+
+| This Mac's memory | Model it picks | Download | Context |
+|---|---|---|---|
+| 8 GB | Qwen3.5 4B · Q4 (slow; the cloud answers unless you opt in) | 2.7 GB | 8k |
+| 16–18 GB | Qwen3.5 9B · Q4 | 5.7 GB | 32k |
+| 24 GB | Qwen3.5 9B · Q8 | 9.5 GB | 64k |
+| 32 GB | North Mini Code 1.0 (30B-A3B) · Q4 | 19 GB | 64k |
+| 36 GB and up | Qwen3.8 27B · Q6 | 22 GB | 32k–256k |
+
+Anything over 8 GB, or a model that would run without a GPU, asks before
+downloading, and Settings › Local model lets
+you pick a different one, delete one, or turn the local model off. Until a
+model is ready, or if it cannot start, your chosen cloud model answers.
+
+When the local model gets stuck — it repeats the same action, fails two
+batches of tool calls, refuses, or claims work it never did — a strong
+cloud model takes the rest of that turn and hands back after 8 steps or
+300k tokens. Whatever it takes over, including command output, is sent to
+that cloud model. You
+can also press **Escalate** yourself. The strong models are a chain picked
+from the Artificial Analysis coding-agent benchmarks: Claude Sonnet 5.5,
+then Opus 5.5, GPT-6.1 Sol and Gemini 4 Argon, so one provider's outage
+does not end the turn.
+
 ## One key. Every model that matters.
 
 <div align="center">
@@ -73,6 +110,9 @@ catalog usable instead of overwhelming:
   bad day.
 - **Exclusions** — mark a model "Never" once, and no mode of routing will
   touch it again.
+- **Your own commands** — start a message with `!` and it runs in the
+  project folder; the output lands in the chat and whichever model answers
+  next reads it, which may be a cloud one.
 
 Honesty is a feature: with routing on, the bar reads "Auto routing" until a
 hop has actually answered, then shows the real model with a `routed` flag.
@@ -125,7 +165,10 @@ offered — never forced.
 
 Mesh Code needs **no Python, no Node, no CLI** preinstalled. The installer
 drops a single app that carries its own runtimes: the engine is frozen into
-a ~28 MB binary with Python inside it, and Electron brings its own Node. If
+a ~28 MB binary with Python inside it, Electron brings its own Node, and
+`llama-server` (~16–24 MB) is bundled for the local model (a GPU build for
+Windows or Linux is fetched on first use). The model weights are the one
+large download. If
 you do use the `meshapi` CLI and are signed in, your key is picked up
 automatically — read once, never written.
 
@@ -133,12 +176,12 @@ automatically — read once, never written.
 ┌─────────────────────────── Mesh Code.app ───────────────────────────┐
 │                                                                     │
 │  Electron shell ──── spawns ────▶  engine (frozen binary)           │
-│   window, menus                     agent loop · router · gates     │
+│   window, menus                     agent loop · policy · budget    │
 │        │                            loopback only · token-gated     │
-│        └── loads UI from ──────────▶│                               │
-│                                     ▼                               │
-│                          Mesh gateway (one key)                     │
-│                    1,000+ models · one bill · SSE                   │
+│        └── loads UI from ──────────▶│            │                  │
+│                                     ▼            ▼                  │
+│                    llama-server (this machine)   Mesh gateway       │
+│                    the local model, free         1,000+ models      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -176,7 +219,10 @@ release ships all three installers plus `SHA256SUMS`.
 
 ## First launch
 
-You'll be asked for a Mesh API key ([app.meshapi.ai](https://app.meshapi.ai)).
+The local model downloads straight away when it is 8 GB or less and runs on
+the GPU; otherwise the app asks first. Once it is installed you can use the
+app with no key at all. For the cloud (escalation, other
+models), add a Mesh API key ([app.meshapi.ai](https://app.meshapi.ai)).
 It is stored in an owner-only file (`~/.mesh-code/credentials`, 0600 on
 macOS/Linux) and sent nowhere but the Mesh gateway. If you already use the
 `meshapi` CLI, your existing key is picked up automatically.
@@ -191,6 +237,13 @@ Today's known edges, stated plainly:
 - Web search goes through the gateway's tools; there is no local browsing.
 - Windows and Linux builds are lightly tested; on Windows the Shell panel
   needs a POSIX `sh` on `PATH`.
+- A small local model is not a frontier model. Expect it to need the
+  escalation now and then on hard, multi-file work.
+- Without a GPU the local model is slow, so on such machines the cloud
+  answers unless you turn on Settings › Local model › Use even when slow.
+- If the whole window flickers while the local model runs, quit the app
+  and relaunch it with `open --env MESH_OPAQUE=1 -a "Mesh Code"` for a
+  window without the macOS vibrancy layer.
 
 Found a rough edge — or something you love? The **Send feedback** link in
 the sidebar opens a 15-second form; the engine relays your rating and the
