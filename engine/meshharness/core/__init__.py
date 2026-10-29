@@ -27,4 +27,4 @@ here that have not flowed back to the CLI yet. The CLI's local routing table
 is not here: Mesh's own auto routing does that job.
 """
 
-__version__ = "0.2.4"
+__version__ = "0.3.0"

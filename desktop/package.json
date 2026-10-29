@@ -1,7 +1,7 @@
 {
   "name": "mesh-code",
   "productName": "Mesh Code",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "Mesh Code \u2014 an agentic coding desktop app. Plans, writes files, runs commands, with every step under your control.",
   "main": "main.js",
   "author": "Fiesta Labs Inc.",
