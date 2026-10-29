@@ -2399,3 +2399,37 @@ body.resizing .rail-resize { pointer-events: auto; }
 /* Glyph-free chrome: every small button icon sits in a centered cell. */
 .chip button, .ext { display: inline-grid; place-items: center; }
 .send-btn svg { display: block; }
+
+/* ------------------------------------------------------------ local model */
+.local-card {
+  margin: 14px 0 0; padding: 14px 16px 12px; border-radius: 14px;
+  background: var(--film-2); box-shadow: inset 0 0 0 1px var(--hair-soft), var(--lift-1);
+  font-family: var(--sans); font-size: var(--t-sm); color: var(--ink-2);
+}
+.local-card.compact { margin: 0 0 10px; padding: 10px 14px; border-radius: 12px; }
+.local-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.local-head strong { font-size: var(--t-sm); font-weight: 600; color: var(--ink); }
+.local-hw { font-size: var(--t-xs); color: var(--ink-3); }
+.local-head .link { color: var(--brand); font-size: var(--t-xs); font-weight: 500; }
+.local-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); }
+.local-dot[data-state="ready"] { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-film); }
+.local-dot[data-state="starting"], .local-dot[data-state="restarting"] { background: var(--warn); }
+.local-dot[data-state="failed"], .local-dot[data-state="crashed"] { background: var(--danger); }
+.local-line { display: flex; flex-direction: column; gap: 2px; }
+.local-line strong { font-weight: 600; color: var(--ink); }
+.local-line span { font-size: var(--t-xs); color: var(--ink-3); }
+.local-line.ok strong { color: var(--ok); }
+.local-line.warn strong { color: var(--warn); }
+.local-bar { height: 5px; margin: 10px 0 8px; border-radius: 3px; background: var(--film-3); overflow: hidden; }
+.local-bar span { display: block; height: 100%; background: var(--brand); transition: width .25s ease; }
+.local-actions { display: flex; gap: 8px; margin-top: 10px; }
+.localpanel .profile-head { display: flex; align-items: center; justify-content: space-between; }
+.localpanel .profile-head .link { color: var(--brand); font-size: var(--t-xs); font-weight: 500; }
+.localpanel .browser-rows { max-height: 280px; }
+.tag.local { background: var(--ok-film); color: var(--ok); }
+
+.gate-stack { display: flex; flex-direction: column; gap: 14px; width: min(440px, 100%); }
+.gate-stack .local-card { margin: 0; }
+.app-notice { display: flex; align-items: center; gap: 10px; }
+.app-notice .link { margin-left: auto; color: var(--ink-3); font-size: var(--t-xs); }
+.empty .local-card, .empty .app-notice { text-align: left; margin-top: 18px; }

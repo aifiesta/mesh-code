@@ -1,4 +1,4 @@
-import { Ev, type Approval, type Ask, type CatalogModel, type DirEntry, type FilePreview, type Root, type Msg, type Plan, type Profile, type RouteExplain, type SettingsDoc, type Status, type ToolCard, type WireEvent } from './types'
+import { Ev, type Approval, type Ask, type CatalogModel, type DirEntry, type FilePreview, type LocalJob, type LocalStatus, type Root, type Msg, type Plan, type Profile, type RouteExplain, type SettingsDoc, type Status, type ToolCard, type WireEvent } from './types'
 
 /**
  * Turning the event stream into renderable state.
@@ -60,6 +60,10 @@ export type AppState = {
    *  of the same outcome — two successes in a row are two events. */
   keyResult: { ok: boolean; detail: string; cleared: boolean; at: number } | null
   configError: { key: string; message: string } | null
+  /** The local model layer: hardware, models, downloads, server. */
+  local: LocalStatus | null
+  /** Engine notices that belong to no session (migration, local layer). */
+  appNotices: { id: string; level: string; text: string }[]
 }
 
 export const initialState: AppState = {
@@ -78,6 +82,8 @@ export const initialState: AppState = {
   profile: null,
   keyResult: null,
   configError: null,
+  local: null,
+  appNotices: [],
 }
 
 let uid = 0
@@ -106,11 +112,13 @@ export type Action =
   | { t: 'clearTerm'; id: string }
   | { t: 'clearKeyError' }
   | { t: 'stopping'; id: string }
+  | { t: 'dismissAppNotice'; id: string }
 
 export function reduce(state: AppState, action: Action): AppState {
   if (action.t === 'connection') return { ...state, connection: action.state }
   if (action.t === 'dismissConfigError') return { ...state, configError: null }
   if (action.t === 'clearKeyError') return { ...state, keyError: null }
+  if (action.t === 'dismissAppNotice') return { ...state, appNotices: state.appNotices.filter((n) => n.id !== action.id) }
 
   if (action.t === 'stopping') {
     // Optimistic: the button flips to "stopping" on the click. The engine
@@ -172,6 +180,7 @@ export function reduce(state: AppState, action: Action): AppState {
       const settings = d.settings ?? state.settings
       const catalog = d.catalog?.length ? d.catalog : state.catalog
       const profile = d.profile ?? state.profile
+      const local = d.local ?? state.local
       for (const row of (d.sessions ?? [])) {
         if (!sessions[row.id]) {
           sessions[row.id] = blank(row.id, row.title ?? 'session', row.workspace ?? '',
@@ -205,8 +214,34 @@ export function reduce(state: AppState, action: Action): AppState {
         ? state.active : (prunedOrder[0] ?? null)
       return {
         ...state, ready: true, hasKey: !!d.has_key, sessions, order: prunedOrder,
-        settings, catalog, profile, active,
+        settings, catalog, profile, active, local,
       }
+    }
+
+    case Ev.LOCAL_STATUS:
+      return { ...state, local: d as LocalStatus }
+
+    case Ev.LOCAL_PROGRESS: {
+      // Patch the job in place between status events so the bars move.
+      if (!state.local) return state
+      const job = d as LocalJob
+      const over = job.phase === 'done' || job.phase === 'error' || job.phase === 'cancelled'
+      const jobs = over
+        ? state.local.jobs.filter((j) => j.id !== job.id)
+        : state.local.jobs.some((j) => j.id === job.id)
+          ? state.local.jobs.map((j) => (j.id === job.id ? job : j))
+          : [...state.local.jobs, job]
+      const models = state.local.models.map((m) =>
+        m.job?.id === job.id || (!m.job && m.id === job.target && !over) ? { ...m, job: over ? null : job } : m)
+      const next = { ...state, local: { ...state.local, jobs, models } }
+      return job.phase === 'error'
+        ? appendNotice(next, 'warn', `${job.kind === 'runtime' ? `llama-server (${job.target})` : job.target.replace('local/', '')} download failed: ${job.error ?? 'unknown error'}`)
+        : next
+    }
+
+    case Ev.LOCAL_READY: {
+      const text = `${String(d.model ?? '').replace('local/', '')} is ready${d.first ? ' and is now the default for coding' : ''}.`
+      return appendNotice(state, 'info', text)
     }
 
     case Ev.SETTINGS:
@@ -255,10 +290,6 @@ export function reduce(state: AppState, action: Action): AppState {
         ...state,
         sessions: { ...state.sessions, [sid]: s },
         order: state.order.includes(sid) ? state.order : [...state.order, sid],
-        // Always focus it. This used to be `state.active ?? sid`, so opening
-        // a second project left the first one active: the new project's chat
-        // was never shown and everything typed went into the old thread,
-        // which is what made every project look like one merged chat.
         active: sid,
       }
     }
@@ -271,6 +302,8 @@ export function reduce(state: AppState, action: Action): AppState {
       return { ...state, sessions, order, active: state.active === sid ? (order[0] ?? null) : state.active }
     }
   }
+
+  if (!sid && ev.type === Ev.NOTICE) return appendNotice(state, d.level ?? 'info', d.message)
 
   if (!sid || !state.sessions[sid]) return state
 
@@ -469,9 +502,7 @@ export function reduce(state: AppState, action: Action): AppState {
         }
 
       case Ev.SERVER_STOPPED:
-        // Was silently dropped: the transcript's server card kept its live
-        // dot and clickable URL to a dead server. Mark the matching card
-        // stopped so it reads as finished.
+        // Mark the matching card stopped so its live dot and URL go dead.
         return {
           ...s,
           messages: s.messages.map((m) =>
@@ -575,7 +606,7 @@ export function reduce(state: AppState, action: Action): AppState {
           elapsed: d.elapsed, model: d.model, hops: d.hops,
           // Carry the estimate flag onto the permanent record so a computed
           // cost is shown as ~ here too, not just in the live bar.
-          estimated: !!d.cost_estimated,
+          estimated: !!d.cost_estimated, local: !!d.local,
         }]
         // The plan is the model's OWN bookkeeping, kept by calling
         // update_step. It can finish the work and simply stop ticking the
@@ -597,6 +628,12 @@ export function reduce(state: AppState, action: Action): AppState {
         return s
     }
   })
+}
+
+/** Session-less notices never touch a transcript: HISTORY skips a session
+ *  that already has messages, so a notice there would block the replay. */
+function appendNotice(state: AppState, level: string, text: string): AppState {
+  return { ...state, appNotices: [...state.appNotices, { id: nid(), level, text }] }
 }
 
 // A stream aborted or errored mid-flight never sends ASSISTANT_MESSAGE, so

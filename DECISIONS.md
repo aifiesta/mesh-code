@@ -99,3 +99,20 @@ with no notice.
 prepends the local layer's synthetic zero-price rows wherever a catalog is
 handed to a session, the socket or `/api/models`.
 
+
+## 2026-10-22 — the key gate can be passed with a local model only, and the UI remembers that choice
+
+Once a local model is installed, the key gate offers "Continue with the
+local model only". The engine never gated on a key (the client reads the
+cloud key only for cloud targets), so the bypass is a per-machine UI flag
+in the browser store, not a setting: a key saved later makes it moot, and
+nothing about it belongs in the config file that `save_config` strips.
+
+## 2026-10-22 — session-less notices never enter a transcript
+
+Events with no session id (the upgrade notice, local readiness, a failed
+download) go to `appNotices`, rendered above the transcript, in the empty
+state, on the key gate and inside the settings sheet. They are kept out of
+session messages because HISTORY skips a session that already has any,
+so a notice appended during the replay window would hide the restored
+conversation.

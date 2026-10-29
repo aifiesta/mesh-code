@@ -44,6 +44,9 @@ export const Ev = {
   CHAT_CLEARED: 'chat.cleared',
   JOURNAL: 'journal',
   KEY_RESULT: 'key.result',
+  LOCAL_STATUS: 'local.status',
+  LOCAL_PROGRESS: 'local.progress',
+  LOCAL_READY: 'local.ready',
 } as const
 
 export const Req = {
@@ -79,6 +82,13 @@ export const Req = {
   TERM_CLOSE: 'term.close',
   ROUTE_PREVIEW: 'route.preview',
   LIST_MODELS: 'list.models',
+  LOCAL_STATUS: 'local.status',
+  LOCAL_INSTALL: 'local.install',
+  LOCAL_CANCEL: 'local.cancel',
+  LOCAL_DELETE: 'local.delete',
+  LOCAL_SERVER: 'local.server',
+  LOCAL_REFRESH: 'local.refresh',
+  LOCAL_DECLINE: 'local.decline',
 } as const
 
 export type WireEvent = {
@@ -121,7 +131,7 @@ export type Msg =
   | { kind: 'assistant'; id: string; text: string; streaming?: boolean; model?: string }
   | { kind: 'tool'; id: string; card: ToolCard }
   | { kind: 'notice'; id: string; level: string; text: string; detail?: any }
-  | { kind: 'turn'; id: string; cost: number; tokens: number; elapsed: number; model: string; hops: number; estimated?: boolean }
+  | { kind: 'turn'; id: string; cost: number; tokens: number; elapsed: number; model: string; hops: number; estimated?: boolean; local?: boolean }
   | { kind: 'server'; id: string; url: string; pid: number; port: number; cmd: string; stopped?: boolean }
   | { kind: 'plan'; id: string; plan: Plan }
   | { kind: 'ask'; id: string; ask: Ask; answered?: string[] }
@@ -148,6 +158,8 @@ export type Status = {
   turn_cost?: number
   turn_tokens?: number
   turn_estimated?: boolean
+  /** The last hop ran on this machine: nothing was billed. */
+  turn_local?: boolean
   servers: { pid: number; port: number; url: string; cmd: string }[]
 }
 
@@ -190,6 +202,14 @@ export type SettingsDoc = {
 
 export type CatalogModel = {
   id: string
+  name?: string
+  /** A model served by this machine's llama-server (zero price). */
+  local?: boolean
+  installed?: boolean
+  size_bytes?: number
+  recommended?: boolean
+  /** On the `local/auto` row: the concrete model it resolves to. */
+  resolves_to?: string
   context_length?: number
   model_type?: string
   supports_thinking?: boolean
@@ -240,7 +260,47 @@ export type Profile = {
    *  none to a data-plane key, so this is a local tally, labelled as one. */
   lifetime?: { cost: number; tokens: number; turns: number; since: number | null }
   account_url?: string
+  local?: { default_model: string | null; server_state: string; ram_gb: number | null }
 }
+
+export type LocalJob = {
+  id: string; kind: 'model' | 'runtime'; target: string
+  phase: 'queued' | 'downloading' | 'verifying' | 'done' | 'error' | 'cancelled'
+  bytes: number; total: number; rate_bps: number; eta_s: number | null; error: string | null
+}
+
+export type LocalModelRow = {
+  id: string; label: string; bytes: number; ctx_max: number; ctx: number | null
+  installed: boolean; fits: boolean; slow: boolean; recommended: boolean
+  family?: string; license?: string; job: LocalJob | null
+}
+
+export type LocalStatus = {
+  enabled: boolean
+  booted: boolean
+  hardware: {
+    os: string; arch: string; ram_gb: number; avail_gb: number; cores: number
+    gpu: { kind: string; name: string; vram_gb: number; driver: string }
+    disk_free_gb: number; probe_failed: boolean
+  } | null
+  probe_failed: boolean
+  recommended: { model: string; ctx: number; reason: string; slow: boolean } | null
+  runtime: { tag: string | null; variant: string | null; source: string; path?: string | null; error?: string | null }
+  models: LocalModelRow[]
+  default_model: string | null
+  server: { state: string; model: string | null; port: number | null; ctx: number | null
+            pid: number | null; restarts: number; error: string | null; started_at: number | null }
+  jobs: LocalJob[]
+  needs_confirm: { model: string; bytes: number; reason: 'size' | 'slow' } | null
+  declined: boolean
+  restart_needed: boolean
+  boot_error: string | null
+}
+
+export const fmtBytes = (n: number) =>
+  n >= 1e9 ? `${(n / 1e9).toFixed(n >= 1e10 ? 0 : 1)} GB`
+    : n >= 1e6 ? `${Math.round(n / 1e6)} MB`
+      : n >= 1e3 ? `${Math.round(n / 1e3)} KB` : `${n} B`
 
 export type RouteExplain = {
   available: boolean

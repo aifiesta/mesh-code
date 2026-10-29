@@ -1,13 +1,15 @@
 import { IconExternal } from './Chevron'
-import type { Profile } from '../types'
+import type { LocalStatus, Profile } from '../types'
 
 /** Account and session state. Never renders the API key itself — see
  *  Engine.profile() for why a hint is the whole point. */
-export function ProfilePanel({ profile, sessionCost, sessionTokens, onManageKey }: {
+export function ProfilePanel({ profile, local, sessionCost, sessionTokens, onManageKey, onManageLocal }: {
   profile: Profile | null
+  local: LocalStatus | null
   sessionCost: number
   sessionTokens: number
   onManageKey: () => void
+  onManageLocal: () => void
 }) {
   if (!profile) {
     return <div className="profile"><div className="profile-empty">Waiting for the engine…</div></div>
@@ -47,6 +49,16 @@ export function ProfilePanel({ profile, sessionCost, sessionTokens, onManageKey 
         </>
       )}
 
+      {local && (
+        <>
+          <div className="profile-head">Local model</div>
+          <Row label="Default" value={localDefault(local)} mono />
+          <Row label="Server" value={local.enabled ? local.server.state : 'off'} />
+          {local.hardware && <Row label="Memory" value={`${local.hardware.ram_gb} GB`} />}
+          <button className="btn subtle wide" onClick={onManageLocal}>Manage local models</button>
+        </>
+      )}
+
       <div className="profile-head">Connection</div>
       <Row label="Gateway" value={profile.gateway.replace(/^https?:\/\//, '')} mono />
       <Row label="Models" value={profile.models ? profile.models.toLocaleString() : '—'} />
@@ -77,4 +89,11 @@ function Row({ label, value, mono, accent }: {
       <span className={`${mono ? 'mono' : ''} ${accent ? 'accent' : ''}`} title={value}>{value}</span>
     </div>
   )
+}
+
+function localDefault(local: LocalStatus) {
+  const id = local.default_model
+  if (!id) return 'none fits this machine'
+  const row = local.models.find((m) => m.id === id)
+  return id.replace('local/', '') + (row?.installed ? '' : ' (not downloaded)')
 }
