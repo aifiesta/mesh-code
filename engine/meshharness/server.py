@@ -50,6 +50,7 @@ from . import settings as settings_mod
 from .core import __version__
 from .core import config as config_mod
 from .core.permissions import Mode, from_str as mode_from_str
+from .core.budget import Budget
 from .local.manager import LocalModels
 from .protocol import Event, Request, event
 from .session import Session
@@ -104,6 +105,7 @@ class Engine:
             emit=lambda type_, data: self.emit(event(type_, None, **data)),
             on_catalog_change=self._share_catalog)
         self.usage = config_mod.load_usage()
+        self.budget = Budget(self.cfg)
         # Browsable roots for the explorer, keyed by absolute path. The
         # ACTIVE one is the session's workspace — the only place the agent
         # reads, writes or runs commands. Extra folders are for looking at
@@ -231,7 +233,8 @@ class Engine:
         if model:
             cfg["model"] = model
         self.add_root(workspace)
-        s = Session(sid, workspace, cfg, self.emit, mode=mode_from_str(mode), local=self.local)
+        s = Session(sid, workspace, cfg, self.emit, mode=mode_from_str(mode), local=self.local,
+                    budget=self.budget)
         self.sessions[sid] = s
         s.catalog = self.merged_catalog()
         s.start()
@@ -493,6 +496,7 @@ def create_app(engine: Engine, ui_dir: Path | None = None) -> FastAPI:
             catalog=engine.merged_catalog(),
             profile=engine.profile(),
             local=engine.local.status(),
+            budget=engine.budget.snapshot(),
         )))
         migrated = engine.cfg.pop("_migrated_to_local", None)
         if migrated:
@@ -663,6 +667,21 @@ async def handle_request(engine: Engine, msg: dict) -> None:
                 pass                          # a failed persist must not block the change
             engine.emit(event(Event.SETTINGS, sid,
                               **settings_mod.describe(engine.cfg)))
+            if key == "monthly_budget_usd":
+                engine.budget.clear_hold()
+                engine.emit(event(Event.BUDGET_UPDATED, None, **engine.budget.snapshot()))
+            return
+
+        if kind == Request.BUDGET_OVERRIDE:
+            if msg.get("clear_key_cap"):
+                engine.budget.set_key_cap(False)
+            else:
+                engine.budget.override_today()
+            engine.emit(event(Event.BUDGET_UPDATED, None, **engine.budget.snapshot()))
+            return
+
+        if kind == Request.BUDGET_STATUS:
+            engine.emit(event(Event.BUDGET_UPDATED, None, **engine.budget.snapshot()))
             return
 
         if kind == Request.LIST_MODELS:

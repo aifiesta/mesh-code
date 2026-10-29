@@ -79,6 +79,8 @@ class Event:
     ERROR = "error"
     COMPACTED = "compacted"
     POLICY_CHANGED = "policy.changed"  # tier moved: escalated, handed back, de-escalated
+    BUDGET_UPDATED = "budget.updated"  # ledger snapshot (session None)
+    BUDGET_HOLD = "budget.hold"        # a cloud hop was refused; why
     SETTINGS = "settings"              # schema + current values
     CATALOG = "catalog"                # model list with context + pricing
     CONFIG_ERROR = "config.error"      # a rejected setting, with the reason
@@ -104,6 +106,8 @@ class Request:
     SET_MODE = "set.mode"
     ESCALATE = "escalate"          # strong model for the rest of the turn (or the next)
     DEESCALATE = "deescalate"
+    BUDGET_OVERRIDE = "budget.override"  # allow more today; clear a key-cap hold
+    BUDGET_STATUS = "budget.status"
     SET_MODEL = "set.model"
     SET_STYLE = "set.style"
     OPEN_WORKSPACE = "open.workspace"

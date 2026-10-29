@@ -46,7 +46,7 @@ describe('local layer in the store', () => {
   })
 
   it('keeps session-less notices out of transcripts so HISTORY can still hydrate', () => {
-    let s = fire(withLocal, Ev.SESSION_STARTED, { title: 'w', workspace: '/w' }, 's1')
+    let s = fire(withLocal, Ev.SESSION_STARTED, { title: 'w', workspace: '/w', resumed: true }, 's1')
     s = fire(s, Ev.NOTICE, { level: 'info', message: 'moved to local-first' })
     s = fire(s, Ev.LOCAL_READY, { model: 'local/a', first: true })
     expect(s.sessions.s1.messages).toHaveLength(0)
@@ -71,5 +71,33 @@ describe('policy changes and the streaming bubble', () => {
     expect(s.sessions.s1.messages).toHaveLength(1)
     s = fire(s, Ev.POLICY_CHANGED, { tier: 'escalated', model: 'x/y', reason: 'weak', discard_reply: true }, 's1')
     expect(s.sessions.s1.messages).toHaveLength(0)
+  })
+})
+
+
+describe('history replay after a reload mid-turn', () => {
+  const ready = () => fire(initialState, Ev.ENGINE_READY, {
+    has_key: true, sessions: [{ id: 's1', title: 'w', workspace: '/w', busy: true }],
+  })
+  it('puts the replay in front of what streamed since the reload, without duplicate tool cards', () => {
+    let s = ready()
+    expect(s.sessions.s1.needsHistory).toBe(true)
+    s = fire(s, Ev.TOOL_STARTED, { call_id: 'c2', name: 'write_file', summary: 'write a.py' }, 's1')
+    s = fire(s, Ev.HISTORY, { messages: [
+      { kind: 'user', text: 'build it' },
+      { kind: 'tool', id: 'c1', name: 'run_bash', summary: 'ls', ok: true },
+      { kind: 'tool', id: 'c2', name: 'write_file', summary: 'write a.py', ok: true },
+    ] }, 's1')
+    const kinds = s.sessions.s1.messages.map((m) => m.kind)
+    expect(kinds[0]).toBe('user')
+    expect(s.sessions.s1.messages.filter((m) => m.kind === 'tool')).toHaveLength(2)
+    expect(s.sessions.s1.needsHistory).toBe(false)
+    const again = fire(s, Ev.HISTORY, { messages: [{ kind: 'user', text: 'dup' }] }, 's1')
+    expect(again.sessions.s1.messages).toHaveLength(s.sessions.s1.messages.length)
+  })
+  it('never replays into a session this window started', () => {
+    let s = fire(initialState, Ev.SESSION_STARTED, { title: 'w', workspace: '/w' }, 's2')
+    s = fire(s, Ev.HISTORY, { messages: [{ kind: 'user', text: 'x' }] }, 's2')
+    expect(s.sessions.s2.messages).toHaveLength(0)
   })
 })

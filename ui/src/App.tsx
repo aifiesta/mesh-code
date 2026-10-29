@@ -232,9 +232,7 @@ export default function App() {
   // empty UI transcript — request the replay once per session.
   const hydrated = useRef<Set<string>>(new Set())
   useEffect(() => {
-    if (!session || session.busy) return
-    if (session.messages.length > 0) { hydrated.current.add(session.id); return }
-    if (hydrated.current.has(session.id)) return
+    if (!session?.needsHistory || hydrated.current.has(session.id)) return
     hydrated.current.add(session.id)
     clientRef.current?.send(Req.GET_HISTORY, { session: session.id })
   }, [session])
@@ -638,10 +636,12 @@ export default function App() {
               settings={state.settings}
               catalog={state.catalog}
               local={state.local}
+              budget={state.budget}
               onSet={setConfig}
               onOpenSettings={(tab) => tab === '__palette' ? setPalette(true) : setSheet(tab ?? 'model')}
               onEscalate={(harder) => client?.escalate(session.id, harder)}
               onDeescalate={() => client?.deescalate(session.id)}
+              onBudgetOverride={(clear) => client?.budgetOverride(clear)}
             />
           }
           onSend={(text, attachments, refs) => {

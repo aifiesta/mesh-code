@@ -1,4 +1,4 @@
-import { Ev, type Approval, type Ask, type CatalogModel, type DirEntry, type FilePreview, type LocalJob, type LocalStatus, type Root, type Msg, type Plan, type Profile, type SettingsDoc, type Status, type ToolCard, type WireEvent } from './types'
+import { Ev, type Approval, type Ask, type CatalogModel, type DirEntry, type FilePreview, type BudgetSnapshot, type LocalJob, type LocalStatus, type Root, type Msg, type Plan, type Profile, type SettingsDoc, type Status, type ToolCard, type WireEvent } from './types'
 
 /**
  * Turning the event stream into renderable state.
@@ -18,6 +18,8 @@ export type SessionState = {
   workspace: string
   createdAt?: number
   messages: Msg[]
+  /** Adopted from the engine (restart, reload): its history is replayed once. */
+  needsHistory?: boolean
   plan: Plan | null
   status: Status | null
   approval: Approval | null
@@ -61,6 +63,8 @@ export type AppState = {
   configError: { key: string; message: string } | null
   /** The local model layer: hardware, models, downloads, server. */
   local: LocalStatus | null
+  /** The cloud spend ledger: today and this month against the limits. */
+  budget: BudgetSnapshot | null
   /** Engine notices that belong to no session (migration, local layer). */
   appNotices: { id: string; level: string; text: string }[]
 }
@@ -81,6 +85,7 @@ export const initialState: AppState = {
   keyResult: null,
   configError: null,
   local: null,
+  budget: null,
   appNotices: [],
 }
 
@@ -177,10 +182,11 @@ export function reduce(state: AppState, action: Action): AppState {
       const catalog = d.catalog?.length ? d.catalog : state.catalog
       const profile = d.profile ?? state.profile
       const local = d.local ?? state.local
+      const budget = d.budget ?? state.budget
       for (const row of (d.sessions ?? [])) {
         if (!sessions[row.id]) {
-          sessions[row.id] = blank(row.id, row.title ?? 'session', row.workspace ?? '',
-                                   row.created_at)
+          sessions[row.id] = { ...blank(row.id, row.title ?? 'session', row.workspace ?? '',
+                                   row.created_at), needsHistory: true }
           order.push(row.id)
         }
         // Seed status from the descriptor so a hydrated session shows its
@@ -210,9 +216,12 @@ export function reduce(state: AppState, action: Action): AppState {
         ? state.active : (prunedOrder[0] ?? null)
       return {
         ...state, ready: true, hasKey: !!d.has_key, sessions, order: prunedOrder,
-        settings, catalog, profile, active, local,
+        settings, catalog, profile, active, local, budget,
       }
     }
+
+    case Ev.BUDGET_UPDATED:
+      return { ...state, budget: d as BudgetSnapshot }
 
     case Ev.LOCAL_STATUS:
       return { ...state, local: d as LocalStatus }
@@ -278,7 +287,7 @@ export function reduce(state: AppState, action: Action): AppState {
         ? { ...prior, title: d.title ?? prior.title, label: d.label ?? prior.label,
             workspace: d.workspace ?? prior.workspace }
         : { ...blank(sid, d.title ?? 'session', d.workspace ?? '', d.created_at),
-            label: d.label ?? '' }
+            label: d.label ?? '', needsHistory: !!d.resumed }
       return {
         ...state,
         sessions: { ...state.sessions, [sid]: s },
@@ -306,23 +315,23 @@ export function reduce(state: AppState, action: Action): AppState {
         return { ...s, status: d as Status, busy: !!d.busy }
 
       case Ev.HISTORY: {
-        // Replay from the engine's own history — the UI transcript did not
-        // survive the restart, the conversation did. Only hydrate an EMPTY
-        // transcript: live messages must never be clobbered by a late reply.
-        if (s.messages.length > 0) return s
+        // Replayed once, in front of whatever streamed in since the reload; a
+        // tool call already shown live is not shown twice.
+        if (!s.needsHistory) return s
+        const live = new Set(s.messages.flatMap((m) => (m.kind === 'tool' ? [m.card.callId] : [])))
         const messages: Msg[] = []
         for (const m of (d.messages ?? []) as any[]) {
           if (m.kind === 'user') messages.push({ kind: 'user', id: nid(), text: m.text })
           else if (m.kind === 'assistant') messages.push({ kind: 'assistant', id: nid(), text: m.text })
-          else if (m.kind === 'tool') messages.push({
+          else if (m.kind === 'tool' && !(m.id && live.has(m.id))) messages.push({
             kind: 'tool', id: nid(),
-            card: { callId: nid(), name: m.name, summary: m.summary,
+            card: { callId: m.id ?? nid(), name: m.name, summary: m.summary,
                     status: m.ok ? 'ok' : 'error' } as ToolCard,
           })
           else if (m.kind === 'notice') messages.push({
             kind: 'notice', id: nid(), level: 'info', text: m.text })
         }
-        return { ...s, messages }
+        return { ...s, needsHistory: false, messages: [...messages, ...s.messages] }
       }
 
       case Ev.CHAT_CLEARED:
@@ -536,6 +545,9 @@ export function reduce(state: AppState, action: Action): AppState {
             detail: String(d.note ?? '').slice(0, 200) || undefined,
           }],
         }
+
+      case Ev.BUDGET_HOLD:
+        return s   // the notice that follows carries the words
 
       case Ev.POLICY_CHANGED: {
         // Only an escalation on a weak reply discards the bubble still streaming.

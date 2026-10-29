@@ -38,6 +38,8 @@ export const Ev = {
   ERROR: 'error',
   COMPACTED: 'compacted',
   POLICY_CHANGED: 'policy.changed',
+  BUDGET_UPDATED: 'budget.updated',
+  BUDGET_HOLD: 'budget.hold',
   ENGINE_READY: 'engine.ready',
   HISTORY: 'history',
   CHAT_CLEARED: 'chat.cleared',
@@ -56,6 +58,8 @@ export const Req = {
   SET_MODE: 'set.mode',
   ESCALATE: 'escalate',
   DEESCALATE: 'deescalate',
+  BUDGET_OVERRIDE: 'budget.override',
+  BUDGET_STATUS: 'budget.status',
   SET_MODEL: 'set.model',
   SET_STYLE: 'set.style',
   OPEN_WORKSPACE: 'open.workspace',
@@ -147,6 +151,18 @@ export type AskQuestion = {
 }
 export type Ask = { token: string; questions: AskQuestion[] }
 
+export type BudgetWindow = {
+  spent: number; limit: number; pct: number; resets: number
+  by_kind: Record<string, number>; override?: boolean
+}
+export type BudgetSnapshot = {
+  month: BudgetWindow
+  day: BudgetWindow
+  key_cap: boolean
+  held: 'day' | 'month' | 'key_cap' | null
+  estimated_usd: number
+}
+
 export type PolicyInfo = {
   policy: 'local-first' | 'cloud-auto' | 'pinned'
   tier: 'local' | 'cloud_fallback' | 'cloud_auto' | 'pinned' | 'escalated'
@@ -159,7 +175,7 @@ export type PolicyInfo = {
 }
 
 export type Status = {
-  model: string; mode: Mode; policy?: PolicyInfo; session_cost: number
+  model: string; mode: Mode; policy?: PolicyInfo; budget?: BudgetSnapshot | null; session_cost: number
   session_tokens: number; workspace: string; busy: boolean
   /** The turn IN FLIGHT: the model a hop actually ran on (the gateway or a
    *  local pin may differ from `model`), and the spend so far. Session
@@ -188,7 +204,7 @@ export type SettingOption = { value: any; label: string; blurb?: string }
 export type SettingSpec = {
   key: string
   category: string
-  /** enum | bool | int | text | model | model_list | local_model */
+  /** enum | bool | int | money | text | model | model_list | local_model */
   type: string
   label: string
   help?: string

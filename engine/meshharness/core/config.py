@@ -90,6 +90,8 @@ DEFAULT_CONFIG = {
     "auto_escalate": True,
     "escalation_sticky": "turn",
     "weight_profile": "balanced",  # cloud-auto only
+    # What the cloud may spend; local work never counts.
+    "monthly_budget_usd": 10.0,
     # How the assistant writes (prose only — never tool access or scope).
     "output_style": "default",
     # Last version whose "what's new" line was shown (see whatsnew.py).

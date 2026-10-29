@@ -220,7 +220,17 @@ async function pickFolder() {
   return r.canceled ? null : r.filePaths[0]
 }
 
+// One copy per machine: the spend ledger and the local model server are shared.
+const primary = app.requestSingleInstanceLock()
+if (!primary) app.quit()
+app.on('second-instance', () => {
+  if (!win) return
+  if (win.isMinimized()) win.restore()
+  win.focus()
+})
+
 app.whenReady().then(async () => {
+  if (!primary) return
   ipcMain.handle('pick-folder', pickFolder)
   // 'system' hands control back to macOS; 'light'/'dark' force it, which is
   // what repaints the vibrancy behind a manually-chosen theme.
