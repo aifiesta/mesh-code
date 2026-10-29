@@ -9,11 +9,17 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to build and attach to (e.g. v0.2.4)"
+        description: "Release tag to build and attach to (e.g. v0.3.0)"
         required: true
 
 permissions:
   contents: write
+
+# One run per release tag: two dispatches for the same tag queue, never race
+# each other's uploads.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 env:
   # Where releases live. Set RELEASE_TOKEN (contents: write on that repo)
@@ -23,6 +29,8 @@ env:
 jobs:
   test:
     uses: ./.github/workflows/test.yml
+    with:
+      ref: ${{ inputs.tag || github.ref }}
 
   build:
     needs: test
@@ -39,6 +47,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22

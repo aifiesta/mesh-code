@@ -7,6 +7,11 @@ on:
   push:
     branches: [main]
   workflow_call:
+    inputs:
+      ref:
+        description: "The ref to test (a release passes its tag)"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -14,7 +19,7 @@ permissions:
 concurrency:
   # github.workflow is the caller's name inside a called workflow, so a
   # release-dispatched run and a push-to-main run never cancel each other.
-  group: ${{ github.workflow }}-test-${{ github.ref }}
+  group: ${{ github.workflow }}-test-${{ inputs.ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -34,6 +39,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -48,6 +55,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -64,6 +73,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
