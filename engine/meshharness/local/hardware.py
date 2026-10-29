@@ -69,12 +69,12 @@ def _memory(os_name: str) -> tuple[int, int]:
             return total, _darwin_available(total)
         if os_name == "win32":
             return _windows_memory()
-        return _linux_memory()
+        return _linux_memory(MEMINFO)
     except Exception:
         return 0, 0
 
 
-def _linux_memory(path: Path = MEMINFO) -> tuple[int, int]:
+def _linux_memory(path: Path) -> tuple[int, int]:
     total = avail = 0
     for line in path.read_text().splitlines():
         key, _, rest = line.partition(":")
