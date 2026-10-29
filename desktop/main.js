@@ -128,14 +128,12 @@ function createWindow() {
     show: false,
     titleBarStyle: mac ? 'hiddenInset' : 'default',
     trafficLightPosition: mac ? { x: 18, y: 20 } : undefined,
-    // Real macOS vibrancy, not a CSS imitation: the compositor samples what
-    // is actually behind the window. CSS backdrop-filter can only blur the
-    // page's own layers, so it can never produce this. Elsewhere the app
-    // paints its own opaque ground and looks the same minus the depth.
-    ...(mac
+    // Real vibrancy: CSS backdrop-filter can only blur the page's own layers.
+    // MESH_OPAQUE=1 opts out where the vibrancy layer flickers under GPU load.
+    ...(mac && process.env.MESH_OPAQUE !== '1'
       ? { vibrancy: 'under-window', visualEffectState: 'active',
           backgroundColor: '#00000000' }
-      : { backgroundColor: '#0b0b0f' }),
+      : { backgroundColor: nativeTheme.shouldUseDarkColors ? '#0b0b0f' : '#f4f4f6' }),
     icon: path.join(__dirname, '..', 'packaging', 'icons', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),

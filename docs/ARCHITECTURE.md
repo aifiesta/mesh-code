@@ -34,9 +34,36 @@ So the conversion is a **separation**, not a port. Same engine, new edges.
 │ engine/server.py    transport + static assets             │
 │ engine/session.py   the agent loop, one thread/session    │
 │ engine/protocol.py  the contract                          │
-│ engine/core/        vendored CLI engine (unchanged)       │
-└──────────────────────────────────────────────────────────┘
+│ engine/core/        vendored CLI engine, plus policy.py   │
+│                     (who writes) and budget.py (spend)    │
+│ engine/local/       hardware probe, tiers, downloads and  │
+│                     the llama-server it supervises        │
+└────────────────────────┬─────────────────────────────────┘
+                         │ OpenAI-compatible HTTP, per hop
+              ┌──────────┴───────────┐
+              ▼                      ▼
+   llama-server on 127.0.0.1     Mesh gateway
+   (the local model, free)       (1,000+ cloud models)
 ```
+
+## Who writes each hop
+
+Every hop resolves a `Target` (endpoint, key, model, timeouts) before it is
+sent, so one turn can move between machines:
+
+- `local/` probes RAM and GPU, picks a tier from `manifest.json` (bundled,
+  optionally re-pinned by a validated remote copy)
+  that leaves memory for everything else, downloads and sha256-checks the
+  weights, and runs `llama-server` with a per-launch key. A server that dies
+  is restarted; one that cannot start makes the hop fall back to the cloud.
+- `core/policy.py` decides the tier per hop: local, cloud fallback, gateway
+  auto, pinned, or escalated. Escalation follows the ordered chain in
+  `policy.json` (sent to the gateway as `models` so it fails over server
+  side), is triggered by the user or by evidence of a stuck turn, and hands
+  back to the local model after a hop or token cap.
+- `core/budget.py` keeps the cloud spend ledger. Before each cloud hop it
+  checks today's share of the monthly limit; a hold pauses the cloud while
+  local work continues. Local hops cost nothing and are never recorded.
 
 ## The contract
 

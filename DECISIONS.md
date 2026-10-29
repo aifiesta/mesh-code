@@ -204,3 +204,22 @@ cloud stops and local keeps working. The control bar shows the day as a
 ring and the detail as two bars, because a number in dollars does not read
 at a glance and a ring does. The gateway's own HTTP 402 is treated as the
 key's cap: a hold until the user says they raised it.
+
+## 2026-10-29 — 0.3.0 ships the local model, escalation and the budget, but no auditor
+The cheap audit chain is pinned in `policy.json` and the auditor was
+drafted, but a 9B local model's diffs judged by a cheap cloud model needs
+its own review and real-world tuning. Shipping escalation and the budget
+first gives the cost guarantee on its own; the auditor follows in a later
+release. The docs promise nothing about audits until then.
+
+## 2026-10-29 — the vibrancy window stays the default; MESH_OPAQUE=1 opts out
+A whole-window flicker under GPU load could not be reproduced inside the
+page, which points at the macOS vibrancy layer the window is created with
+competing with Metal work from the local model. A window without it is an
+environment switch rather than the default until the cause is confirmed on
+more machines.
+
+## 2026-10-29 — release notes live on the GitHub release, not in a changelog file
+`CHANGELOG.md` is an internal, gitignored record (see 2026-10-01). Public
+notes for each version are written on the draft GitHub release before a
+human publishes it.

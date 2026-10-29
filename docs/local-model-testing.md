@@ -1,9 +1,7 @@
 # Testing the local model layer
 
-Manual scenarios for the local-first stack (local model, cloud fallback,
-packaging). Audits, escalation and the budget governor land in later PRs,
-so "stuck → cloud" does not exist yet: the cloud is reached only by
-fallback or by pinning a cloud model.
+Manual scenarios for the local model layer (install, fallback, recovery,
+the tier gate), then escalation and the budget.
 
 Logs: Help › Show Local Model Logs, or `~/.mesh-code/local/logs/llama-server.log`.
 
@@ -27,7 +25,7 @@ Logs: Help › Show Local Model Logs, or `~/.mesh-code/local/logs/llama-server.l
 
 - Settings › Local model › **Stop**, then switch **Local model** off, send a prompt.
 - Expect: one notice "local models are turned off in Settings — using
-  deepseek/deepseek-v4.1-flash"; the turn runs on the cloud and the footer
+  <your cloud fallback model>"; the turn runs on the cloud and the footer
   shows a dollar amount.
 - Switch it back on, send again: local resumes.
 - Also: layer on, server stopped, send a prompt → the server restarts on its own.
@@ -101,3 +99,35 @@ Expect six lines, each `ok` with `structured` calls, TTFT and tok/s, then
 - Kill Wi-Fi mid-download → a warn notice "… download failed: …" appears;
   Install again resumes.
 - The bar above the transcript shows rate, ETA and "cloud models work meanwhile".
+
+## 14. Escalate by hand
+
+- During a local turn press **Escalate**.
+- Expect: "escalating at the next step", the pill reads `Escalated ·
+  claude-sonnet-5.5`, and the next hop runs in the cloud with a dollar cost.
+  After 8 hops or 300k tokens a notice says it handed back, and the next
+  turn starts on the local model again.
+
+## 15. Escalation on evidence
+
+- Give the local model a task it cannot finish (a wide refactor across many
+  files) and let it run.
+- Expect: after a weak reply, two failed batches of tool calls, or a stall,
+  a notice names the trigger and the strong model takes over once per turn.
+  Settings › Policy › **Escalate on its own** off stops this.
+
+## 16. Daily and monthly holds
+
+- Settings › Budget: set the monthly limit to this month's spend (from the
+  Usage popover) plus $0.05, pin a cloud model, run a turn.
+- Expect: the ring turns red, the turn ends with "cloud hop held: today's
+  share … is used up", and the Usage popover offers **Allow more today**.
+  Press it and run again: the turn goes through. On local first, the same
+  hold sends an escalated turn back to the local model.
+- Put the limit back to $10.
+
+## 17. The key's own cap
+
+- Hard to trigger for real; `test_a_402_sets_the_key_cap_hold_until_cleared`
+  covers it. With a key whose cap is reached, expect a key-cap hold, a full
+  red ring, and **I raised the cap** in the Usage popover.

@@ -1,6 +1,6 @@
 [project]
 name = "mesh-code-engine"
-version = "0.2.4"
+version = "0.3.0"
 description = "Headless Mesh agent engine — the loop behind the Mesh Harness desktop app"
 readme = "README.md"
 license = "Apache-2.0"
