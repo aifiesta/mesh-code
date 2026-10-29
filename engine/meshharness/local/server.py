@@ -271,7 +271,8 @@ def _cmdline(pid: int) -> str:
             out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
                                  capture_output=True, text=True, timeout=5).stdout
             return out if str(pid) in out else ""
-        return subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+        # -ww: piped Linux ps cuts the line at 80 columns, before the binary's name.
+        return subprocess.run(["ps", "-ww", "-o", "command=", "-p", str(pid)],
                               capture_output=True, text=True, timeout=5).stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         return ""
