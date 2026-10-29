@@ -146,16 +146,12 @@ class Engine:
 
     # -- emit bridges the worker threads back onto the event loop ---------
     def emit(self, ev: dict) -> None:
-        # Central place to tally what the app has spent: every session's
-        # turns pass through here on their way to the frontend.
-        # Count both natural and aborted ends: a turn the user stopped after
-        # real spend must still reach the lifetime tally, or the total drifts
-        # down with every interrupt.
         if ev.get("type") in (Event.TURN_FINISHED, Event.TURN_ABORTED, Event.COMMAND_FINISHED,
                               Event.SESSION_STARTED, Event.CHAT_CLEARED):
             sess = self.sessions.get(ev.get("session") or "")
             if sess:
                 sess.save_state()
+        # Aborted turns count too: a stopped turn can have spent real money.
         if ev.get("type") in (Event.TURN_FINISHED, Event.TURN_ABORTED):
             d = ev.get("data") or {}
             with self._usage_lock:

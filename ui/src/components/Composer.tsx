@@ -107,10 +107,7 @@ export function Composer({ busy, stopping, mode, controls, onSend, onInterrupt, 
     else setRefs((r) => (r.includes(path) ? r : [...r, path]))
   }
 
-  // The explorer drops a path in here rather than opening an editor —
-  // pointing the agent at a file is the thing you actually want to do next.
-  // It lands as a badge, not as text: a path pasted mid-sentence was easy
-  // to mangle and the model could not tell it from prose.
+  // An explorer path lands as a badge the model can tell from prose; shell mode types it.
   useEffect(() => {
     const onMention = (e: Event) => {
       addRef((e as CustomEvent).detail as string)
@@ -248,10 +245,8 @@ export function Composer({ busy, stopping, mode, controls, onSend, onInterrupt, 
         </div>
       )}
 
-      {/* The box is the box: border, focus ring and the send affordance all
-          belong to the field itself. Everything else moved OUT of it and
-          below, so a narrow window squeezes a quiet meta row rather than
-          wrapping "Ask every time" onto three lines inside the input. */}
+      {/* Only the border, focus ring and send button live in the box, so a
+          narrow window squeezes the meta row below rather than the input. */}
       <div className={`composer-input ${shellMode ? 'shell' : ''}`}>
         {shellMode && <span className="shell-badge" title="Runs in the project folder; the output goes to the chat and the model">shell</span>}
         <textarea
@@ -275,9 +270,7 @@ export function Composer({ busy, stopping, mode, controls, onSend, onInterrupt, 
               if (e.key === 'Escape') { e.preventDefault(); setText((t) => t.slice(0, at.start) + t.slice(caret)); return }
             }
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
-            // "/" on an empty field opens the palette. This replaces the two
-            // labelled buttons that used to sit in the bar — one fewer thing
-            // on screen, and the placeholder teaches it.
+            // "/" on an empty field opens the palette; the placeholder teaches it.
             if (e.key === '/' && !text && !shellMode) { e.preventDefault(); onCommands() }
             if (shellMode && !text && (e.key === 'Backspace' || e.key === 'Escape')) { e.preventDefault(); setShellMode(false); return }
             // Escape from the composer interrupts the run — matching the
