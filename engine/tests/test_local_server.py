@@ -142,19 +142,12 @@ def test_recover_forgets_a_dead_process_so_ensure_restarts(local_dir, fake_bin, 
 def test_boot_kills_an_orphan_named_in_the_pidfile(local_dir, fake_bin):
     s = srv_mod.LocalServer(local_dir)
     _ensure(s, fake_bin)
-    pid = s._proc.pid
+    proc = s._proc
     s._proc = None            # simulate the engine dying without stop()
-    assert local_dir.joinpath("llama-server.pid").read_text() == str(pid)
+    assert local_dir.joinpath("llama-server.pid").read_text() == str(proc.pid)
     srv_mod.LocalServer(local_dir)
-    deadline = time.time() + 5
-    while time.time() < deadline:
-        try:
-            os.kill(pid, 0)
-            time.sleep(0.1)
-        except ProcessLookupError:
-            break
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    # Reaping through the test's own handle: on Linux an unreaped child still answers kill(pid, 0).
+    assert proc.wait(timeout=5) == 0     # the fake exits 0 on SIGTERM
 
 
 def test_cancel_during_load_leaves_the_process_loading_for_the_next_caller(local_dir, fake_bin, monkeypatch):
