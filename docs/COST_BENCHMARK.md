@@ -70,7 +70,12 @@ Rerun: `cd engine && PATH=$PWD/.venv/bin:$PATH .venv/bin/python ../docs/bench/be
 | **Avg** | **$0.740** | 7/7 | **$0.0111** | 6/7 | |
 
 B passes the bar (one failure). Task 4 on B ran 60 steps and 2M tokens without
-moving up to a stronger model, and left the test suite hanging. Rerun with
+moving up to a stronger model, and left the test suite hanging.
+
+**After the escalation fix** (step 20 and step 35 escalate, skipping rungs that
+pick the same model), task 4 on B passed: seed-1.6-flash → deepseek-v4-flash →
+claude-opus-4.8, 64 steps, **$1.83** (A: $2.50). B is now 7/7 at about $0.26/task
+average on this repo, most of it from this one hard task. Rerun with
 `docs/bench/big.py A|B <clean engine copy> <outdir>`.
 
 ## Reference numbers (one small 3–4 step turn, 2026-11-14)

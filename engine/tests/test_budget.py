@@ -107,3 +107,31 @@ def test_tool_definitions_count_toward_the_cache_minimum():
     out, _, _ = prepare(msgs, "anthropic/claude-sonnet-4.5", 0.1, True,
                         tools_tokens=1700)
     assert out[0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_a_long_turn_escalates_and_does_not_settle_back(harness):
+    h = _smart(harness)
+    _escalation_state(h)
+    h.session._escalate_long_turn(20)
+    st = h.session.state
+    assert st["_smart_escalations"] == 1
+    climbed = st["_smart_difficulty"]
+    assert climbed != "low" and st["_smart_base_difficulty"] == climbed
+
+    st["_smart_clean_hops"] = 10
+    h.session._smart_de_escalate()
+    assert st["_smart_difficulty"] == climbed
+
+
+def test_escalation_skips_rungs_that_pick_the_same_model(harness, monkeypatch):
+    # Live table: low, mid and high all rank one cheap model first.
+    from meshharness.core import router
+    monkeypatch.setattr(router, "effective_weights", lambda w, d: d)
+    monkeypatch.setattr(router, "pick", lambda cohort, weights, *a, **k:
+                        {"model": "strong" if weights in ("xhigh", "max") else "cheap"})
+    h = _smart(harness)
+    _escalation_state(h)
+    h.session.state.update(_smart_pick="cheap", _smart_difficulty="mid")
+    assert h.session._smart_escalate("test") is True
+    assert h.session.state["_smart_pick"] == "strong"
+    assert h.session.state["_smart_difficulty"] == "xhigh"

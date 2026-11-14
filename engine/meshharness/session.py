@@ -512,6 +512,9 @@ class Session:
                           message=f"stopped after {hop_limit} hops (max_hops)")
                 break
 
+            if hop in self._LONG_TURN_HOPS:
+                self._escalate_long_turn(hop)
+
             self.emit(Event.HOP_STARTED, turn_id=turn_id, hop=hop,
                       model=model_used)
             self._maybe_compact()
@@ -935,6 +938,15 @@ class Session:
     # ------------------------------------------------------------------
     _CLEAN_HOPS_TO_SETTLE = 3
     _MAX_ESCALATIONS = 2
+    # A cheap model can churn through varied actions (so the stall detector
+    # never fires) while getting nowhere. Benchmarked tasks that succeeded
+    # finished in <=13 hops on cheap models, so a turn this long is evidence too.
+    _LONG_TURN_HOPS = (20, 35)
+
+    def _escalate_long_turn(self, hop: int) -> None:
+        if self._smart_escalate(f"{hop - 1} steps without finishing"):
+            # Clean hops would settle straight back to the model that was stuck.
+            self.state["_smart_base_difficulty"] = self.state["_smart_difficulty"]
 
     def _effective_model(self) -> str:
         pick = self.state.get("_smart_pick")
@@ -1076,18 +1088,33 @@ class Session:
                 return False
             cohort = self.state.get("_smart_cohort") or "chat"
             cur = self.state.get("_smart_difficulty") or "mid"
-            nxt = router.escalate(cur)
-            if nxt == cur:
-                return False  # already at the top
-            weights = router.effective_weights(self.cfg.get("route_weights"), nxt)
-            got = router.pick(cohort, weights, table, self.catalog,
-                              needs_tools=True, needs_ctx=self._needs_ctx(),
-                              incumbent=None,  # escalating: no stickiness
-                              exclude=set(self.cfg.get("exclude_models") or [])
-                              | set(self.state.get("_smart_bad") or set()))
-            if not got or not got.get("model"):
-                return False
             prev = self.state.get("_smart_pick")
+            # Adjacent rungs can rank the same cheap model first; climb until
+            # the pick actually changes, or escalating is a no-op. If nothing
+            # above differs, take the first rung as before.
+            first = None
+            while True:
+                nxt = router.escalate(cur)
+                if nxt == cur:
+                    if first is None:
+                        return False  # already at the top
+                    nxt, got = first
+                    break
+                weights = router.effective_weights(self.cfg.get("route_weights"), nxt)
+                got = router.pick(cohort, weights, table, self.catalog,
+                                  needs_tools=True, needs_ctx=self._needs_ctx(),
+                                  incumbent=None,  # escalating: no stickiness
+                                  exclude=set(self.cfg.get("exclude_models") or [])
+                                  | set(self.state.get("_smart_bad") or set()))
+                if not got or not got.get("model"):
+                    if first is None:
+                        return False
+                    nxt, got = first
+                    break
+                if got["model"] != prev:
+                    break
+                first = first or (nxt, got)
+                cur = nxt
             self.state["_smart_escalations"] = self.state.get("_smart_escalations", 0) + 1
             self.state["_smart_clean_hops"] = 0
             got["escalated"] = True
