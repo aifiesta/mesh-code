@@ -126,6 +126,22 @@ class ToolCallAccumulator:
         return named
 
 
+_CACHE_MARK = {"type": "ephemeral"}
+
+
+def with_cache_markers(messages: list) -> list:
+    """Mark the system prompt and the newest message as cache breakpoints.
+    The gateway does not add them for Anthropic models, and a prefix under
+    the provider's minimum just isn't cached, so marking is always safe."""
+    out = list(messages)
+    idx = {len(out) - 1} if out else set()
+    if out and out[0].get("role") == "system":
+        idx.add(0)
+    for i in idx:
+        out[i] = {**out[i], "cache_control": _CACHE_MARK}
+    return out
+
+
 def build_payload(messages: list, cfg: dict, tools: Optional[list] = None,
                   target=None) -> dict:
     """Build the /chat/completions request body from session config.
@@ -142,7 +158,7 @@ def build_payload(messages: list, cfg: dict, tools: Optional[list] = None,
     local = bool(target and target.local)
     payload: dict = {
         "model": target.model if target else ("auto" if cfg.get("auto_route") else cfg["model"]),
-        "messages": messages,
+        "messages": messages if local else with_cache_markers(messages),
         "stream": True,
     }
     fallbacks = cfg["models"] if "models" in cfg else cfg.get("fallback_models")
