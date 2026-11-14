@@ -223,3 +223,15 @@ more machines.
 `CHANGELOG.md` is an internal, gitignored record (see 2026-10-01). Public
 notes for each version are written on the draft GitHub release before a
 human publishes it.
+
+## 2026-11-14 — the client marks cache breakpoints; the gateway does not
+Measured on Haiku 5.5 through Mesh: a 20k-token prefix sent without markers
+was never cached, and with markers on the system prompt and the newest
+message, 99.9% of it was read from the cache on the next call. So prompt
+caching is not "done server-side" for Anthropic models, and cloud hops always
+send markers (no setting: a prefix under the provider minimum just isn't
+cached). Compaction is capped at 80k tokens whatever the model's window, and
+a turn still running at step 20 escalates once, through the normal
+once-per-turn rule. Ported from Saha's aifiesta/mesh-code#14; the router,
+Smart-default migration and steer-only budget there were left out because
+0.3.0 removed the router and keeps the budget governor.
