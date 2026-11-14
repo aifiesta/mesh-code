@@ -56,6 +56,23 @@ untouched where asked). Monthly budget off for both. B passes the bar.
 Limit: a small, easy codebase. Large repos and harder tasks are still unmeasured.
 Rerun: `cd engine && PATH=$PWD/.venv/bin:$PATH .venv/bin/python ../docs/bench/bench.py B /tmp/runB` (A for the old setup).
 
+## Bigger repo: the Mesh Code engine (~8.6k lines, 73 tests)
+
+| Task | A cost | A ok | B cost | B ok | B model |
+|---|---|---|---|---|---|
+| 1 Explain the request flow | $0.667 | yes | $0.0032 | yes | seed-1.6-flash |
+| 2 Summarise failing tests | $0.286 | yes | $0.0007 | yes | seed-1.6-flash |
+| 3 Fix the failing code | $0.954 | yes | $0.0049 | yes | seed-1.6-flash |
+| 4 Add a setting end to end | $2.496 | yes | $0.0588 | **no** | seed-1.6-flash |
+| 5 Rename a helper + callers | $0.468 | yes | $0.0052 | yes | deepseek-v4-flash |
+| 6 Fix a bug from a traceback | $0.114 | yes | $0.0015 | yes | deepseek-v4-flash |
+| 7 Refactor `prepare` | $0.196 | yes | $0.0037 | yes | deepseek-v4-flash |
+| **Avg** | **$0.740** | 7/7 | **$0.0111** | 6/7 | |
+
+B passes the bar (one failure). Task 4 on B ran 60 steps and 2M tokens without
+moving up to a stronger model, and left the test suite hanging. Rerun with
+`docs/bench/big.py A|B <clean engine copy> <outdir>`.
+
 ## Reference numbers (one small 3–4 step turn, 2026-11-14)
 
 | Setup | Cost |
