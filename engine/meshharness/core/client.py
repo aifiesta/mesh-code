@@ -181,13 +181,9 @@ def build_payload(messages: list, cfg: dict, tools: Optional[list] = None,
 
 
 def _drop_empty_assistant(messages: list) -> list:
-    """Remove assistant messages that carry neither text nor tool_calls. One
-    such message — appended after an earlier empty/failed response — otherwise
-    POISONS every later turn: the Bedrock/Anthropic backend rejects an empty
-    text block with HTTP 200 + an in-band ValidationException ("text content
-    blocks must be non-empty"), which the user experiences as the CLI silently
-    hanging (?→? tok forever). Consecutive user messages ARE accepted by the
-    gateway, so dropping these is safe."""
+    """Remove assistant messages with neither text nor tool_calls: Bedrock
+    rejects an empty text block in-band, which poisons every later turn.
+    Consecutive user messages are accepted, so dropping them is safe."""
     def _blank(c) -> bool:
         # content is normally str or None here; a list (multimodal blocks) is
         # never "blank" — and calling .strip() on it would crash the stream.

@@ -1237,11 +1237,8 @@ class Session:
                  else compact.context_limit(model, self.catalog))
         limit = min(limit, compact.COMPACT_BUDGET_TOKENS)
         if compact.should_compact(self.state["messages"], limit):
-            # Pass the limit so the FOLD phase is reachable. Without it,
-            # compact_history only truncates; the second call finds nothing
-            # left to truncate, returns {}, and _compact_exhausted trips —
-            # making the next context error fatal. The whole fold machinery
-            # was dead before this argument was threaded through.
+            # The limit makes the FOLD phase reachable; without it compaction
+            # only truncates and the next context error is fatal.
             self._compact_now("approaching the context limit", limit=limit)
 
     def _compact_now(self, why: str, *, limit: "int | None" = None,
