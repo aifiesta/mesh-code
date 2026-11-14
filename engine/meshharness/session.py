@@ -40,6 +40,7 @@ import httpx
 from .bridge import Cancelled, Pending
 from .core import compact, loopguard, memory, router
 from .core import journal, safety
+from .core import config as config_mod
 from .core import tools as tools_mod
 from .core.client import complete_chat, stream_chat
 from .core.permissions import AUTO_APPROVE, Mode
@@ -511,6 +512,9 @@ class Session:
                           message=f"stopped after {hop_limit} hops (max_hops)")
                 break
 
+            if hop in self._LONG_TURN_HOPS:
+                self._escalate_long_turn(hop)
+
             self.emit(Event.HOP_STARTED, turn_id=turn_id, hop=hop,
                       model=model_used)
             self._maybe_compact()
@@ -934,6 +938,15 @@ class Session:
     # ------------------------------------------------------------------
     _CLEAN_HOPS_TO_SETTLE = 3
     _MAX_ESCALATIONS = 2
+    # A cheap model can churn through varied actions (so the stall detector
+    # never fires) while getting nowhere. Benchmarked tasks that succeeded
+    # finished in <=13 hops on cheap models, so a turn this long is evidence too.
+    _LONG_TURN_HOPS = (20, 35)
+
+    def _escalate_long_turn(self, hop: int) -> None:
+        if self._smart_escalate(f"{hop - 1} steps without finishing"):
+            # Clean hops would settle straight back to the model that was stuck.
+            self.state["_smart_base_difficulty"] = self.state["_smart_difficulty"]
 
     def _effective_model(self) -> str:
         pick = self.state.get("_smart_pick")
@@ -964,6 +977,37 @@ class Session:
     def _needs_ctx(self) -> int:
         return int(compact.est_history_tokens(self.state.get("messages") or []) * 1.3) + 4096
 
+    _BUDGET_STEER = 0.7        # past this share of monthly_budget: cheap picks
+    _BUDGET_NO_ESCALATE = 0.9  # past this: no stepping up to stronger models
+
+    def _budget_level(self) -> float:
+        """This month's local spend as a share of monthly_budget (0 = off).
+        Steering only: the gateway enforces the account's real limit."""
+        try:
+            budget = float(self.cfg.get("monthly_budget") or 0)
+            if budget <= 0:
+                return 0.0
+            return config_mod.month_cost(config_mod.load_usage()) / budget
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _budget_notice(self, level: float) -> None:
+        """Say once per session when a budget threshold is crossed."""
+        step = (self._BUDGET_NO_ESCALATE if level >= self._BUDGET_NO_ESCALATE
+                else self._BUDGET_STEER if level >= self._BUDGET_STEER else 0)
+        if not step or self.state.get("_budget_noticed", 0) >= step:
+            return
+        self.state["_budget_noticed"] = step
+        budget = self.cfg.get("monthly_budget")
+        used = f"{int(step * 100)}% of this month's ${budget} budget"
+        if self.cfg.get("route_mode") != "smart":
+            msg = f"You've used {used}. Turn on Smart routing to stretch the rest."
+        elif step >= self._BUDGET_NO_ESCALATE:
+            msg = f"You've used {used}. Smart routing now stays on cheaper models."
+        else:
+            msg = f"You've used {used}. Smart routing now prefers cheaper models."
+        self.emit(Event.NOTICE, level="info", message=msg)
+
     def _apply_pick(self, info: dict, difficulty: str) -> None:
         info["difficulty"] = difficulty
         self.state["_smart_difficulty"] = difficulty
@@ -976,6 +1020,8 @@ class Session:
         """Initial per-turn pick. Fail-open: any miss leaves _smart_pick unset
         and the pinned model rides."""
         self.state["_smart_pick"] = None
+        budget_level = self._budget_level()
+        self._budget_notice(budget_level)
         if self.cfg.get("route_mode") != "smart":
             return
         try:
@@ -1003,6 +1049,8 @@ class Session:
                 difficulty = self.state.get("_smart_difficulty") or "mid"
             else:
                 difficulty = router.estimate_difficulty(text)
+            if budget_level >= self._BUDGET_STEER:
+                difficulty = "low"   # budget wins over detected/forced effort
             if inherit:
                 cohort = self.state["_smart_cohort"]
             self.state["_smart_cohort"] = cohort
@@ -1032,23 +1080,41 @@ class Session:
             return False
         if self.cfg.get("route_effort", "auto") != "auto":
             return False  # user pinned the effort — respect it
+        if self._budget_level() >= self._BUDGET_NO_ESCALATE:
+            return False  # near the monthly budget: stay on cheap models
         try:
             table = router.load_table()
             if not table or not self.catalog:
                 return False
             cohort = self.state.get("_smart_cohort") or "chat"
             cur = self.state.get("_smart_difficulty") or "mid"
-            nxt = router.escalate(cur)
-            if nxt == cur:
-                return False  # already at the top
-            weights = router.effective_weights(self.cfg.get("route_weights"), nxt)
-            got = router.pick(cohort, weights, table, self.catalog,
-                              needs_tools=True, needs_ctx=self._needs_ctx(),
-                              incumbent=None,  # escalating: no stickiness
-                              exclude=set(self.state.get("_smart_bad") or set()))
-            if not got or not got.get("model"):
-                return False
             prev = self.state.get("_smart_pick")
+            # Adjacent rungs can rank the same cheap model first; climb until
+            # the pick actually changes, or escalating is a no-op. If nothing
+            # above differs, take the first rung as before.
+            first = None
+            while True:
+                nxt = router.escalate(cur)
+                if nxt == cur:
+                    if first is None:
+                        return False  # already at the top
+                    nxt, got = first
+                    break
+                weights = router.effective_weights(self.cfg.get("route_weights"), nxt)
+                got = router.pick(cohort, weights, table, self.catalog,
+                                  needs_tools=True, needs_ctx=self._needs_ctx(),
+                                  incumbent=None,  # escalating: no stickiness
+                                  exclude=set(self.cfg.get("exclude_models") or [])
+                                  | set(self.state.get("_smart_bad") or set()))
+                if not got or not got.get("model"):
+                    if first is None:
+                        return False
+                    nxt, got = first
+                    break
+                if got["model"] != prev:
+                    break
+                first = first or (nxt, got)
+                cur = nxt
             self.state["_smart_escalations"] = self.state.get("_smart_escalations", 0) + 1
             self.state["_smart_clean_hops"] = 0
             got["escalated"] = True
@@ -1173,7 +1239,10 @@ class Session:
             return
         # Use the EFFECTIVE model's window — a mid-turn escalation may have
         # moved to a model with a different context limit.
-        limit = compact.context_limit(self._effective_model(), self.catalog)
+        # Capped at the token budget: every hop re-sends the whole history,
+        # so a 1M window must not mean 700k tokens billed per hop.
+        limit = min(compact.context_limit(self._effective_model(), self.catalog),
+                    compact.COMPACT_BUDGET_TOKENS)
         if compact.should_compact(self.state["messages"], limit):
             # Pass the limit so the FOLD phase is reachable. Without it,
             # compact_history only truncates; the second call finds nothing

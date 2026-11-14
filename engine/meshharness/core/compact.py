@@ -33,6 +33,9 @@ import json
 import math
 
 COMPACT_THRESHOLD = 0.70          # compact when est tokens exceed 70% of the limit
+# Cap the window compaction measures against: a 1M-context model would
+# otherwise re-send up to 700k tokens on every hop before folding anything.
+COMPACT_BUDGET_TOKENS = 80_000
 KEEP_RECENT_MESSAGES = 8          # working window the compactor never touches
 KEEP_RECENT_AGGRESSIVE = 4        # window when recovering from a context error
 TRUNCATE_TO_CHARS = 400           # what survives of a truncated tool result

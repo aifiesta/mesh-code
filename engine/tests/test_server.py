@@ -165,7 +165,8 @@ def test_an_invalid_setting_is_refused_with_a_reason(app_client, tmp_path):
                                  "key": "optimize", "value": 9000}))
         err = _drain(ws, Event.CONFIG_ERROR)
     assert "between" in err["data"]["message"]
-    assert engine.sessions[sid].cfg["optimize"] == 0.0, "must not be applied"
+    from meshharness.core.config import DEFAULT_CONFIG
+    assert engine.sessions[sid].cfg["optimize"] == DEFAULT_CONFIG["optimize"], "must not be applied"
 
 
 def test_route_preview_explains_a_pick_before_spending_anything(app_client, tmp_path):
