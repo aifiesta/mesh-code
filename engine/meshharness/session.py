@@ -488,6 +488,10 @@ class Session:
             return True
         return False
 
+    # A model can vary its actions (so the stall detector never fires) while
+    # getting nowhere; benchmarked tasks that succeeded finished in <=13 hops.
+    _LONG_TURN_HOP = 20
+
     def _auto_escalate(self, reason: str, *, discard_reply: bool = False) -> bool:
         """Evidence-driven escalation: needs a key, auto_escalate, and the
         policy's once-per-turn rule. True when the tier moved."""
@@ -679,6 +683,8 @@ class Session:
 
             self.emit(Event.HOP_STARTED, turn_id=turn_id, hop=hop,
                       model=model_used)
+            if hop == self._LONG_TURN_HOP:
+                self._auto_escalate(f"{hop - 1} steps without finishing")
             self._take_escalate_request()
             try:
                 probe = self._target_for(self._effective_cfg())

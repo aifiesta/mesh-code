@@ -183,3 +183,17 @@ def test_an_escalate_press_in_the_last_hop_does_not_leak_into_the_next_turn(gate
     h.session.submit("two")
     h.wait_for(Event.TURN_FINISHED, min_count=2)
     assert [r["model"] for r in gateway.requests] == ["test/model", "test/model"]
+
+
+def test_a_long_turn_escalates_even_without_a_stall(gateway, harness, monkeypatch):
+    from meshharness.session import Session
+    monkeypatch.setattr(Session, "_LONG_TURN_HOP", 4)
+    for i in range(3):
+        gateway.script(sse_turn(tool_calls=[{"id": f"c{i}", "name": "run_bash",
+                                             "arguments": json.dumps({"command": f"echo {i}"})}]))
+    gateway.script(sse_turn("finished"))
+    h = _local_first(harness, mode=Mode.AUTO)
+    h.session.submit("keep going")
+    h.wait_for(Event.TURN_FINISHED)
+    assert [r["model"] for r in gateway.requests] == ["test/model"] * 3 + [SONNET]
+    assert "3 steps without finishing" in h.of(Event.POLICY_CHANGED)[0]["data"]["reason"]
