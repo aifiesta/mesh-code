@@ -154,6 +154,12 @@ class Engine:
                     self.usage["tokens"] = int(self.usage.get("tokens", 0)) + int(d.get("tokens") or 0)
                     self.usage["turns"] = int(self.usage.get("turns", 0)) + 1
                     self.usage.setdefault("since", time.time())
+                    # This month's spend, for monthly_budget steering.
+                    self.usage["month"] = {
+                        "key": config_mod.month_key(),
+                        "cost": round(config_mod.month_cost(self.usage)
+                                      + float(d.get("cost") or 0), 8),
+                    }
                     config_mod.save_usage(self.usage)
                 except (TypeError, ValueError):
                     pass
@@ -344,6 +350,7 @@ class Engine:
                 "tokens": int(self.usage.get("tokens", 0)),
                 "turns": int(self.usage.get("turns", 0)),
                 "since": self.usage.get("since"),
+                "month_cost": round(config_mod.month_cost(self.usage), 6),
             },
             "account_url": "https://app.meshapi.ai",
         }

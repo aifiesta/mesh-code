@@ -15,6 +15,7 @@ import json
 import os
 import stat
 import sys
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -76,7 +77,9 @@ DEFAULT_CONFIG = {
     "reasoning_effort": None,   # high|medium|low|none, or None = not sent
     # Mesh Optimize dial (BETA). 0 = off. 0 to 0.95: how aggressively to
     # cut token spend. See /optimize in the REPL and README for details.
-    "optimize": 0.0,
+    # 0.1 = prompt-cache markers only; pruning starts at 0.2 and rewrites
+    # cached history, so it is left off by default.
+    "optimize": 0.1,
     # Agentic loop controls. max_hops 0 = unlimited (stall detection still
     # stops runaway loops); auto_compact keeps long turns under the model's
     # context limit; stall_policy "pause" ends the turn at the prompt after
@@ -88,7 +91,7 @@ DEFAULT_CONFIG = {
     # Smart routing (local table-driven picker). route_mode: "off" (pin),
     # "auto" (gateway picks — mirrors auto_route), "smart" (local pick).
     # Weights steer smart picks along each cohort's efficiency frontier.
-    "route_mode": "off",
+    "route_mode": "smart",
     "route_weights": {"cost": 0.5, "cap": 0.3, "speed": 0.2},
     # Effort: "auto" detects prompt difficulty (low/mid/high) and tilts the
     # weights; low|medium|high|xhigh|max forces the tilt for every prompt.
@@ -100,6 +103,12 @@ DEFAULT_CONFIG = {
     # Models observed rejecting reasoning_effort (with tools) — skipped
     # without a doomed retry in future sessions. Evidence-based cache.
     "reasoning_rejected_models": [],
+    # Monthly spend (USD) this app steers under: past 70% it routes to
+    # cheaper models. Steering only — the gateway enforces the real limit.
+    # 0 = off.
+    "monthly_budget": 10,
+    # Which one-time default migrations this config has had (load_config).
+    "defaults_rev": 1,
 }
 
 _DIR_MODE = stat.S_IRWXU                       # 0700
@@ -249,6 +258,20 @@ def load_config() -> dict:
     # replaced by auto_route in 0.5.0 — drop the stale key from old configs
     # (it disappears from disk on the next save_config).
     cfg.pop("route", None)
+    # defaults_rev 1: caching and smart routing became the defaults. Every
+    # install saved the old defaults to disk, so flip them once and persist
+    # the rev — a user who switches back afterwards keeps their choice.
+    # `loaded` is {} when config.json is unreadable: never overwrite that file.
+    if loaded and int(loaded.get("defaults_rev") or 0) < 1:
+        if not cfg.get("optimize"):
+            cfg["optimize"] = DEFAULT_CONFIG["optimize"]
+        if cfg.get("route_mode") == "off":
+            cfg["route_mode"] = DEFAULT_CONFIG["route_mode"]
+        cfg["defaults_rev"] = 1
+        try:
+            save_config(cfg)
+        except OSError:
+            pass  # retried next launch; never block startup
     # Resolution order: env > credentials file > legacy hand-edited
     # config.json. MESH_API_KEY kept as fallback for one release.
     file_key = (cfg.get("api_key") or "").strip()
@@ -448,6 +471,22 @@ def save_usage(data: dict) -> None:
         secure_file(USAGE_FILE)
     except (OSError, TypeError):
         pass
+
+
+def month_key() -> str:
+    """Local calendar month, e.g. "2026-11" — the monthly budget's window."""
+    return time.strftime("%Y-%m")
+
+
+def month_cost(usage: dict) -> float:
+    """This month's spend from a usage tally; 0 once the month has rolled."""
+    month = usage.get("month") if isinstance(usage, dict) else None
+    if not isinstance(month, dict) or month.get("key") != month_key():
+        return 0.0
+    try:
+        return float(month.get("cost") or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def load_update_check() -> dict:

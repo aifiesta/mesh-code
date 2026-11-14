@@ -5,7 +5,7 @@ from typing import Iterable, Optional
 
 import httpx
 
-from .optimize import prepare
+from .optimize import _est_tokens, prepare
 
 
 def _is_complete_json(s: str) -> bool:
@@ -208,7 +208,8 @@ def stream_chat(
         # Pass the model string actually being sent ("auto" falls back to
         # optimize's default cache-minimum heuristic — harmless).
         opt_messages, extra, plan = prepare(
-            messages, payload["model"], dial, has_tools=bool(tools)
+            messages, payload["model"], dial, has_tools=bool(tools),
+            tools_tokens=_est_tokens(tools),
         )
         if plan.get("levers_applied"):
             optimized = {**payload, **extra, "messages": opt_messages}

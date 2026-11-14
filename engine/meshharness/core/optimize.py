@@ -117,7 +117,8 @@ def _has_client_breakpoints(messages: list) -> bool:
     return any("cache_control" in m for m in messages)
 
 
-def prepare(messages: list, model: str, dial: float, has_tools: bool) -> tuple:
+def prepare(messages: list, model: str, dial: float, has_tools: bool,
+            tools_tokens: int = 0) -> tuple:
     """Apply the lever stack for the given dial. BETA.
 
     Returns (optimized_messages, extra_payload, plan). The input list is
@@ -174,7 +175,9 @@ def prepare(messages: list, model: str, dial: float, has_tools: bool) -> tuple:
         minimum = _cache_minimum(model)
         applied = False
         if out and out[0].get("role") == "system":
-            first_tokens = _est_tokens(out[0].get("content"))
+            # Tool definitions sit before the system message in the cached
+            # prefix, so they count toward the provider's minimum.
+            first_tokens = tools_tokens + _est_tokens(out[0].get("content"))
             if first_tokens >= minimum:
                 out[0]["cache_control"] = {"type": "ephemeral"}
                 plan["audit"].append({
@@ -183,7 +186,7 @@ def prepare(messages: list, model: str, dial: float, has_tools: bool) -> tuple:
                 })
                 applied = True
         if len(out) >= 3:
-            prefix_tokens = sum(_msg_tokens(m) for m in out[:-1])
+            prefix_tokens = tools_tokens + sum(_msg_tokens(m) for m in out[:-1])
             anchor = out[-2]
             if prefix_tokens >= minimum and "cache_control" not in anchor:
                 anchor["cache_control"] = {"type": "ephemeral"}
