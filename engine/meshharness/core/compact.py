@@ -33,6 +33,7 @@ import json
 import math
 
 COMPACT_THRESHOLD = 0.70          # compact when est tokens exceed 70% of the limit
+COMPACT_BUDGET_TOKENS = 80_000    # every hop re-sends history: a 1M window must not mean 700k billed per hop
 KEEP_RECENT_MESSAGES = 8          # working window the compactor never touches
 KEEP_RECENT_AGGRESSIVE = 4        # window when recovering from a context error
 TRUNCATE_TO_CHARS = 400           # what survives of a truncated tool result

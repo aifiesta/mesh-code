@@ -1229,6 +1229,7 @@ class Session:
         model = self._effective_model()
         limit = (self.state.get("_hop_ctx") if is_local(model) and self.state.get("_hop_ctx")
                  else compact.context_limit(model, self.catalog))
+        limit = min(limit, compact.COMPACT_BUDGET_TOKENS)
         if compact.should_compact(self.state["messages"], limit):
             # Pass the limit so the FOLD phase is reachable. Without it,
             # compact_history only truncates; the second call finds nothing

@@ -436,9 +436,8 @@ TOOLS = [
 OUTPUT_LIMIT = 8000
 # read_file cap: an uncapped read (a 2 MB bundle, a log file) lands whole in
 # history INSIDE the compactor's keep-recent window, where nothing can trim
-# it — one such read makes a context-length error unrecoverable. 80k chars
-# (~20k tokens) is plenty for any file a model should read in one piece.
-READ_LIMIT = 80_000
+# it. 24k chars (~6k tokens) keeps one read from inflating every later hop.
+READ_LIMIT = 24_000
 MAX_BASH_TIMEOUT = 600  # model-requested run_bash timeout ceiling (seconds)
 PLAN_TOOLS = ("create_plan", "update_step")  # meta — auto-approved, no side effects
 # Asking the user a question has no side effects and is answered by the user

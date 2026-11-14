@@ -665,3 +665,15 @@ def test_gateway_auto_routing_sends_auto_the_exclusions_and_the_profile(gateway,
     sent = gateway.requests[-1]
     assert sent["model"] == "auto" and sent["exclude_models"] == ["bad/model"]
     assert sent["weight_profile"] == "cost_first"
+
+
+def test_a_huge_context_window_still_compacts_at_the_token_budget(harness):
+    from meshharness.core import compact
+    h = harness(auto_compact=True)
+    s = h.session
+    s.catalog = [{"id": "test/model", "context_length": 1_000_000}]
+    s.state["messages"] = [{"role": "user", "content": "x" * 400_000}]   # ~100k tokens
+    limits = []
+    s._compact_now = lambda why, limit=None: limits.append(limit)
+    s._maybe_compact()
+    assert limits == [compact.COMPACT_BUDGET_TOKENS]
