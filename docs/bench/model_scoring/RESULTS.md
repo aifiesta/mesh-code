@@ -219,3 +219,54 @@ a user-fixed thinking level under Smart routing. All three are unit-tested.
 
 Status: committed on `claude/model-scoring-763885`, **not merged** into
 `token-optimisation` until the cost on hard-labelled prompts is decided.
+
+---
+
+# Five task levels and small-task pricing (18 November 2026)
+
+Coding prompts are now sorted by the shape of the request onto five levels
+(Lookup, Small change, Standard task, Complex task, Deep work). Wording never
+assigns the top two. The two lowest levels are priced as a small task at the
+gateway's live token prices; the rest keep the benchmark cost per task.
+
+- Three recorded runs in the real app on the new engine, **$0.06 billed**
+  (ceiling was $0.50). The old-engine runs from the section above are reused,
+  not re-run. 222 unit tests pass, including the 26 agreed sample prompts.
+- Evidence: `~/Desktop/mesh-code-model-scoring/5-task-levels-in-app/`.
+  Run it again with `run_levels.sh`.
+
+| Prompt | Old engine | First version of the new pick | Now |
+|---|---|---|---|
+| Explain price.py, change nothing | Seed 1.6 Flash, $0.0008, 6 s | DeepSeek V4.1 Flash 1017 at max, $0.0008, 6 s | **Lookup**: DeepSeek V4.1 Flash 1017 at max, $0.0008, 8 s |
+| Tests fail, fix price.py, run tests | Seed 1.6 Flash, $0.0014, 16 s | DeepSeek V4.1 Flash 1017 at max, $0.0014, 30 s | **Small change**: DeepSeek V4.1 Flash 1017 at max, $0.0015, 22 s |
+| Refactor for production, edge cases, add tests, run suite | DeepSeek V4 Flash, $0.0027, 39 s, 6 tests | GPT-6.1 Sol at extra high, $0.1334, 205 s, 47 tests | **Standard task**: GPT-6.1 Sol at medium, $0.0580, 83 s, 23 tests |
+
+All nine runs did what was asked. The app showed the level and the rule behind
+it, for example "Routed to gpt-6.1-sol at medium thinking — Standard task (6
+kinds of action)".
+
+What this shows:
+
+- **The levels and the guard work.** The prompt full of hard-sounding words
+  starts as a Standard task, not at the top. Its cost fell from $0.133 to
+  $0.058 and its time from 205 s to 83 s.
+- **Small changes stay on the cheap model.** Without the small-task pricing,
+  level 2 would have gone to GPT-6.1 Sol.
+- **A Standard task still costs about 20 times the old pick on this project**
+  ($0.058 against $0.0027), for a result the old pick also reached. At this
+  level the scores rate the cheap and the mid model about equal (53% and 52%);
+  the mid model wins on the benchmark's wait time, and the benchmark cost hides
+  the token price gap, exactly as it did for small changes.
+
+Simulated, not built: pricing a Standard task by the token as well (about
+100,000 tokens in, 3,000 out, from the three recorded runs at this level).
+The pick then depends on how long such a task is assumed to take: DeepSeek V4.1
+Flash 1017 or Claude Haiku 5.5 at max when it is short, GPT-6.1 Terra at high
+when it is a third of a benchmark task. A step-up from there goes to GPT-6.1
+Sol at extra high either way.
+
+Not covered live: step-up, sticking with the serving model, a forced level.
+Unit-tested only.
+
+Status: committed on `claude/model-scoring-763885`, not merged into
+`token-optimisation`.
