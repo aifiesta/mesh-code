@@ -193,6 +193,89 @@ def estimate_difficulty(text: str) -> str:
     return "high" if score >= 3 else "mid"
 
 
+# ---------------------------------------------------------------------------
+# Task level — how much work a coding prompt is asking for
+# ---------------------------------------------------------------------------
+# Software work does not fit "easy / medium / hard", and the words in a prompt
+# say little about how hard it is ("refactor for production" can be a ten-line
+# change). So coding prompts are sorted by the SHAPE of the request — is
+# anything to be changed, how many kinds of action, how many files, how much
+# of the project — onto the five rungs of the ladder:
+#
+#     low    Lookup          explain or answer, nothing changed
+#     mid    Small change    one or two actions in one or two files
+#     high   Standard task   several actions or files, or the whole project
+#     xhigh  Complex task    only by step-up, or the user's own choice
+#     max    Deep work       only by step-up, or the user's own choice
+#
+# Wording never assigns the top two. A wrong guess must stay cheap: the
+# cascade climbs when the model visibly struggles, which is evidence, and a
+# prompt's vocabulary is not.
+
+LEVEL_NAMES = {"low": "Lookup", "mid": "Small change", "high": "Standard task",
+               "xhigh": "Complex task", "max": "Deep work"}
+
+_NO_CHANGE_RE = re.compile(
+    r"\b(?:do not|don'?t|without)\s+(?:chang|modif|edit|touch|alter)\w*\b"
+    r"|\bread[- ]only\b|\bno (?:changes|edits)\b", re.I)
+_QUESTION_RE = re.compile(
+    r"^(?:what|why|how|where|which|who|when|is|are|does|do|did|explain|describe|"
+    r"show|list|summari[sz]e|tell me|walk me through|in \w+ sentences?)\b", re.I)
+_PLEASE_DO_RE = re.compile(r"^(?:(?:can|could|would|will) you|please)\b", re.I)
+# Kinds of action. Each kind counts once however often it appears.
+_ACTION_KINDS = [re.compile(r"\b%s\b" % v, re.I) for v in (
+    "fix", "add", "write", "create", "implement", "update", "change", "remove",
+    "delete", "rename", "refactor", "migrate", "build", "install", "run",
+    "handle", "move", "replace", "convert", "upgrade", "rewrite", "test",
+    "deploy", "optimi[sz]e", "extract", "split", "merge", "generate",
+    "set up", "configure", "document", "clean up", "support", "make")]
+_FILE_RE = re.compile(
+    r"(?<![\w/])@?[\w./-]*\w\.(?:py|js|jsx|ts|tsx|json|md|css|scss|html|yml|yaml|"
+    r"toml|go|rs|java|kt|swift|rb|php|c|cc|cpp|h|sh|sql|txt|cfg|ini|lock)\b", re.I)
+_WIDE_RE = re.compile(
+    r"\b(?:all|every|each|entire|whole)\s+(?:the\s+)?(?:\w+\s+)?(?:files?|modules?|"
+    r"projects?|codebase|repo(?:sitory)?|tests?|endpoints?|components?|services?|"
+    r"pages?)\b|\b(?:everywhere|throughout|across the|project[- ]wide|"
+    r"codebase[- ]wide)\b", re.I)
+_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s+\S", re.M)
+# Open-ended work: nothing to count, but never a small change.
+_OPEN_ENDED_RE = re.compile(
+    r"\b(?:design|architect\w*|plan(?: out)?|investigate|debug|figure out|"
+    r"track down|root cause|intermittent\w*|sometimes|flaky|race condition|"
+    r"deadlock|memory leak)\b", re.I)
+
+
+def task_level(text: str) -> tuple:
+    """(rung, why) for a coding prompt: "low" | "mid" | "high", and the rule
+    that decided it in words a user can read. Deterministic, no I/O."""
+    raw = text or ""
+    t = " ".join(raw.split())
+    if _NO_CHANGE_RE.search(t):
+        return "low", "it says not to change anything"
+    asks = bool(_PLEASE_DO_RE.match(t))
+    if not asks and (_QUESTION_RE.match(t) or t.endswith("?")):
+        return "low", "it is a question, nothing to change"
+    kinds = sum(1 for r in _ACTION_KINDS if r.search(t))
+    files = len({m.group(0).lstrip("@").lower() for m in _FILE_RE.finditer(t)})
+    items = len(_LIST_ITEM_RE.findall(raw))
+    why = []
+    if kinds >= 3:
+        why.append(f"{kinds} kinds of action")
+    if items >= 3:
+        why.append(f"{items} listed items")
+    if files >= 3:
+        why.append(f"{files} files named")
+    if _WIDE_RE.search(t):
+        why.append("it covers the whole project")
+    if len(t) > 600 or "```" in raw or "Traceback" in raw:
+        why.append("a long prompt or pasted code")
+    if _OPEN_ENDED_RE.search(t):
+        why.append("design work or an unknown cause")
+    if why:
+        return "high", ", ".join(why)
+    return "mid", "one or two actions in one or two files"
+
+
 def difficulty_adjust(weights: "dict | None", difficulty: str) -> dict:
     """Tilt the user's weights by predicted difficulty, then renormalize.
 
@@ -398,7 +481,21 @@ SCORED_COHORTS = ("agentic", "coding")
 TIME_VALUE = 0.05        # dollars per minute of waiting, at the default speed weight
 SCORED_FLOOR = 0.6       # never pick under 60% of the best chance available
 STICKY_MARGIN = 0.10     # keep the serving model while it is within 10% of the best
+# How much of each rung is everyday work; the rest is judged on the hard score.
+EVERYDAY_SHARE = {"low": 1.0, "mid": 0.75, "high": 0.5, "xhigh": 0.0}
+# The file's cost and minutes come from long benchmark tasks, where thinking
+# dominates. A lookup or a small change is mostly the prompt and the files
+# read, so its cost follows the token price instead — one model can be twenty
+# times cheaper there while costing the same on a benchmark task. The two
+# lowest rungs are therefore priced as a typical small task at the gateway's
+# live prices. These three figures are ours, read off the app's own recorded
+# runs (docs/bench/model_scoring/RESULTS.md); the scores stay third-party.
+SMALL_RUNGS = ("low", "mid")
+SMALL_TASK_INPUT = 40_000     # tokens sent over the whole task
+SMALL_TASK_OUTPUT = 1_500     # tokens written at a model's cheapest level
+SMALL_TIME_SHARE = 1 / 15     # of the benchmark task's minutes
 _LEVEL_ORDER = ("default", "none", "low", "medium", "high", "xhigh", "max")
+_TABLE_RUNG = {"low": "low", "mid": "low", "high": "mid", "xhigh": "high", "max": "max"}
 
 
 def _band(difficulty: str) -> str:
@@ -407,17 +504,13 @@ def _band(difficulty: str) -> str:
 
 
 def _chance(e: dict, band: str, cautious: bool = True) -> float:
-    """Chance (0-1) this entry finishes a task of this difficulty. Easy work
-    is judged on the everyday score, hard work on the hard score, the middle
-    on both."""
+    """Chance (0-1) this entry finishes a task on this rung: a blend of the
+    everyday score and the hard score, more of the hard one the higher the
+    rung."""
     def part(k):
         return (e[k]["score"] - (e[k]["margin"] if cautious else 0)) / 100.0
-    if band == "low":
-        s = part("everyday")
-    elif band == "mid":
-        s = (part("everyday") + part("hard")) / 2
-    else:
-        s = part("hard")
+    share = EVERYDAY_SHARE.get(band, 0.0)       # "max" is judged on hard work
+    s = share * part("everyday") + (1.0 - share) * part("hard")
     return max(0.0, min(1.0, s))
 
 
@@ -431,8 +524,7 @@ def _slider_scale(weights: "dict | None") -> dict:
 def _expected(e: dict, band: str, k: dict, rescue: float) -> dict:
     attempt = k["cost"] * e["cost_per_task"]
     wait = k["speed"] * TIME_VALUE * e["minutes_per_task"]
-    # one rung past "high" leans harder on capability before "max" decides alone
-    risk = k["cap"] * (2.0 if band == "xhigh" else 1.0) * (1.0 - _chance(e, band)) * rescue
+    risk = k["cap"] * (1.0 - _chance(e, band)) * rescue
     return {"total": attempt + wait + risk, "attempt": attempt, "wait": wait, "risk": risk}
 
 
@@ -457,6 +549,13 @@ def _live_entries(doc, catalog, exclude, needs_tools, needs_ctx, level) -> list:
         if then and now:
             e["cost_per_task"] *= max(0.25, min(4.0, now / then))
         out.append(e)
+    # each entry's cost against its model's cheapest level: how much more it
+    # writes, which is what a higher thinking level costs on a small task
+    floor: dict = {}
+    for e in out:
+        floor[e["model"]] = min(floor.get(e["model"], e["cost_per_task"]), e["cost_per_task"])
+    for e in out:
+        e["writes"] = e["cost_per_task"] / floor[e["model"]]
     if level:
         # The user fixed the thinking level: each model is judged by its entry
         # at that level, or the nearest level it was tested at, and the user's
@@ -468,6 +567,23 @@ def _live_entries(doc, catalog, exclude, needs_tools, needs_ctx, level) -> list:
             if e["model"] not in best or d < best[e["model"]][0]:
                 best[e["model"]] = (d, e)
         out = [dict(e, effort=level, level=level) for _, e in best.values()]
+    return out
+
+
+def _as_small_tasks(ents: list, catalog) -> "list | None":
+    """The same entries priced for a small task at the gateway's live prices,
+    or None when any price is unknown (the caller keeps the benchmark figures
+    for all of them — never a mix of the two scales)."""
+    from .pricing import estimate_cost
+    out = []
+    for e in ents:
+        cost = estimate_cost(e["model"], {
+            "prompt_tokens": SMALL_TASK_INPUT,
+            "completion_tokens": int(SMALL_TASK_OUTPUT * e.get("writes", 1.0))}, catalog)
+        if not cost or cost <= 0:
+            return None
+        out.append(dict(e, cost_per_task=cost,
+                        minutes_per_task=e["minutes_per_task"] * SMALL_TIME_SHARE))
     return out
 
 
@@ -497,8 +613,13 @@ def pick_scored(difficulty: str, weights: "dict | None", doc: "dict | None",
         ents = _live_entries(doc, catalog, exclude, needs_tools, needs_ctx, level)
         if not ents:
             return None
+        scale = "benchmark task"
+        if band in SMALL_RUNGS:
+            small = _as_small_tasks(ents, catalog)
+            if small:
+                ents, scale = small, "small task"
         k = _slider_scale(weights)
-        strongest = max(ents, key=lambda e: (_chance(e, "high"), -e["cost_per_task"]))
+        strongest = max(ents, key=lambda e: (_chance(e, "max"), -e["cost_per_task"]))
         rescue = strongest["cost_per_task"] + TIME_VALUE * strongest["minutes_per_task"]
 
         cands = ents
@@ -514,9 +635,9 @@ def pick_scored(difficulty: str, weights: "dict | None", doc: "dict | None",
                 return None
 
         if band == "max":
-            ranked = sorted(cands, key=lambda e: (-_chance(e, "high"), e["cost_per_task"]))
+            ranked = sorted(cands, key=lambda e: (-_chance(e, "max"), e["cost_per_task"]))
             chosen, sticky = ranked[0], False
-            costs = {id(e): _expected(e, "high", k, rescue) for e in ranked}
+            costs = {id(e): _expected(e, "max", k, rescue) for e in ranked}
         else:
             best = max(_chance(e, band) for e in cands)
             able = [e for e in cands if _chance(e, band) >= SCORED_FLOOR * best] or cands
@@ -536,14 +657,15 @@ def pick_scored(difficulty: str, weights: "dict | None", doc: "dict | None",
         def view(e):
             c = costs[id(e)]
             return {"model": e["model"], "level": e["level"],
-                    "chance": round(_chance(e, "high" if band == "max" else band) * 100),
-                    "cost": round(e["cost_per_task"], 2),
+                    "chance": round(_chance(e, band) * 100),
+                    "cost": round(e["cost_per_task"], 4),
                     "minutes": round(e["minutes_per_task"], 1),
-                    "expected": round(c["total"], 2)}
+                    "expected": round(c["total"], 4)}
         top = [chosen] + [e for e in ranked if e is not chosen]
         return {"model": chosen["model"], "level": chosen["level"],
                 "effort": chosen["effort"], "scored": True, "sticky": sticky,
-                "cohort": "agentic", "ranked": [view(e) for e in top[:5]]}
+                "cohort": "agentic", "priced_as": scale,
+                "ranked": [view(e) for e in top[:5]]}
     except Exception:
         return None  # fail open, always
 
@@ -569,6 +691,10 @@ def choose(cohort: str, difficulty: str, weights: "dict | None",
         if got:
             got["cohort"] = cohort
             return got
+        # No scored model on this account: the table serves the turn. Its
+        # weights were tuned for easy / medium / hard, so the five task rungs
+        # are mapped back onto those.
+        difficulty = _TABLE_RUNG.get(_band(difficulty), difficulty)
     return pick(cohort, effective_weights(weights, difficulty), table, catalog,
                 needs_tools=needs_tools, needs_ctx=needs_ctx, incumbent=incumbent,
                 exclude=exclude, incumbent_bonus=incumbent_bonus)

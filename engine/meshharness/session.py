@@ -1051,15 +1051,21 @@ class Session:
                 self.state.get("_smart_cohort") and not had_image
                 and (router.is_continuation(text)
                      or (conf <= 0.5 and len(text.strip()) < 25)))
-            forced = self.cfg.get("route_effort", "auto")
-            if forced != "auto":
-                difficulty = forced
-            elif inherit:
-                difficulty = self.state.get("_smart_difficulty") or "mid"
-            else:
-                difficulty = router.estimate_difficulty(text)
             if inherit:
                 cohort = self.state["_smart_cohort"]
+            forced = self.cfg.get("route_effort", "auto")
+            why = None
+            if forced != "auto":
+                difficulty, why = forced, "you set it in Settings"
+            elif inherit:
+                difficulty = self.state.get("_smart_difficulty") or "mid"
+                why = "a follow-up to the task before it"
+            elif cohort in router.SCORED_COHORTS:
+                # Coding work is sorted by the shape of the request, and
+                # wording never assigns the top two rungs.
+                difficulty, why = router.task_level(text)
+            else:
+                difficulty = router.estimate_difficulty(text)
             self.state["_smart_cohort"] = cohort
             self.state["_smart_base_difficulty"] = difficulty   # de-escalation floor
             exclude = set(self.cfg.get("exclude_models") or []) | set(self.state.get("_smart_bad") or set())
@@ -1074,6 +1080,7 @@ class Session:
                 self.emit(Event.ROUTED, model=got["model"], cohort=cohort,
                           confidence=conf, difficulty=difficulty,
                           thinking=got.get("level"),
+                          task=_task_name(got, difficulty), why=why,
                           ranked=(got.get("ranked") or [])[:5])
         except Exception:
             self.state["_smart_pick"] = None  # never let routing break a turn
@@ -1116,7 +1123,7 @@ class Session:
             if self._serving() != prev:
                 self.emit(Event.ROUTED, model=got["model"], cohort=cohort,
                           difficulty=nxt, escalated=True, reason=reason,
-                          thinking=got.get("level"),
+                          thinking=got.get("level"), task=_task_name(got, nxt),
                           ranked=(got.get("ranked") or [])[:5])
                 self.emit(Event.NOTICE, level="info",
                           message=f"escalating ({reason}) → {_pick_label(got)}")
@@ -1160,6 +1167,7 @@ class Session:
             if self._serving() != prev:
                 self.emit(Event.ROUTED, model=got["model"], cohort=cohort,
                           difficulty=nxt, settled=True, thinking=got.get("level"),
+                          task=_task_name(got, nxt),
                           ranked=(got.get("ranked") or [])[:5])
                 self.emit(Event.NOTICE, level="info",
                           message=f"settling → {_pick_label(got)}")
@@ -1198,7 +1206,11 @@ class Session:
             # when the catalog has not arrived and no pick is possible yet.
             cohort, confidence = router.classify(text or "", has_tools=True)
             level = self.cfg.get("route_effort", "auto")
-            difficulty = router.estimate_difficulty(text or "")
+            why = None
+            if cohort in router.SCORED_COHORTS:
+                difficulty, why = router.task_level(text or "")
+            else:
+                difficulty = router.estimate_difficulty(text or "")
             weights = router.effective_weights(
                 self.cfg.get("route_weights"),
                 difficulty if level == "auto" else level)
@@ -1219,6 +1231,8 @@ class Session:
                 "available": bool(got),
                 "pick": (got or {}).get("model"),
                 "thinking": (got or {}).get("level"),
+                "task": _task_name(got or {}, difficulty if level == "auto" else level),
+                "why": why if level == "auto" else "you set it in Settings",
                 "ranked": ((got or {}).get("ranked") or [])[:8],
             })
             if not got:
@@ -2000,6 +2014,14 @@ def mode_from_str_safe(v) -> Mode:
         return from_str(str(v or "default"))
     except Exception:
         return Mode.DEFAULT
+
+
+def _task_name(got: dict, rung: str) -> "str | None":
+    """The task level as the user reads it — only for picks made from the
+    per-level scores, where the five rungs carry these names."""
+    if not got.get("scored"):
+        return None
+    return router.LEVEL_NAMES.get(router._band(rung))
 
 
 def _pick_label(got: dict) -> str:

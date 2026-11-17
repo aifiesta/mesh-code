@@ -529,10 +529,13 @@ export function reduce(state: AppState, action: Action): AppState {
             ? `Compacted history (${d.before_tok}→${d.after_tok} tokens) — ${d.reason}`
             : ev.type === Ev.ROUTED
               ? (d.escalated
-                  ? `Escalated to ${picked} — ${d.reason ?? 'the model was struggling'}`
+                  ? `Stepped up to ${picked}${d.task ? ` (${d.task})` : ''} — ${d.reason ?? 'the model was struggling'}`
                   : d.settled
-                    ? `Settled back to ${picked} after clean progress`
-                    : `Routed to ${picked} (${d.cohort}${d.difficulty && d.difficulty !== 'mid' ? ` · ${d.difficulty}` : ''})`)
+                    ? `Settled back to ${picked}${d.task ? ` (${d.task})` : ''} after clean progress`
+                    // a scored pick names the task level and the rule that set it
+                    : d.task
+                      ? `Routed to ${picked} — ${d.task}${d.why ? ` (${d.why})` : ''}`
+                      : `Routed to ${picked} (${d.cohort}${d.difficulty && d.difficulty !== 'mid' ? ` · ${d.difficulty}` : ''})`)
               : d.message
         return {
           ...s,

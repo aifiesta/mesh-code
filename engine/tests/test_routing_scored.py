@@ -48,15 +48,17 @@ def _id(got):
 
 # ---- the pick -------------------------------------------------------------------
 
-def test_easy_work_goes_cheap_and_harder_work_goes_to_the_middle_model():
-    assert _id(_pick("low")) == ("t/cheap", "high")
-    assert _id(_pick("mid")) == ("t/mid", "medium")
-    assert _pick("high")["model"] == "t/mid", \
+def test_each_rung_of_the_ladder_gets_the_entry_that_is_cheapest_to_finish_with():
+    assert _id(_pick("low")) == ("t/cheap", "high")          # Lookup
+    assert _id(_pick("mid")) == ("t/cheap", "high")          # Small change
+    assert _id(_pick("high")) == ("t/mid", "medium")         # Standard task
+    assert _pick("xhigh")["model"] == "t/mid", \
         "trying the mid model first beats paying for the strong one up front"
+    assert _id(_pick("max")) == ("t/strong", "max")          # Deep work
 
 
 def test_expected_cost_is_attempt_plus_wait_plus_failure_risk():
-    top = _pick("high")["ranked"][0]
+    top = _pick("xhigh")["ranked"][0]                        # judged on the hard score alone
     e = DOC["models"][top["model"]]["levels"][top["level"]]
     strongest = DOC["models"]["t/strong"]["levels"]["max"]
     rescue = strongest["cost_per_task"] + 0.05 * strongest["minutes_per_task"]
@@ -69,7 +71,7 @@ def test_expected_cost_is_attempt_plus_wait_plus_failure_risk():
 def test_a_model_that_cannot_do_hard_work_is_not_offered_it_however_cheap():
     free = copy.deepcopy(DOC)
     free["models"]["t/cheap"]["levels"]["high"]["cost_per_task"] = 0.0001
-    got = _pick("high", doc=free, weights={"cost": 0.98, "cap": 0.01, "speed": 0.01})
+    got = _pick("xhigh", doc=free, weights={"cost": 0.98, "cap": 0.01, "speed": 0.01})
     assert got["model"] != "t/cheap"
     assert all(r["model"] != "t/cheap" for r in got["ranked"])
 
@@ -93,15 +95,15 @@ def test_the_three_sliders_each_move_the_pick_their_own_way():
 
 def test_after_a_failure_only_something_clearly_stronger_is_picked():
     # mid@medium has a full hard score of 41: mid@max (48-5=43) clears it, cheap never does
-    got = _pick("high", failed=("t/mid", "medium"))
+    got = _pick("xhigh", failed=("t/mid", "medium"))
     assert _id(got) == ("t/mid", "max")
     assert all((r["model"], r["level"]) != ("t/mid", "medium") for r in got["ranked"])
     # strong@high (52-5=47) clears mid@max's 48? No: only strong@max (55) does
-    assert _id(_pick("high", failed=("t/mid", "max"))) == ("t/strong", "max")
+    assert _id(_pick("xhigh", failed=("t/mid", "max"))) == ("t/strong", "max")
 
 
 def test_when_nothing_is_clearly_stronger_the_strongest_left_is_used():
-    got = _pick("high", failed=("t/strong", "max"))
+    got = _pick("xhigh", failed=("t/strong", "max"))
     assert _id(got) == ("t/strong", "high")
 
 
@@ -115,13 +117,13 @@ def test_the_serving_model_keeps_the_turn_while_it_is_close_to_the_best():
     near = copy.deepcopy(DOC)
     near["models"]["t/other"] = {"name": "Other", "levels": {"medium": _e(82, 41, 0.75, 4)}}
     cat = _cat() + [{"id": "t/other", "context_length": 200000}]
-    assert _pick("mid", doc=near, catalog=cat)["model"] == "t/mid"
-    kept = _pick("mid", doc=near, catalog=cat, incumbent="t/other")
+    assert _pick("high", doc=near, catalog=cat)["model"] == "t/mid"
+    kept = _pick("high", doc=near, catalog=cat, incumbent="t/other")
     assert kept["model"] == "t/other" and kept["sticky"] is True
 
 
 def test_it_does_not_keep_the_turn_when_it_is_clearly_worse():
-    got = _pick("mid", incumbent="t/strong")
+    got = _pick("high", incumbent="t/strong")
     assert got["model"] == "t/mid" and got["sticky"] is False
 
 
@@ -129,28 +131,29 @@ def test_more_cached_context_widens_how_close_counts():
     far = copy.deepcopy(DOC)
     far["models"]["t/other"] = {"name": "Other", "levels": {"medium": _e(82, 41, 2.6, 4)}}
     cat = _cat() + [{"id": "t/other", "context_length": 200000}]
-    assert _pick("mid", doc=far, catalog=cat, incumbent="t/other")["model"] == "t/mid"
-    assert _pick("mid", doc=far, catalog=cat, incumbent="t/other",
+    assert _pick("high", doc=far, catalog=cat, incumbent="t/other")["model"] == "t/mid"
+    assert _pick("high", doc=far, catalog=cat, incumbent="t/other",
                  incumbent_bonus=12.0)["model"] == "t/other"
 
 
 # ---- what is available ----------------------------------------------------------------
 
 def test_only_models_the_gateway_offers_and_that_fit_the_job_are_considered():
-    assert _pick("mid", catalog=_cat("t/cheap", "t/strong"))["model"] != "t/mid"
-    assert _pick("mid", exclude={"t/mid"})["model"] != "t/mid"
+    assert _pick("high")["model"] == "t/mid"
+    assert _pick("high", catalog=_cat("t/cheap", "t/strong"))["model"] != "t/mid"
+    assert _pick("high", exclude={"t/mid"})["model"] != "t/mid"
     small = _cat("t/cheap", "t/strong") + [{"id": "t/mid", "context_length": 8000}]
-    assert _pick("mid", catalog=small, needs_ctx=50000)["model"] != "t/mid"
+    assert _pick("high", catalog=small, needs_ctx=50000)["model"] != "t/mid"
     no_tools = _cat("t/cheap", "t/strong") + [{"id": "t/mid", "supports_tools": False}]
-    assert _pick("mid", catalog=no_tools, needs_tools=True)["model"] != "t/mid"
-    assert _pick("mid", catalog=_cat("not/scored")) is None
+    assert _pick("high", catalog=no_tools, needs_tools=True)["model"] != "t/mid"
+    assert _pick("high", catalog=_cat("not/scored")) is None
 
 
 def test_a_price_change_at_the_gateway_moves_the_cost_with_it():
-    before = _pick("mid")["ranked"][0]
+    before = _pick("high")["ranked"][0]
     dear = [dict(r, pricing={"prompt_usd_per_1m": 8, "completion_usd_per_1m": 40})
             if r["id"] == "t/mid" else r for r in _cat()]            # t/mid now costs 4x
-    after = next(r for r in _pick("mid", catalog=dear)["ranked"]
+    after = next(r for r in _pick("high", catalog=dear)["ranked"]
                  if (r["model"], r["level"]) == (before["model"], before["level"]))
     assert abs(after["cost"] - 4 * before["cost"]) < 0.02
 
@@ -263,3 +266,200 @@ def test_explaining_a_route_names_the_thinking_level(harness, monkeypatch):
     h = _scored_session(harness, monkeypatch)
     out = h.session.explain_route("fix the failing test in price.py and run the tests")
     assert out["available"] and out["pick"].startswith("t/") and out["thinking"]
+
+
+# ---- the five task levels -------------------------------------------------------------
+
+# (level, prompt). The list agreed with the user on 2026-11-18; a change to the
+# rules that moves any of these should be a deliberate one.
+SAMPLES = [
+    ("low", "In two sentences, what does price.py do? Do not change any files."),
+    ("low", "what does the router do?"),
+    ("low", "how does auth work in this repo?"),
+    ("low", "why is the login test failing?"),
+    ("low", "explain how routing works in this repo"),
+    ("mid", "The tests in tests/test_price.py are failing. Find what is wrong in price.py, "
+            "fix it, and run the tests to confirm they pass."),
+    ("mid", "rename the function line_total to compute_line_total in price.py"),
+    ("mid", "fix the typo in README.md"),
+    ("mid", "add a health endpoint"),
+    ("mid", "can you fix the failing test?"),
+    ("mid", "bump the version to 0.2.5"),
+    ("mid", "add a health endpoint and run the tests"),
+    ("mid", "write unit tests for utils.py"),
+    ("mid", "make the button blue"),
+    ("mid", "optimize the slow query in reports.py"),
+    ("mid", "please review the diff and tell me if anything looks wrong"),
+    ("high", "Refactor price.py for production use: fix the failing tests, handle edge cases "
+             "such as zero or negative quantities with a clear error, add tests for them, "
+             "and run the full test suite."),
+    ("high", "update the copyright year in every file"),
+    ("high", "Add dark mode: add a theme toggle to the settings page, store the choice, "
+             "update the CSS variables and write tests"),
+    ("high", "migrate the database layer from sqlite to postgres across the whole project"),
+    ("high", "implement pagination in api/users.py, api/orders.py and api/items.py"),
+    ("high", "1. add a login page\n2. add a signup page\n3. wire both to the API\n4. write tests"),
+    ("high", "set up CI with GitHub Actions to run lint, tests and build on every push"),
+    ("high", "design a scalable architecture for a distributed job queue"),
+    ("high", "there's a race condition somewhere in the upload worker, find it and fix it"),
+    ("high", "the app crashes sometimes on startup, figure out why"),
+]
+
+
+def test_the_agreed_sample_prompts_land_on_their_levels():
+    wrong = [(want, router.task_level(text)[0], text[:50]) for want, text in SAMPLES
+             if router.task_level(text)[0] != want]
+    assert not wrong, wrong
+
+
+def test_each_rule_names_itself_in_plain_words():
+    assert router.task_level("don't modify anything, just tell me what main.py does")[1] \
+        == "it says not to change anything"
+    assert "question" in router.task_level("where is the config loaded?")[1]
+    assert "3 files named" in router.task_level("rename foo in a.py, b.py and c.py")[1]
+    assert "whole project" in router.task_level("rename foo everywhere")[1]
+    assert "pasted code" in router.task_level("fix this\n```\nx = 1\n```")[1]
+    assert "listed items" in router.task_level("- add a\n- add b\n- add c")[1]
+    assert "unknown cause" in router.task_level("debug the flaky upload")[1]
+    assert router.task_level("fix the typo")[1] == "one or two actions in one or two files"
+
+
+def test_wording_never_assigns_the_top_two_levels():
+    scary = ("Design a rigorous, production-grade, distributed, concurrent, scalable "
+             "architecture end-to-end: refactor, migrate, optimise and benchmark every "
+             "module in the entire codebase, handle all edge cases, formal proof included. " * 5)
+    assert router.task_level(scary)[0] == "high"
+    assert all(router.task_level(text)[0] in ("low", "mid", "high") for _, text in SAMPLES)
+
+
+def test_a_request_phrased_as_a_question_is_still_a_request():
+    assert router.task_level("can you rename foo to bar in utils.py?")[0] == "mid"
+    assert router.task_level("please explain and then fix the bug, add a test and run it")[0] == "high"
+
+
+def test_each_level_blends_the_two_scores_more_hard_the_higher_it_is():
+    e = {"everyday": {"score": 80, "margin": 0}, "hard": {"score": 40, "margin": 0}}
+    got = [round(router._chance(e, rung), 3) for rung in ("low", "mid", "high", "xhigh", "max")]
+    assert got == [0.8, 0.7, 0.6, 0.4, 0.4]
+
+
+# ---- small tasks are priced by the token, not by the benchmark task -----------------------
+
+# Two models whose benchmark tasks cost the same, one with tokens twenty times cheaper.
+SAME_BENCH = {"models": {
+    "t/cheap-tokens": {"name": "A", "price_in_per_1m": 0.1, "price_out_per_1m": 0.5,
+                       "levels": {"max": _e(80, 30, 0.60, 15, em=5, hm=5)}},
+    "t/dear-tokens": {"name": "B", "price_in_per_1m": 2, "price_out_per_1m": 10,
+                      "levels": {"medium": _e(80, 30, 0.60, 15, em=5, hm=5)}},
+}}
+
+
+def _same_cat():
+    return [{"id": m, "context_length": 200000,
+             "pricing": {"prompt_usd_per_1m": str(v["price_in_per_1m"]),
+                         "completion_usd_per_1m": str(v["price_out_per_1m"])}}
+            for m, v in SAME_BENCH["models"].items()]
+
+
+def test_a_small_change_goes_to_the_model_with_the_cheaper_tokens():
+    for rung in ("low", "mid"):
+        got = router.pick_scored(rung, None, SAME_BENCH, _same_cat())
+        assert got["model"] == "t/cheap-tokens" and got["priced_as"] == "small task"
+        a, b = got["ranked"][0], got["ranked"][1]
+        assert b["cost"] > 15 * a["cost"], "the token price gap must show in the cost"
+
+
+def test_bigger_tasks_keep_the_benchmark_cost():
+    got = router.pick_scored("high", None, SAME_BENCH, _same_cat())
+    assert got["priced_as"] == "benchmark task"
+    assert {r["cost"] for r in got["ranked"]} == {0.6}
+
+
+def test_a_higher_thinking_level_costs_more_on_a_small_task_too():
+    got = router.pick_scored("mid", None, DOC, _cat("t/mid"))
+    cost = {r["level"]: r["cost"] for r in got["ranked"]}
+    assert cost["low"] < cost["medium"] < cost["max"]
+    assert cost["max"] < 6 * cost["low"], \
+        "input dominates a small task, so the gap is narrower than on a benchmark task (6x)"
+
+
+def test_an_unknown_price_keeps_every_entry_on_the_benchmark_figures():
+    cat = _same_cat()
+    cat[0] = {"id": cat[0]["id"], "context_length": 200000}        # no pricing row
+    got = router.pick_scored("mid", None, SAME_BENCH, cat)
+    assert got["priced_as"] == "benchmark task", "never a mix of the two scales"
+
+
+def test_the_bundled_scores_send_small_work_cheap_and_the_top_to_the_strongest():
+    doc = scores.load()
+    cat = [{"id": m, "context_length": 200000,
+            "pricing": {"prompt_usd_per_1m": str(v["price_in_per_1m"]),
+                        "completion_usd_per_1m": str(v["price_out_per_1m"])}}
+           for m, v in doc["models"].items()]
+    price = {m: v["price_in_per_1m"] for m, v in doc["models"].items()}
+    small = router.pick_scored("mid", None, doc, cat)
+    standard = router.pick_scored("high", None, doc, cat)
+    deep = router.pick_scored("max", None, doc, cat)
+    assert price[small["model"]] <= 0.25, "a small change should not start on a dear model"
+    assert price[standard["model"]] < price[deep["model"]]
+    best_hard = max(e["hard"]["score"] - e["hard"]["margin"] for e in scores.entries(doc))
+    top = next(e for e in scores.entries(doc) if (e["model"], e["level"]) == (deep["model"], deep["level"]))
+    assert top["hard"]["score"] - top["hard"]["margin"] == best_hard
+
+
+# ---- the table serving a coding turn ------------------------------------------------------
+
+def test_without_scored_models_the_table_still_gets_its_old_three_way_difficulty(monkeypatch):
+    seen = []
+    real = router.effective_weights
+    monkeypatch.setattr(router, "effective_weights", lambda w, lvl: seen.append(lvl) or real(w, lvl))
+    table = router.load_table()
+    cat = [{"id": m, "context_length": 200000} for m in table["frontiers"]["agentic"][:6]]
+    for rung in ("low", "mid", "high", "xhigh", "max"):
+        router.choose("agentic", rung, None, table, cat, scores_doc=DOC)
+    assert seen == ["low", "low", "mid", "high", "max"]
+
+
+# ---- in the session -------------------------------------------------------------------------
+
+def test_the_route_note_names_the_task_level_and_why(gateway, harness, monkeypatch):
+    gateway.script(sse_turn("done"))
+    h = _scored_session(harness, monkeypatch)
+    h.session.submit("rename line_total to compute_line_total in price.py")
+    h.wait_for(Event.TURN_FINISHED)
+    routed = h.of(Event.ROUTED)[0]["data"]
+    assert routed["task"] == "Small change" and routed["difficulty"] == "mid"
+    assert routed["why"] == "one or two actions in one or two files"
+
+
+def test_a_prompt_full_of_hard_words_starts_no_higher_than_a_standard_task(gateway, harness, monkeypatch):
+    gateway.script(sse_turn("done"))
+    h = _scored_session(harness, monkeypatch)
+    h.session.submit("Refactor price.py for production use: fix the failing tests, handle edge "
+                     "cases, add tests for them, and run the full test suite.")
+    h.wait_for(Event.TURN_FINISHED)
+    routed = h.of(Event.ROUTED)[0]["data"]
+    assert routed["task"] == "Standard task"
+    assert (routed["model"], routed["thinking"]) == ("t/mid", "medium")
+
+
+def test_the_level_the_user_forces_is_the_level_used(gateway, harness, monkeypatch):
+    gateway.script(sse_turn("done"))
+    h = _scored_session(harness, monkeypatch, route_effort="max")
+    h.session.submit("fix the typo in README.md")
+    h.wait_for(Event.TURN_FINISHED)
+    routed = h.of(Event.ROUTED)[0]["data"]
+    assert routed["task"] == "Deep work" and routed["why"] == "you set it in Settings"
+    assert (routed["model"], routed["thinking"]) == ("t/strong", "max")
+
+
+def test_explaining_a_route_gives_the_level_and_the_rule_behind_it(harness, monkeypatch):
+    h = _scored_session(harness, monkeypatch)
+    out = h.session.explain_route("what does price.py do?")
+    assert out["task"] == "Lookup" and "question" in out["why"]
+
+
+def test_settings_name_the_five_levels():
+    from meshharness import settings
+    labels = [o["label"] for o in settings.BY_KEY["route_effort"]["options"]]
+    assert labels == ["Auto", "Lookup", "Small change", "Standard task", "Complex task", "Deep work"]
