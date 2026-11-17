@@ -80,3 +80,53 @@ that the level was ignored.
   level, which the user has ruled out; the scores rely on third-party tests.
 - No app run and no screen recording: this check talks to the gateway directly
   and changes nothing in the app.
+
+---
+
+# Thinking levels in the app (17 November 2026)
+
+The engine now sends the thinking level in Mesh's current field, and Settings
+offers Extra high and Max. Tested in the real Mesh Code desktop app, driven by
+`app_run.js` and recorded on video. A local relay (`record_relay.py`) logged
+what the app actually sent to Mesh.
+
+- Three runs, **$0.10 billed** (ceiling was $1). 170 unit tests pass.
+- Everything is in `~/Desktop/mesh-code-model-scoring/2-thinking-levels-in-app/`:
+  per run a `recording.webm` (opens in Chrome), three screenshots,
+  `conversation.md`, `what-the-model-changed.diff` and the project after the
+  run. `0-project-before/` is the starting project.
+  `what-the-app-sent-to-mesh.jsonl` is the relay's log.
+
+Task for runs 1 and 2: a small pricing module with two planted bugs and three
+failing tests. "Find what is wrong in price.py, fix it, and run the tests."
+
+| Run | Reasoning set in Settings | What the app sent | Requests | Thinking tokens | Result | Billed | Time |
+|---|---|---|---|---|---|---|---|
+| 1 | GPT-6.1 Sol, Low | `reasoning: {"effort": "low"}` on all 13 | 13 | 23 | both bugs fixed, 4 of 4 tests pass | $0.032 | 37 s |
+| 2 | GPT-6.1 Sol, Max | `reasoning: {"effort": "max"}` on all 14 | 14 | 1464 | both bugs fixed, 4 of 4 tests pass | $0.055 | 84 s |
+| 3 | Mistral Large 4, Off | `none` once, refused; then 3 without a level | 4 | 273 | answered correctly, no files changed | $0.013 | 15 s |
+
+What this shows:
+
+- **Max reaches the model.** Before this change the engine's field stopped at
+  High. On the same task Max used 1464 thinking tokens against 23 at Low,
+  cost 1.7 times as much and took 2.3 times as long. Both levels solved
+  this small task, so it shows the level takes effect, not that Max is better.
+- **A refused level no longer ends the turn.** Mistral Large 4 refuses "none".
+  The app showed "this model does not take the 'none' reasoning level,
+  retrying without it" and answered. The refusal is remembered per model and
+  level, so other levels on that model still go out.
+- **The old field is gone from requests.** `reasoning_effort` was absent in all
+  31 requests.
+
+Not covered:
+
+- No old-engine comparison run: the old engine cannot send Max at all, and at
+  Low to High only the field name differs.
+- The scoring file is bundled and loaded (`core/scores.py`) but the router does
+  not read it yet. That is the next piece.
+- One task, one run per level. This is a wiring check, not a quality test.
+
+Seen in passing: in Auto mode both GPT-6.1 Sol runs created a Python
+environment under `/tmp` to get pytest, without the app asking, although Auto
+is described as asking before writing outside the project. Not changed here.
