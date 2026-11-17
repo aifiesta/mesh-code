@@ -116,7 +116,12 @@ except Exception as e:
     rec["ok"], rec["check_error"] = False, repr(e)
 sess.close()
 
-(out / f"{label}-{scenario}-{model.replace('/', '_')}.json").write_text(json.dumps(rec, indent=1))
+stem = f"{label}-{scenario}-{model.replace('/', '_')}"
+(out / f"{stem}.json").write_text(json.dumps(rec, indent=1))
+# The whole conversation (minus the system prompt), so a run can be read back
+# step by step later without paying for it again.
+(out / f"{stem}-chat.json").write_text(json.dumps(
+    [m for m in msgs if m.get("role") != "system"], indent=1, default=str))
 print(f"\n=== {label} | {scenario} | {model} ===")
 print(f"status={rec.get('status')} ok={rec['ok']} hops={rec.get('hops')} tokens={rec.get('tokens')} "
       f"cost=${rec.get('cost')} elapsed={rec['elapsed']}s")
