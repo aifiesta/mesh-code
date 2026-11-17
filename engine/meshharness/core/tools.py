@@ -100,6 +100,11 @@ def build_system_prompt(cfg: dict, cwd: "str | Path | None" = None) -> str:
         "you don't reliably know), use the available web search capability "
         "rather than guessing, and cite what you found. If a search fails "
         "or is unsupported, say so instead of inventing results.\n\n"
+        "READ ONLY WHAT YOU NEED. To find where something is, search first "
+        "with one short shell command, then read just those lines instead "
+        "of the whole file; if that was not enough, read a wider range. "
+        "Reading a short file whole is fine. Do not read lockfiles, "
+        "minified bundles or build output in full.\n\n"
         "Create and replace files with the file-writing tool, never with "
         "shell heredocs, `cat >`, or a scripting language writing the file: "
         "the user sees a diff card for each write, and a 10KB heredoc in a "
@@ -156,14 +161,30 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read a file from the user's filesystem and return its contents.",
+            "description": (
+                "Read a text file. When you are looking for one function, "
+                "symbol or setting, do NOT read the whole file: find its line "
+                "with a shell search (grep -n) first, then pass offset and "
+                "limit to read only those lines. A ranged result starts each "
+                "line with its number and a tab (not part of the file) and "
+                "ends with a footer saying how to read more. Without a range "
+                "the whole file is returned if it fits."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
                         "description": "Path to the file (absolute, or relative to the cwd)",
-                    }
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "First line to read, counting from 1.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "How many lines to read from offset.",
+                    },
                 },
                 "required": ["path"],
             },
@@ -445,6 +466,43 @@ PLAN_TOOLS = ("create_plan", "update_step")  # meta — auto-approved, no side e
 # in person — gating it behind a y/n approval would be absurd.
 INTERACTIVE_TOOLS = ("ask_user",)
 
+# ---------------------------------------------------------------------------
+# Reads that are almost never worth their tokens. A WHOLE-file read of one of
+# these returns a one-line note with its size; a ranged read (offset/limit)
+# always goes through, so nothing is ever unreadable.
+LOCKFILES = frozenset({
+    "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+    "bun.lock", "Cargo.lock", "poetry.lock", "uv.lock", "Pipfile.lock",
+    "Gemfile.lock", "composer.lock", "go.sum",
+})
+_GENERATED_SUFFIXES = (".min.js", ".min.css", ".js.map", ".css.map",
+                       ".mjs.map", ".cjs.map")
+# Folders that only ever hold installed or generated files.
+_GENERATED_DIRS = frozenset({
+    "node_modules", ".next", ".nuxt", ".turbo", ".cache", "__pycache__",
+})
+# Folders that hold real source in some projects: treated as build output
+# only when git ignores the path.
+_BUILD_DIRS = frozenset({"dist", "build", "target", "out", "vendor", "coverage"})
+# An unranged read returns the file whole only up to this size (~5k tokens,
+# roughly 500 lines of code). Above it the model gets a map of the file and
+# reads the part it needs. Live runs showed why this has to be the engine's
+# rule and not advice: cheap models read a 48k-char file whole to answer a
+# question about one function, whatever the prompt said.
+WHOLE_READ_LIMIT = 20_000
+LONG_FILE_MAP_CHARS = 3_000   # budget for the definitions list / first lines
+LONG_FILE_HEAD_LINES = 40     # first lines shown when there are no definitions
+SKIP_MIN_CHARS = 2_000      # below this a note saves nothing
+LONG_LINE_AVG_CHARS = 1_000  # average line length that marks minified/generated data
+
+
+def _as_int(value) -> int:
+    """Whole number from a model-supplied value: 120, 120.0 and "120" all
+    count; a boolean or free text does not."""
+    if isinstance(value, bool):
+        raise TypeError("boolean is not a line number")
+    return int(float(value))
+
 
 def validate_call(name: str, arguments: dict) -> str | None:
     """Return an error string if the call can't run as issued, else None.
@@ -459,6 +517,14 @@ def validate_call(name: str, arguments: dict) -> str | None:
     if name == "read_file":
         if not arguments.get("path"):
             return "Error: read_file requires a `path` argument."
+        for key in ("offset", "limit"):
+            if arguments.get(key) is None:
+                continue
+            try:
+                _as_int(arguments[key])
+            except (TypeError, ValueError):
+                return (f"Error: read_file `{key}` must be a whole number of "
+                        "lines (line numbers start at 1).")
     elif name == "write_file":
         if not arguments.get("path"):
             return "Error: write_file requires a `path` argument."
@@ -795,6 +861,234 @@ def _wait_or_cancel(proc, timeout: float, cancel) -> str:
         time.sleep(0.1)
 
 
+def _workspace_root(cwd) -> Path:
+    return Path(cwd).expanduser().resolve() if cwd else Path.cwd()
+
+
+def _resolve_in(root: Path, path_str: str) -> Path:
+    p = Path(path_str).expanduser()
+    return p if p.is_absolute() else (root / p)
+
+
+def _split_lines(content: str) -> list:
+    """Lines without their newline; a trailing newline does not add an empty
+    last line (the same count an editor shows)."""
+    if not content:
+        return []
+    lines = content.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def _git_ignored(path: Path, root: Path) -> bool:
+    """True only when git positively says the path is ignored. No git, no
+    repository, or any error all mean "not ignored" — never hide a file on
+    a guess."""
+    try:
+        done = subprocess.run(
+            ["git", "check-ignore", "-q", str(path)], cwd=str(root),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=5,
+        )
+        return done.returncode == 0
+    except Exception:
+        return False
+
+
+def generated_file_reason(path: Path, content: str, root: Path) -> "str | None":
+    """Why a whole-file read of `path` is not worth its tokens, or None.
+
+    Pure policy over the path and the content already in hand; the one
+    external call (git) runs only for the ambiguous build-folder names.
+    """
+    if len(content) < SKIP_MIN_CHARS:
+        return None
+    name = path.name
+    if name in LOCKFILES:
+        return "a dependency lockfile"
+    if name.lower().endswith(_GENERATED_SUFFIXES):
+        return "a minified or source-map file"
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError):
+        resolved = path
+    try:
+        folders = resolved.relative_to(root).parts[:-1]
+        inside = True
+    except ValueError:
+        folders, inside = resolved.parts[:-1], False
+    for part in folders:
+        if part in _GENERATED_DIRS:
+            return f"inside {part}/ (installed or generated files)"
+    if inside:
+        for part in folders:
+            if part in _BUILD_DIRS and _git_ignored(resolved, root):
+                return f"inside {part}/, which git ignores (build output)"
+    lines = content.count("\n") + 1
+    if len(content) / lines > LONG_LINE_AVG_CHARS:
+        return "very long lines (minified or generated data)"
+    return None
+
+
+def _numbered_range(lines: list, start: int, count: "int | None",
+                    budget: int) -> tuple:
+    """Lines `start`.. as "N<tab>text", stopping at `count` lines or `budget`
+    chars. Returns (text, last_line_shown, note) — `note` is set when one
+    over-long line had to be cut to fit."""
+    out, used, n, note = [], 0, start, ""
+    last = len(lines) if count is None else min(len(lines), start + count - 1)
+    while n <= last:
+        row = f"{n}\t{lines[n - 1]}"
+        if used + len(row) + 1 > budget:
+            if out:
+                break
+            # A single line bigger than the whole budget (minified bundle):
+            # show its head rather than nothing, and say so.
+            note = (f" Line {n} is {len(lines[n - 1])} chars; only its first "
+                    f"{budget} are shown.")
+            out.append(row[:budget])
+            n += 1
+            break
+        out.append(row)
+        used += len(row) + 1
+        n += 1
+    return "\n".join(out), n - 1, note
+
+
+def _definitions(path: Path, lines: list) -> list:
+    """("N: def name") for each definition the repo-memory patterns know,
+    in file order. Empty for languages without patterns."""
+    try:
+        from . import memory
+        patterns = memory._LANG_PATTERNS.get(
+            memory._EXT_TO_LANG.get(path.suffix.lower()) or "")
+    except Exception:
+        patterns = None
+    if not patterns:
+        return []
+    found = []
+    for n, line in enumerate(lines, 1):
+        for rx, fmt in patterns:
+            m = rx.match(line)
+            if m:
+                found.append(f"{n}: {fmt.format(m.group(1))}")
+                break
+    return found
+
+
+def _long_file_map(path: Path, content: str, lines: list) -> str:
+    """What an unranged read of a long file returns instead of the file:
+    its size, where its definitions are (or its first lines when the
+    language has no patterns), and how to read the part that matters."""
+    total = len(lines)
+    head = (f"[{path.name} is long — {total} lines, {len(content)} chars, "
+            f"about {len(content) // 4} tokens — so it is not returned whole.")
+    how = ("[Read the part you need by calling again with offset and limit. "
+           "To find a line, search with a shell command (grep -n). To read "
+           "all of it, call again with offset=1.]")
+    defs = _definitions(path, lines)
+    if defs:
+        shown, used = [], 0
+        for d in defs:
+            if used + len(d) + 1 > LONG_FILE_MAP_CHARS:
+                break
+            shown.append(d)
+            used += len(d) + 1
+        more = (f"\n… and {len(defs) - len(shown)} more definitions"
+                if len(shown) < len(defs) else "")
+        return f"{head} Definitions by line:]\n" + "\n".join(shown) + f"{more}\n{how}"
+    body, end, _ = _numbered_range(lines, 1, LONG_FILE_HEAD_LINES,
+                                   LONG_FILE_MAP_CHARS)
+    return f"{head} Its first {end} lines:]\n{body}\n{how}"
+
+
+def read_file_detail(arguments: dict, cwd: "str | Path | None" = None) -> dict:
+    """Run a read and say what kind of result it is.
+
+    Returns {"text", "whole", "shown", "content"}:
+      text    — what goes back to the model.
+      whole   — True only when `text` IS the file, byte for byte. Callers
+                that track "this file is in the conversation" (the read
+                dedupe) must record nothing else: a range, a first chunk or
+                a generated-file note is not the file.
+      shown   — True when any of the file's content was returned.
+      content — the file's full text when it was read, else None.
+    """
+    def result(text, whole=False, shown=False, content=None):
+        return {"text": text, "whole": whole, "shown": shown, "content": content}
+
+    err = validate_call("read_file", arguments)
+    if err:
+        return result(err)
+    root = _workspace_root(cwd)
+    path = arguments.get("path")
+    # Guard against reading a binary image as text — return a helpful
+    # message so the model asks the user to include the image instead of
+    # looping on a utf-8 decode error. Do NOT mention slash commands here;
+    # the CLI auto-attaches images from the user's prompt, so the model
+    # just needs to ask the user to share the image.
+    if Path(path).suffix.lower() in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
+        return result(
+            f"Error: {Path(path).name} is an image file. read_file only "
+            "handles text. Ask the user to share the image in their next "
+            "message — the CLI will attach it automatically."
+        )
+    target = _resolve_in(root, path)
+    try:
+        content = target.read_text()
+    except Exception as e:
+        return result(f"Error: {e}")
+
+    lines = _split_lines(content)
+    total = len(lines)
+    offset, limit = arguments.get("offset"), arguments.get("limit")
+    ranged = offset is not None or limit is not None
+
+    if not ranged:
+        reason = generated_file_reason(target, content, root)
+        if reason:
+            return result(
+                f"[{target.name} not shown: {reason} — {len(content)} chars, "
+                f"{total} lines, about {len(content) // 4} tokens. To see "
+                "part of it, call again with offset and limit, or search it "
+                "with a shell command.]",
+                content=content,
+            )
+        if len(content) <= min(READ_LIMIT, WHOLE_READ_LIMIT):
+            return result(content, whole=True, shown=True, content=content)
+        if len(content) <= READ_LIMIT:
+            # Fits, but is long enough that returning it whole is the single
+            # most expensive thing a read can do. Return a map instead; one
+            # more call with offset=1 still gets all of it.
+            return result(_long_file_map(target, content, lines), content=content)
+        # Too big for one read — see READ_LIMIT. Return the first chunk, cut
+        # at a line boundary, with the footer that says how to continue.
+        start, count = 1, None
+    else:
+        # Lenient on purpose: offset 0 means "from the top" and limit 0 means
+        # "no limit" — an error here would cost a whole extra round trip.
+        start = max(1, _as_int(offset)) if offset is not None else 1
+        count = _as_int(limit) if limit is not None else None
+        if count is not None and count < 1:
+            count = None
+
+    if total == 0:
+        return result(f"[{target.name} is empty.]", content=content)
+    if start > total:
+        return result(
+            f"[{target.name} has {total} lines; offset {start} is past the "
+            "end. Nothing to show.]", content=content)
+
+    body, end, note = _numbered_range(lines, start, count, READ_LIMIT)
+    if end < total:
+        footer = (f"[lines {start}-{end} of {total}.{note} For more, call "
+                  f"again with offset={end + 1}, or any other range.]")
+    else:
+        footer = f"[lines {start}-{end} of {total} — end of file.{note}]"
+    return result(f"{body}\n{footer}", shown=True, content=content)
+
+
 def execute(name: str, arguments: dict, cfg: "dict | None" = None,
             cwd: "str | Path | None" = None,
             cancel: "threading.Event | None" = None) -> str:
@@ -812,11 +1106,10 @@ def execute(name: str, arguments: dict, cfg: "dict | None" = None,
     workspaces concurrently from a single engine, so the root has to travel
     with the call.
     """
-    root = Path(cwd).expanduser().resolve() if cwd else Path.cwd()
+    root = _workspace_root(cwd)
 
     def _resolve(path_str: str) -> Path:
-        p = Path(path_str).expanduser()
-        return p if p.is_absolute() else (root / p)
+        return _resolve_in(root, path_str)
 
     err = validate_call(name, arguments)
     if err:
@@ -844,35 +1137,7 @@ def execute(name: str, arguments: dict, cfg: "dict | None" = None,
         return _format_search_results(r)
 
     if name == "read_file":
-        path = arguments.get("path")
-        # Guard against reading a binary image as text — return a helpful
-        # message so the model asks the user to include the image instead of
-        # looping on a utf-8 decode error. Do NOT mention slash commands here;
-        # the CLI auto-attaches images from the user's prompt, so the model
-        # just needs to ask the user to share the image.
-        suffix = Path(path).suffix.lower()
-        if suffix in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
-            return (
-                f"Error: {Path(path).name} is an image file. read_file only "
-                "handles text. Ask the user to share the image in their next "
-                "message — the CLI will attach it automatically."
-            )
-        try:
-            content = _resolve(path).read_text()
-        except Exception as e:
-            return f"Error: {e}"
-        if len(content) > READ_LIMIT:
-            # Cap huge reads — see READ_LIMIT above. The truncation notice is
-            # prescriptive so the model reaches for a ranged read instead of
-            # retrying the same call. Dedupe stays safe: the recorded stub's
-            # sha never matches the file on disk, so a re-read runs normally.
-            return (
-                content[:READ_LIMIT]
-                + f"\n[truncated — file is {len(content)} chars; this returned "
-                f"the first {READ_LIMIT}. Read specific sections with a ranged "
-                "shell command instead.]"
-            )
-        return content
+        return read_file_detail(arguments, cwd=root)["text"]
 
     if name == "write_file":
         path = arguments.get("path")
@@ -961,7 +1226,17 @@ def summarize_call(name: str, arguments: dict) -> str:
         more = f" (+{len(qs) - 1} more)" if len(qs) > 1 else ""
         return f"ask_user: {first[:60]}{more}"
     if name == "read_file":
-        return f"read_file: {arguments.get('path') or '(missing path)'}"
+        span = ""
+        try:
+            offset, limit = arguments.get("offset"), arguments.get("limit")
+            if offset is not None or limit is not None:
+                start = max(1, _as_int(offset)) if offset is not None else 1
+                count = _as_int(limit) if limit is not None else 0
+                span = (f" (lines {start}-{start + count - 1})" if count > 0
+                        else f" (from line {start})")
+        except (TypeError, ValueError):
+            span = ""
+        return f"read_file: {arguments.get('path') or '(missing path)'}{span}"
     if name == "write_file":
         path = arguments.get("path") or "(missing path)"
         n = len(arguments.get("content") or "")

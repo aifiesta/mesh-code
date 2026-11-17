@@ -100,7 +100,9 @@ def _describe_action(tc: dict, results: dict) -> str:
         n = len(content) if isinstance(content, str) else "?"
         return f"wrote {args.get('path') or 'a file'} ({n} chars)"
     if name == "read_file":
-        return f"read {args.get('path') or 'a file'}"
+        part = ("part of " if args.get("offset") is not None
+                or args.get("limit") is not None else "")
+        return f"read {part}{args.get('path') or 'a file'}"
     if name == "run_bash":
         cmd = (args.get("command") or "")[:60]
         exit_code = ""

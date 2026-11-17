@@ -1443,21 +1443,30 @@ class Session:
         if not abspath.is_absolute():
             abspath = self.workspace / abspath
         abspath = str(abspath)
+        # A line range is a small, deliberate request for specific lines —
+        # answer it as asked. Only whole-file reads are deduped.
+        ranged = args.get("offset") is not None or args.get("limit") is not None
         stub = None
-        try:
-            stub = memory.dedupe_read(self.state, abspath,
-                                      float(self.cfg.get("optimize") or 0))
-        except Exception:
-            stub = None
+        if not ranged:
+            try:
+                stub = memory.dedupe_read(self.state, abspath,
+                                          float(self.cfg.get("optimize") or 0))
+            except Exception:
+                stub = None
         if stub is not None:
             self.emit(Event.TOOL_RESULT, call_id=call_id, name="read_file",
                       ok=True, result=stub, deduped=True)
             return stub
-        result = tools_mod.execute("read_file", args, self.cfg, cwd=self.workspace)
+        detail = tools_mod.read_file_detail(args, cwd=self.workspace)
+        result = detail["text"]
         ok = not result.startswith("Error:")
         self.emit(Event.TOOL_RESULT, call_id=call_id, name="read_file",
                   ok=ok, result=_clip(result), bytes=len(result))
-        if ok:
+        if ok and detail["whole"]:
+            # ONLY a whole-file result is recorded: the dedupe stub tells the
+            # model "the full content is already in this conversation", which
+            # is false after a line range, a first chunk, or a generated-file
+            # note.
             try:
                 memory.record_read(self.state, abspath, result,
                                    msg_index=len(self.state["messages"]))
