@@ -377,6 +377,204 @@ def _ranked_view(ranked: list, score) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Scored picking — a model AND a thinking level, by expected cost to finish
+# ---------------------------------------------------------------------------
+# For coding work the pick comes from `model_scores.json` (see scores.py):
+# one entry per model and thinking level, each with a measured chance of
+# finishing an everyday task and a hard one, and what an attempt costs in
+# dollars and minutes. The pick is the entry that is cheapest to FINISH with:
+#
+#     expected cost = cost of the attempt
+#                   + minutes of waiting x value of a minute
+#                   + chance it fails x what a rescue costs
+#
+# Everything is in dollars, so nothing arbitrary is added together. The
+# chance of failure uses score minus margin, so thin evidence ranks lower by
+# itself. A rescue is priced as running the strongest available entry.
+# Other kinds of prompt (vision, writing, research…) are not covered by these
+# scores and stay on the table above. `choose()` is the one entry point.
+
+SCORED_COHORTS = ("agentic", "coding")
+TIME_VALUE = 0.05        # dollars per minute of waiting, at the default speed weight
+SCORED_FLOOR = 0.6       # never pick under 60% of the best chance available
+STICKY_MARGIN = 0.10     # keep the serving model while it is within 10% of the best
+_LEVEL_ORDER = ("default", "none", "low", "medium", "high", "xhigh", "max")
+
+
+def _band(difficulty: str) -> str:
+    d = _EFFORT_ALIAS.get(difficulty, difficulty)
+    return d if d in ESCALATION_LADDER else "mid"
+
+
+def _chance(e: dict, band: str, cautious: bool = True) -> float:
+    """Chance (0-1) this entry finishes a task of this difficulty. Easy work
+    is judged on the everyday score, hard work on the hard score, the middle
+    on both."""
+    def part(k):
+        return (e[k]["score"] - (e[k]["margin"] if cautious else 0)) / 100.0
+    if band == "low":
+        s = part("everyday")
+    elif band == "mid":
+        s = (part("everyday") + part("hard")) / 2
+    else:
+        s = part("hard")
+    return max(0.0, min(1.0, s))
+
+
+def _slider_scale(weights: "dict | None") -> dict:
+    """The user's three weights as multipliers on the three terms: 1.0 each at
+    the defaults, so the defaults mean plain dollars."""
+    w = normalize_weights(weights)
+    return {k: w[k] / DEFAULT_WEIGHTS[k] for k in DEFAULT_WEIGHTS}
+
+
+def _expected(e: dict, band: str, k: dict, rescue: float) -> dict:
+    attempt = k["cost"] * e["cost_per_task"]
+    wait = k["speed"] * TIME_VALUE * e["minutes_per_task"]
+    # one rung past "high" leans harder on capability before "max" decides alone
+    risk = k["cap"] * (2.0 if band == "xhigh" else 1.0) * (1.0 - _chance(e, band)) * rescue
+    return {"total": attempt + wait + risk, "attempt": attempt, "wait": wait, "risk": risk}
+
+
+def _live_entries(doc, catalog, exclude, needs_tools, needs_ctx, level) -> list:
+    """Entries for models the gateway offers right now, priced at today's
+    rates and able to do the job at hand."""
+    from . import scores as _scores
+    cat = {m.get("id"): m for m in catalog or [] if isinstance(m, dict)}
+    out = []
+    for e in _scores.entries(doc, available=set(cat), exclude=exclude or ()):
+        row = cat[e["model"]]
+        if needs_tools and row.get("supports_tools") is False:
+            continue
+        ctx = row.get("context_length") or row.get("context_window") or 0
+        if needs_ctx and ctx and ctx < needs_ctx:
+            continue
+        # The file's cost was measured at the file's token prices; if the
+        # gateway's price has moved since, move the cost with it.
+        filed = (doc.get("models") or {}).get(e["model"]) or {}
+        then = _blend(filed.get("price_in_per_1m"), filed.get("price_out_per_1m"))
+        now = _blend_price(row, "agentic")
+        if then and now:
+            e["cost_per_task"] *= max(0.25, min(4.0, now / then))
+        out.append(e)
+    if level:
+        # The user fixed the thinking level: each model is judged by its entry
+        # at that level, or the nearest level it was tested at, and the user's
+        # level is what gets sent.
+        want = _LEVEL_ORDER.index(level) if level in _LEVEL_ORDER else None
+        best: dict = {}
+        for e in out:
+            d = abs(_LEVEL_ORDER.index(e["level"]) - want) if want is not None else 0
+            if e["model"] not in best or d < best[e["model"]][0]:
+                best[e["model"]] = (d, e)
+        out = [dict(e, effort=level, level=level) for _, e in best.values()]
+    return out
+
+
+def _blend(i, o) -> "float | None":
+    try:
+        i, o = float(i or 0), float(o or 0)
+    except (TypeError, ValueError):
+        return None
+    return (0.85 * i + 0.15 * o) or None
+
+
+def pick_scored(difficulty: str, weights: "dict | None", doc: "dict | None",
+                catalog: "list | None", *, needs_tools: bool = False,
+                needs_ctx: int = 0, incumbent: "str | None" = None,
+                exclude: "set | None" = None, incumbent_bonus: float = 0.0,
+                failed: "tuple | None" = None,
+                level: "str | None" = None) -> "dict | None":
+    """Choose a model and thinking level for coding work, or None when the
+    scores cover nothing the gateway offers (the caller falls back).
+
+    `failed` = (model, level) that was just serving and visibly struggled:
+    only entries clearly stronger than it are considered — their cautious
+    chance must beat its full score. `level` = a thinking level the user
+    fixed. Pure — no I/O, no mutation of its inputs."""
+    try:
+        band = _band(difficulty)
+        ents = _live_entries(doc, catalog, exclude, needs_tools, needs_ctx, level)
+        if not ents:
+            return None
+        k = _slider_scale(weights)
+        strongest = max(ents, key=lambda e: (_chance(e, "high"), -e["cost_per_task"]))
+        rescue = strongest["cost_per_task"] + TIME_VALUE * strongest["minutes_per_task"]
+
+        cands = ents
+        if failed:
+            was = next((e for e in ents if (e["model"], e["level"]) == tuple(failed)), None)
+            cands = [e for e in ents if (e["model"], e["level"]) != tuple(failed)]
+            if was is not None:
+                bar = _chance(was, band, cautious=False)
+                stronger = [e for e in cands if _chance(e, band) > bar]
+                # nothing clearly stronger: the strongest that is left
+                cands, band = (stronger, band) if stronger else (cands, "max")
+            if not cands:
+                return None
+
+        if band == "max":
+            ranked = sorted(cands, key=lambda e: (-_chance(e, "high"), e["cost_per_task"]))
+            chosen, sticky = ranked[0], False
+            costs = {id(e): _expected(e, "high", k, rescue) for e in ranked}
+        else:
+            best = max(_chance(e, band) for e in cands)
+            able = [e for e in cands if _chance(e, band) >= SCORED_FLOOR * best] or cands
+            costs = {id(e): _expected(e, band, k, rescue) for e in able}
+            ranked = sorted(able, key=lambda e: costs[id(e)]["total"])
+            chosen, sticky = ranked[0], False
+            # Switching models throws away the provider's prompt cache and
+            # re-sends the whole history, so the serving model keeps the turn
+            # while its best entry is close to the best there is — closer
+            # still counts the more context is at stake.
+            if incumbent and incumbent != chosen["model"]:
+                mine = next((e for e in ranked if e["model"] == incumbent), None)
+                slack = 1.0 + STICKY_MARGIN + max(0.0, incumbent_bonus) / 100.0
+                if mine and costs[id(mine)]["total"] <= costs[id(chosen)]["total"] * slack:
+                    chosen, sticky = mine, True
+
+        def view(e):
+            c = costs[id(e)]
+            return {"model": e["model"], "level": e["level"],
+                    "chance": round(_chance(e, "high" if band == "max" else band) * 100),
+                    "cost": round(e["cost_per_task"], 2),
+                    "minutes": round(e["minutes_per_task"], 1),
+                    "expected": round(c["total"], 2)}
+        top = [chosen] + [e for e in ranked if e is not chosen]
+        return {"model": chosen["model"], "level": chosen["level"],
+                "effort": chosen["effort"], "scored": True, "sticky": sticky,
+                "cohort": "agentic", "ranked": [view(e) for e in top[:5]]}
+    except Exception:
+        return None  # fail open, always
+
+
+def choose(cohort: str, difficulty: str, weights: "dict | None",
+           table: "dict | None", catalog: "list | None", *,
+           needs_tools: bool = False, needs_ctx: int = 0,
+           incumbent: "str | None" = None, exclude: "set | None" = None,
+           incumbent_bonus: float = 0.0, failed: "tuple | None" = None,
+           level: "str | None" = None, scores_doc: "dict | None" = None) -> "dict | None":
+    """The router's one entry point. Coding work is picked from the per-level
+    scores; anything they do not cover — another kind of prompt, or an account
+    that offers none of the scored models — falls back to the routing table,
+    which picks a model only."""
+    if cohort in SCORED_COHORTS:
+        if scores_doc is None:
+            from . import scores as _scores
+            scores_doc = _scores.load()
+        got = pick_scored(difficulty, weights, scores_doc, catalog,
+                          needs_tools=needs_tools, needs_ctx=needs_ctx,
+                          incumbent=incumbent, exclude=exclude,
+                          incumbent_bonus=incumbent_bonus, failed=failed, level=level)
+        if got:
+            got["cohort"] = cohort
+            return got
+    return pick(cohort, effective_weights(weights, difficulty), table, catalog,
+                needs_tools=needs_tools, needs_ctx=needs_ctx, incumbent=incumbent,
+                exclude=exclude, incumbent_bonus=incumbent_bonus)
+
+
+# ---------------------------------------------------------------------------
 # Reply verification — the cheap "was that answer any good?" check
 # ---------------------------------------------------------------------------
 # A predictive router picks a model; a verifier notices when the pick was

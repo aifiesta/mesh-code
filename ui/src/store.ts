@@ -1,5 +1,9 @@
 import { Ev, type Approval, type Ask, type CatalogModel, type DirEntry, type FilePreview, type Root, type Msg, type Plan, type Profile, type RouteExplain, type SettingsDoc, type Status, type ToolCard, type WireEvent } from './types'
 
+/** The thinking level as Settings names it. */
+const THINKING: Record<string, string> = { none: 'off', low: 'low', medium: 'medium', high: 'high', xhigh: 'extra high', max: 'max' }
+const thinkingLabel = (level: string) => THINKING[level] ?? level
+
 /**
  * Turning the event stream into renderable state.
  *
@@ -516,15 +520,19 @@ export function reduce(state: AppState, action: Action): AppState {
       case Ev.NOTICE:
       case Ev.COMPACTED:
       case Ev.ROUTED: {
+        // A scored pick chooses the thinking level along with the model.
+        const picked = ev.type === Ev.ROUTED
+          ? shortModel(d.model) + (d.thinking && d.thinking !== 'default' ? ` at ${thinkingLabel(d.thinking)} thinking` : '')
+          : ''
         const text =
           ev.type === Ev.COMPACTED
             ? `Compacted history (${d.before_tok}→${d.after_tok} tokens) — ${d.reason}`
             : ev.type === Ev.ROUTED
               ? (d.escalated
-                  ? `Escalated to ${shortModel(d.model)} — ${d.reason ?? 'the model was struggling'}`
+                  ? `Escalated to ${picked} — ${d.reason ?? 'the model was struggling'}`
                   : d.settled
-                    ? `Settled back to ${shortModel(d.model)} after clean progress`
-                    : `Routed to ${shortModel(d.model)} (${d.cohort}${d.difficulty && d.difficulty !== 'mid' ? ` · ${d.difficulty}` : ''})`)
+                    ? `Settled back to ${picked} after clean progress`
+                    : `Routed to ${picked} (${d.cohort}${d.difficulty && d.difficulty !== 'mid' ? ` · ${d.difficulty}` : ''})`)
               : d.message
         return {
           ...s,

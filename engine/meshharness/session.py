@@ -954,6 +954,12 @@ class Session:
         this model has already proven it can't take."""
         cfg = dict(self.cfg)
         cfg["model"] = self._effective_model()
+        # A scored smart pick chooses the thinking level along with the model.
+        # A level the user set themselves always wins.
+        if (self.state.get("_smart_scored") and self.state.get("_smart_pick")
+                and self.cfg.get("route_mode") == "smart"
+                and not self.cfg.get("reasoning_effort")):
+            cfg["reasoning_effort"] = self.state.get("_smart_effort")
         # A level this model refused is swapped for the one chosen in its
         # place (which may itself have been refused since, hence the loop).
         swaps = self.state.get("_reasoning_swaps") or {}
@@ -1011,7 +1017,15 @@ class Session:
         self.state["_smart_pick"] = info["model"]
         self.state["_smart_last"] = info["model"]
         self.state["_smart_pick_info"] = info
+        # Scored picks carry a thinking level; table picks choose a model only.
+        self.state["_smart_scored"] = bool(info.get("scored"))
+        self.state["_smart_level"] = info.get("level") if info.get("scored") else None
+        self.state["_smart_effort"] = info.get("effort") if info.get("scored") else None
         self.turn_model = info["model"]
+
+    def _serving(self) -> tuple:
+        """(model, thinking level) of the pick serving right now."""
+        return (self.state.get("_smart_pick"), self.state.get("_smart_level"))
 
     def _route_turn(self, text: str, had_image: bool = False) -> None:
         """Initial per-turn pick. Fail-open: any miss leaves _smart_pick unset
@@ -1048,16 +1062,18 @@ class Session:
                 cohort = self.state["_smart_cohort"]
             self.state["_smart_cohort"] = cohort
             self.state["_smart_base_difficulty"] = difficulty   # de-escalation floor
-            weights = router.effective_weights(self.cfg.get("route_weights"), difficulty)
             exclude = set(self.cfg.get("exclude_models") or []) | set(self.state.get("_smart_bad") or set())
-            got = router.pick(cohort, weights, table, self.catalog,
-                              needs_tools=True, needs_ctx=self._needs_ctx(),
-                              incumbent=self.state.get("_smart_last"),
-                              exclude=exclude)
+            got = router.choose(cohort, difficulty, self.cfg.get("route_weights"),
+                                table, self.catalog,
+                                needs_tools=True, needs_ctx=self._needs_ctx(),
+                                incumbent=self.state.get("_smart_last"),
+                                exclude=exclude,
+                                level=self.cfg.get("reasoning_effort"))
             if got and got.get("model"):
                 self._apply_pick(got, difficulty)
                 self.emit(Event.ROUTED, model=got["model"], cohort=cohort,
                           confidence=conf, difficulty=difficulty,
+                          thinking=got.get("level"),
                           ranked=(got.get("ranked") or [])[:5])
         except Exception:
             self.state["_smart_pick"] = None  # never let routing break a turn
@@ -1082,24 +1098,28 @@ class Session:
             nxt = router.escalate(cur)
             if nxt == cur:
                 return False  # already at the top
-            weights = router.effective_weights(self.cfg.get("route_weights"), nxt)
-            got = router.pick(cohort, weights, table, self.catalog,
-                              needs_tools=True, needs_ctx=self._needs_ctx(),
-                              incumbent=None,  # escalating: no stickiness
-                              exclude=set(self.state.get("_smart_bad") or set()))
+            prev = self._serving()
+            got = router.choose(cohort, nxt, self.cfg.get("route_weights"),
+                                table, self.catalog,
+                                needs_tools=True, needs_ctx=self._needs_ctx(),
+                                incumbent=None,  # escalating: no stickiness
+                                exclude=set(self.state.get("_smart_bad") or set()),
+                                # only something clearly stronger than what just struggled
+                                failed=prev if self.state.get("_smart_scored") else None,
+                                level=self.cfg.get("reasoning_effort"))
             if not got or not got.get("model"):
                 return False
-            prev = self.state.get("_smart_pick")
             self.state["_smart_escalations"] = self.state.get("_smart_escalations", 0) + 1
             self.state["_smart_clean_hops"] = 0
             got["escalated"] = True
             self._apply_pick(got, nxt)
-            if got["model"] != prev:
+            if self._serving() != prev:
                 self.emit(Event.ROUTED, model=got["model"], cohort=cohort,
                           difficulty=nxt, escalated=True, reason=reason,
+                          thinking=got.get("level"),
                           ranked=(got.get("ranked") or [])[:5])
                 self.emit(Event.NOTICE, level="info",
-                          message=f"escalating ({reason}) → {_short_model(got['model'])}")
+                          message=f"escalating ({reason}) → {_pick_label(got)}")
             return True
         except Exception:
             return False
@@ -1124,24 +1144,25 @@ class Session:
             if not table or not self.catalog:
                 return
             cohort = self.state.get("_smart_cohort") or "chat"
-            weights = router.effective_weights(self.cfg.get("route_weights"), nxt)
-            got = router.pick(cohort, weights, table, self.catalog,
-                              needs_tools=True, needs_ctx=self._needs_ctx(),
-                              incumbent=self.state.get("_smart_last"),
-                              exclude=set(self.state.get("_smart_bad") or set()),
-                              incumbent_bonus=self._switch_cost_bonus())
+            got = router.choose(cohort, nxt, self.cfg.get("route_weights"),
+                                table, self.catalog,
+                                needs_tools=True, needs_ctx=self._needs_ctx(),
+                                incumbent=self.state.get("_smart_last"),
+                                exclude=set(self.state.get("_smart_bad") or set()),
+                                incumbent_bonus=self._switch_cost_bonus(),
+                                level=self.cfg.get("reasoning_effort"))
             if not got or not got.get("model"):
                 return
-            prev = self.state.get("_smart_pick")
+            prev = self._serving()
             self.state["_smart_escalations"] = max(0, self.state.get("_smart_escalations", 1) - 1)
             self.state["_smart_clean_hops"] = 0
             self._apply_pick(got, nxt)
-            if got["model"] != prev:
+            if self._serving() != prev:
                 self.emit(Event.ROUTED, model=got["model"], cohort=cohort,
-                          difficulty=nxt, settled=True,
+                          difficulty=nxt, settled=True, thinking=got.get("level"),
                           ranked=(got.get("ranked") or [])[:5])
                 self.emit(Event.NOTICE, level="info",
-                          message=f"settling → {_short_model(got['model'])}")
+                          message=f"settling → {_pick_label(got)}")
         except Exception:
             pass
 
@@ -1189,12 +1210,15 @@ class Session:
                 out["reason"] = ("the model catalog has not loaded yet"
                                  if table else "no routing table is bundled")
                 return out
-            got = router.pick(cohort, weights, table, self.catalog,
-                              needs_tools=True, incumbent=self.cfg.get("model"),
-                              exclude=set(self.cfg.get("exclude_models") or []))
+            got = router.choose(cohort, difficulty if level == "auto" else level,
+                                self.cfg.get("route_weights"), table, self.catalog,
+                                needs_tools=True, incumbent=self.cfg.get("model"),
+                                exclude=set(self.cfg.get("exclude_models") or []),
+                                level=self.cfg.get("reasoning_effort"))
             out.update({
                 "available": bool(got),
                 "pick": (got or {}).get("model"),
+                "thinking": (got or {}).get("level"),
                 "ranked": ((got or {}).get("ranked") or [])[:8],
             })
             if not got:
@@ -1976,6 +2000,14 @@ def mode_from_str_safe(v) -> Mode:
         return from_str(str(v or "default"))
     except Exception:
         return Mode.DEFAULT
+
+
+def _pick_label(got: dict) -> str:
+    """A pick as the user reads it: the model, and the thinking level when the
+    router chose one."""
+    level = got.get("level")
+    name = _short_model(got.get("model", ""))
+    return f"{name} · {level}" if level and level != "default" else name
 
 
 def _short_model(m: str) -> str:
