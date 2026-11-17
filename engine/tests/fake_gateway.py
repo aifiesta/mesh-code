@@ -116,6 +116,17 @@ class FakeGateway:
                     self.end_headers()
                     self.wfile.write(json.dumps({"results": []}).encode())
                     return
+                # "__status__:422:<body>" as the only line answers with a
+                # plain HTTP error instead of a stream.
+                if lines and lines[0].startswith("__status__:"):
+                    _, code, text = lines[0].split(":", 2)
+                    raw = text.encode()
+                    self.send_response(int(code))
+                    self.send_header("content-type", "application/json")
+                    self.send_header("content-length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+                    return
                 self.send_response(200)
                 self.send_header("content-type", "text/event-stream")
                 self.send_header("x-request-id", "req_test_1")

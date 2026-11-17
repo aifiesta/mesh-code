@@ -41,7 +41,8 @@ from .bridge import Cancelled, Pending
 from .core import compact, loopguard, memory, router
 from .core import journal, safety
 from .core import tools as tools_mod
-from .core.client import complete_chat, stream_chat
+from .core.client import (complete_chat, nearest_level, reasoning_refusal,
+                          stream_chat)
 from .core.permissions import AUTO_APPROVE, Mode
 from .core.plan import Plan
 from .core.tools import TOOLS, build_system_prompt, find_stub_markers, summarize_call
@@ -532,6 +533,11 @@ class Session:
                 aborted = True
                 break
             except httpx.HTTPStatusError as e:
+                # A refused thinking level can arrive as a plain 4xx as well
+                # as in-band; either way the turn should carry on.
+                if (e.response.status_code < 500 and self._level_refused(
+                        reasoning_refusal(_safe_text(e.response)))):
+                    continue
                 self.emit(Event.ERROR, fatal=True, message=(
                     f"gateway returned HTTP {e.response.status_code}"),
                     detail=_safe_text(e.response))
@@ -543,21 +549,13 @@ class Session:
 
             if meta.get("error"):
                 msg = str(meta["error"])
-                # A model that rejects this thinking level: record the pair
-                # and retry without the field, keeping the setting for the
-                # models and levels that take it. A model can refuse one level
-                # and accept the rest (one refuses only "none"), so the memory
-                # is per model AND level. (Same evidence-based rule as the CLI
-                # — never trust the catalog's supports_thinking flag.)
-                pair = (self._effective_model(), self.cfg.get("reasoning_effort"))
-                if ((meta.get("reasoning_rejected") or "reasoning_effort" in msg)
-                        and pair[1]
-                        and pair not in
-                        (self.state.get("_reasoning_rejected") or set())):
-                    self.state.setdefault("_reasoning_rejected", set()).add(pair)
-                    self.emit(Event.NOTICE, level="info", message=(
-                        f"this model does not take the '{pair[1]}' reasoning "
-                        "level — retrying without it"))
+                # A model that refuses this thinking level: remember it and
+                # retry. (Same evidence-based rule as the CLI — never trust
+                # the catalog's supports_thinking flag.)
+                refusal = meta.get("reasoning_rejected")
+                if refusal is None and "reasoning_effort" in msg:
+                    refusal = reasoning_refusal(msg)
+                if self._level_refused(refusal):
                     continue
                 # If a SMART PICK errored, abandon it and retry on the pinned
                 # model — the model answering now beats the table's opinion.
@@ -906,7 +904,9 @@ class Session:
         try:
             self.emit(Event.NOTICE, level="info",
                       message="streaming keeps failing — trying one non-streaming request")
-            return complete_chat(msgs, self.cfg, tools=TOOLS,
+            # The hop's effective cfg, as the streaming attempt used: the
+            # live smart pick, and no thinking level this model has refused.
+            return complete_chat(msgs, self._effective_cfg(), tools=TOOLS,
                                  max_tokens=self.state.get("_max_tokens_shrunk"))
         except Exception:
             return None
@@ -954,10 +954,43 @@ class Session:
         this model has already proven it can't take."""
         cfg = dict(self.cfg)
         cfg["model"] = self._effective_model()
-        rejected = self.state.get("_reasoning_rejected") or set()
-        if (cfg["model"], cfg.get("reasoning_effort")) in rejected:
+        # A level this model refused is swapped for the one chosen in its
+        # place (which may itself have been refused since, hence the loop).
+        swaps = self.state.get("_reasoning_swaps") or {}
+        level, seen = cfg.get("reasoning_effort"), set()
+        while level and (cfg["model"], level) in swaps and level not in seen:
+            seen.add(level)
+            level = swaps[(cfg["model"], level)]
+        if level:
+            cfg["reasoning_effort"] = level
+        else:
             cfg.pop("reasoning_effort", None)
         return cfg
+
+    def _level_refused(self, refusal: "dict | None") -> bool:
+        """Handle a model refusing the thinking level it was just sent.
+
+        Returns True when the hop should be retried. A model can refuse one
+        level and take the rest (one refuses only "none"), so the memory is
+        per model AND level, and the replacement is the nearest level the
+        refusal says the model accepts — Max on a model that stops at High
+        runs at High. Only when the error names no accepted level is the
+        field dropped altogether.
+        """
+        if refusal is None:
+            return False
+        model = self._effective_model()
+        sent = self._effective_cfg().get("reasoning_effort")
+        if not sent:
+            return False        # no level went out — this error is about something else
+        swaps = self.state.setdefault("_reasoning_swaps", {})
+        refused = {lv for (m, lv) in swaps if m == model} | {sent}
+        instead = nearest_level(sent, refusal.get("accepted"), refused)
+        swaps[(model, sent)] = instead
+        self.emit(Event.NOTICE, level="info", message=(
+            f"this model does not take the '{sent}' reasoning level — "
+            + (f"using '{instead}' instead" if instead else "retrying without it")))
+        return True
 
     def _switch_cost_bonus(self) -> float:
         """Stickiness bonus for the incumbent, scaled by cached context.

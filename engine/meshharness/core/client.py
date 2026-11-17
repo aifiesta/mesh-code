@@ -1,5 +1,6 @@
 """Streaming OpenAI-compatible HTTP client for Mesh API."""
 import json
+import re
 import time
 from typing import Iterable, Optional
 
@@ -154,20 +155,82 @@ def build_payload(messages: list, cfg: dict, tools: Optional[list] = None) -> di
     return payload
 
 
-def is_reasoning_rejection(err) -> bool:
-    """True when a gateway error is a model refusing the thinking level.
+# Thinking levels the settings offer, weakest to strongest.
+REASONING_LEVELS = ("none", "low", "medium", "high", "xhigh", "max")
 
-    The readable `message` often does not say so ("Provider returned error");
-    the evidence sits deeper in the error object — `param: reasoning.effort`
-    from one provider, a raw upstream string naming `reasoning_effort` from
-    another — so look at the whole thing, not just the message.
+# The field named outright, in the spellings providers and the gateway use
+# (two are a validation error's location list, ["body", "reasoning", "effort"],
+# as re-serialised JSON and as raw body text).
+_LEVEL_FIELD = ("reasoning.effort", "reasoning_effort", "reasoning effort",
+                '"reasoning", "effort"', '"reasoning","effort"',
+                "thinking.budget", "thinking_budget", "budget_tokens",
+                "thinking.type")
+# ...or the feature as a word of its own (NOT inside a model id such as
+# "grok-4.1-fast-non-reasoning") next to a refusal phrase.
+_LEVEL_WORD = re.compile(r"(?<![\w\-/.])(reasoning|thinking|effort)(?![\w\-])")
+_REFUSAL = ("not supported", "unsupported", "does not support", "doesn't support",
+            "not allowed", "invalid value", "unknown parameter", "unrecognized")
+_ACCEPTED_AFTER = ("supported values", "input should be", "must be one of",
+                   "expected one of", "allowed values")
+_LEVEL_TOKEN = re.compile(r"\b(none|low|medium|high|xhigh|max)\b")
+
+
+def reasoning_refusal(err) -> "dict | None":
+    """Is this gateway error a model refusing the thinking level?
+
+    Returns None when it is not, else {"accepted": [...]} — the levels the
+    error itself says the model does take (empty when it does not say).
+
+    The readable `message` often does not name the cause ("Provider returned
+    error"); the evidence sits deeper in the error object — `param:
+    reasoning.effort` from one provider, a raw upstream string naming
+    `reasoning_effort` from another — so look at the whole thing. `err` may be
+    the parsed error object or the raw text of an HTTP error body.
     """
-    try:
-        blob = json.dumps(err)
-    except (TypeError, ValueError):
-        blob = str(err)
+    if isinstance(err, str):
+        blob = err
+    else:
+        try:
+            blob = json.dumps(err)
+        except (TypeError, ValueError):
+            blob = str(err)
     blob = blob.lower()
-    return "reasoning.effort" in blob or "reasoning_effort" in blob
+    named = any(k in blob for k in _LEVEL_FIELD)
+    if not named and not (_LEVEL_WORD.search(blob)
+                          and any(p in blob for p in _REFUSAL)):
+        return None
+    accepted: list = []
+    for marker in _ACCEPTED_AFTER:
+        at = blob.find(marker)
+        if at >= 0:
+            for lv in _LEVEL_TOKEN.findall(blob[at:at + 400]):
+                if lv not in accepted:
+                    accepted.append(lv)
+            break
+    return {"accepted": [lv for lv in REASONING_LEVELS if lv in accepted]}
+
+
+def is_reasoning_rejection(err) -> bool:
+    return reasoning_refusal(err) is not None
+
+
+def nearest_level(wanted: str, accepted, refused=()) -> "str | None":
+    """The accepted level closest to the one asked for, or None.
+
+    Max on a model that tops out at High should run at High, and Off on a
+    model that cannot switch thinking off should run at Low — not at the
+    model's own default, which can be a long way from either. A tie goes to
+    the lower, cheaper level.
+    """
+    if wanted not in REASONING_LEVELS:
+        return None
+    want = REASONING_LEVELS.index(wanted)
+    pool = [lv for lv in REASONING_LEVELS
+            if lv in (accepted or ()) and lv != wanted and lv not in refused]
+    if not pool:
+        return None
+    return min(pool, key=lambda lv: (abs(REASONING_LEVELS.index(lv) - want),
+                                     REASONING_LEVELS.index(lv)))
 
 
 def _drop_empty_assistant(messages: list) -> list:
@@ -320,8 +383,9 @@ def stream_chat(
                         retry_raw = True
                     else:
                         last_meta["error"] = msg
-                        if is_reasoning_rejection(err):
-                            last_meta["reasoning_rejected"] = True
+                        refusal = reasoning_refusal(err)
+                        if refusal is not None:
+                            last_meta["reasoning_rejected"] = refusal
                     break
 
                 if obj.get("model"):
@@ -411,8 +475,9 @@ def complete_chat(messages: list, cfg: dict, tools: "Optional[list]" = None,
     if isinstance(data, dict) and data.get("error"):
         err = data["error"]
         meta["error"] = err.get("message") if isinstance(err, dict) else str(err)
-        if is_reasoning_rejection(err):
-            meta["reasoning_rejected"] = True
+        refusal = reasoning_refusal(err)
+        if refusal is not None:
+            meta["reasoning_rejected"] = refusal
         return "", meta
 
     choices = (data or {}).get("choices") or []

@@ -130,3 +130,37 @@ Not covered:
 Seen in passing: in Auto mode both GPT-6.1 Sol runs created a Python
 environment under `/tmp` to get pytest, without the app asking, although Auto
 is described as asking before writing outside the project. Not changed here.
+
+---
+
+# Review fixes (17 November 2026)
+
+A review of the change above found six things worth fixing before Smart
+routing builds on it. All six are fixed; 182 unit tests pass (12 new).
+
+- **A refused level now falls back to the nearest accepted one.** The refusal
+  usually lists the levels the model takes. Max on a model that stops at High
+  runs at High; before, it ran with no level at all.
+- **More refusal wordings are recognised,** and a model id such as
+  `…-non-reasoning` in an unrelated error is not mistaken for one.
+- **A refusal sent as an HTTP error is retried** like one sent inside a reply.
+- **The last-resort non-streaming request** uses the same model and level as
+  the streaming attempt. It used to re-send a refused level, to the pinned
+  model.
+- **The score loader** leaves out entries missing a margin or a wait time, and
+  hands out copies so a caller cannot alter the loaded file.
+
+Live check in the real app, recorded
+(`~/Desktop/mesh-code-model-scoring/3-review-fixes-in-app/`): Mistral Large 4
+with Reasoning set to Off. "none" was refused once; the app showed "using
+'low' instead" and sent `low` on the next three requests.
+
+| | Before the fix | After |
+|---|---|---|
+| Level used after the refusal | none sent (model default) | low |
+| Thinking tokens | 273 | 51 |
+| Billed | $0.013 | $0.007 |
+
+Left for later: tests that assert today's model list, the unused
+`reasoning_rejected_models` setting, the app driver approving every dialog,
+and the relay log reading only the last 200 KB of a reply.

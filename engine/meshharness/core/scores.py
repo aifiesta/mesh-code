@@ -47,11 +47,16 @@ def load(path: "str | None" = None) -> "dict | None":
 
 
 def _usable(e) -> bool:
+    """Requestable, and every number the pick needs is there: both scores,
+    both margins, the cost and the wait."""
     try:
         return (isinstance(e, dict) and e.get("sendable") is True
-                and float(e["everyday"]["score"]) >= 0
-                and float(e["hard"]["score"]) >= 0
-                and float(e["cost_per_task"]) > 0)
+                and 0 <= float(e["everyday"]["score"]) <= 100
+                and 0 <= float(e["hard"]["score"]) <= 100
+                and float(e["everyday"]["margin"]) >= 0
+                and float(e["hard"]["margin"]) >= 0
+                and float(e["cost_per_task"]) > 0
+                and float(e["minutes_per_task"]) > 0)
     except (KeyError, TypeError, ValueError):
         return False
 
@@ -67,7 +72,8 @@ def entries(doc: "dict | None", available=None, exclude=()) -> list:
     Each entry: model, name, level, effort (what to send as the thinking
     level, None = send nothing), everyday, hard, cost_per_task,
     minutes_per_task. Entries that cannot be requested as tested, or that
-    lack a number the pick needs, are left out rather than guessed at.
+    lack a number the pick needs, are left out rather than guessed at. The
+    entries are the caller's own copies.
     """
     if not doc:
         return []
@@ -87,10 +93,12 @@ def entries(doc: "dict | None", available=None, exclude=()) -> list:
                 "name": m.get("name") or mid,
                 "level": level,
                 "effort": None if level == "default" else level,
-                "everyday": e["everyday"],
-                "hard": e["hard"],
+                # copies: a caller adjusting a score must not change the
+                # cached file for every other session in this process
+                "everyday": dict(e["everyday"]),
+                "hard": dict(e["hard"]),
                 "cost_per_task": float(e["cost_per_task"]),
-                "minutes_per_task": e.get("minutes_per_task"),
+                "minutes_per_task": float(e["minutes_per_task"]),
             })
     return out
 
