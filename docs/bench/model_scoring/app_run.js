@@ -3,7 +3,10 @@
    node app_run.js OUTDIR MODEL "LEVEL LABEL" PROJECT_DIR "PROMPT"
 
    LEVEL LABEL is the text of the Reasoning option in Settings (Off, Low,
-   Medium, High, Extra high, Max). The app runs with its own home folder under
+   Medium, High, Extra high, Max). Pass MODEL "smart" to turn Smart routing
+   on instead of pinning a model; LEVEL LABEL "Model default" then leaves the
+   thinking level to the router. APP_REPO points at another checkout to run
+   (for example an older engine, with ui/dist built). The app runs with its own home folder under
    OUTDIR, so the user's saved chats and settings are untouched. Makes real,
    billed model calls. Needs:
      PLAYWRIGHT   path to a playwright-core package
@@ -14,14 +17,15 @@
 const fs = require('fs'), path = require('path'), os = require('os')
 const { _electron: electron } = require(process.env.PLAYWRIGHT)
 const [OUT, MODEL, LEVEL, PROJECT, PROMPT] = process.argv.slice(2)
-const REPO = path.resolve(__dirname, '..', '..', '..')
+const REPO = process.env.APP_REPO || path.resolve(__dirname, '..', '..', '..')
+const VENV = path.resolve(__dirname, '..', '..', '..', 'engine/.venv/bin/python')
 const shot = (win, name) => win.screenshot({ path: path.join(OUT, name) })
 
 ;(async () => {
   fs.mkdirSync(path.join(OUT, 'app-home'), { recursive: true })
   const key = fs.readFileSync(path.join(os.homedir(), '.mesh-code', 'credentials'), 'utf8').trim()
   const env = { ...process.env, HOME: path.join(OUT, 'app-home'), MESHAPI_API_KEY: key,
-                MESH_CODE_PYTHON: path.join(REPO, 'engine/.venv/bin/python') }
+                MESH_CODE_PYTHON: VENV }
   if (process.env.RELAY_URL) env.MESHAPI_BASE_URL = process.env.RELAY_URL
   const app = await electron.launch({
     executablePath: process.env.ELECTRON, args: [path.join(REPO, 'desktop')], env,
@@ -40,17 +44,23 @@ const shot = (win, name) => win.screenshot({ path: path.join(OUT, name) })
   await win.getByRole('button', { name: 'Ask every time' }).click(); await win.waitForTimeout(700)
   await win.getByText('Also auto-approve shell commands').click(); await win.waitForTimeout(700)
 
-  // model
-  await win.getByRole('button', { name: 'Models' }).first().click(); await win.waitForTimeout(900)
-  await win.getByPlaceholder(/Fuzzy search/).fill(MODEL.split('/').pop()); await win.waitForTimeout(1200)
-  await win.locator('button.use').first().click(); await win.waitForTimeout(1200)
-  await win.keyboard.press('Escape'); await win.waitForTimeout(500)
-
-  // thinking level, in Settings where the user would set it
-  await win.getByRole('button', { name: 'Settings' }).first().click(); await win.waitForTimeout(900)
+  if (MODEL === 'smart') {
+    // Smart routing on, in Settings where the user would set it
+    await win.getByRole('button', { name: 'Settings' }).first().click(); await win.waitForTimeout(900)
+    await win.locator('.sheet').getByRole('button', { name: 'Routing' }).click(); await win.waitForTimeout(900)
+    await win.getByRole('radiogroup', { name: 'Routing' }).getByRole('radio', { name: 'Smart (local)', exact: true }).click()
+    await win.waitForTimeout(1500); await shot(win, '1-settings.png')
+  } else {
+    await win.getByRole('button', { name: 'Models' }).first().click(); await win.waitForTimeout(900)
+    await win.getByPlaceholder(/Fuzzy search/).fill(MODEL.split('/').pop()); await win.waitForTimeout(1200)
+    await win.locator('button.use').first().click(); await win.waitForTimeout(1200)
+    await win.keyboard.press('Escape'); await win.waitForTimeout(500)
+    await win.getByRole('button', { name: 'Settings' }).first().click(); await win.waitForTimeout(900)
+  }
+  // thinking level
   await win.locator('.sheet').getByRole('button', { name: 'Behaviour' }).click(); await win.waitForTimeout(900)
   await win.getByRole('radiogroup', { name: 'Reasoning' }).getByRole('radio', { name: LEVEL, exact: true }).click()
-  await win.waitForTimeout(1500); await shot(win, '1-settings.png')
+  await win.waitForTimeout(1500); if (MODEL !== 'smart') await shot(win, '1-settings.png')
   await win.keyboard.press('Escape'); await win.waitForTimeout(800)
 
   // the task

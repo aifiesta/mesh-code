@@ -164,3 +164,58 @@ with Reasoning set to Off. "none" was refused once; the app showed "using
 Left for later: tests that assert today's model list, the unused
 `reasoning_rejected_models` setting, the app driver approving every dialog,
 and the relay log reading only the last 200 KB of a reply.
+
+---
+
+# Smart routing on the new scores (17 November 2026)
+
+For coding work Smart routing now picks a model and a thinking level together
+from `model_scores.json`, by lowest expected cost to finish. Tested in the real
+desktop app with Smart routing on, the previous engine (commit 4215a24) against
+this one, same three tasks, same starting project, all recorded.
+
+- Six runs, **$0.14 billed** (ceiling was $1). 206 unit tests pass (24 new).
+- Evidence: `~/Desktop/mesh-code-model-scoring/4-smart-routing-in-app/`, one
+  folder per run with `recording.webm`, `conversation.md`,
+  `what-the-model-changed.diff` and the project after the run.
+- Run it again with `run_smart_compare.sh`.
+
+| Task | Engine | Router's pick | Result | Billed | Time |
+|---|---|---|---|---|---|
+| Easy: explain price.py | old | Seed 1.6 Flash, no level | correct | $0.0008 | 6 s |
+| | new | DeepSeek V4.1 Flash 1017 at max | correct, and pointed out the discount bug | $0.0008 | 6 s |
+| Bug fix: make the tests pass | old | Seed 1.6 Flash, no level | fixed, 4 of 4 pass | $0.0014 | 16 s |
+| | new | DeepSeek V4.1 Flash 1017 at max | fixed, 4 of 4 pass | $0.0014 | 30 s |
+| "Hard": refactor for production, edge cases, tests | old | DeepSeek V4 Flash, no level | done as asked, 6 tests pass | $0.0027 | 39 s |
+| | new | GPT-6.1 Sol at extra high | done as asked and more, 47 tests pass | $0.1334 | 205 s |
+
+What this shows:
+
+- **The wiring works.** The pick, the thinking level in the request, the note
+  in the app ("Routed to … at max thinking") and the fall-back to the old table
+  for non-coding prompts all behave as designed. The relay log confirms the
+  level sent on every request.
+- **On easy and ordinary prompts nothing got cheaper or dearer.** Both routers
+  send them to a very cheap model. The new one asks for max thinking, which
+  doubled the wait on the bug fix.
+- **On the prompt labelled hard, the new router cost 49 times more and took 5
+  times longer for an outcome the old pick also reached.** GPT-6.1 Sol's result
+  is more thorough (input validation, 47 tests) but the task did not require
+  it. The scratch project is small, so this says the label was wrong, not that
+  the scores are.
+
+Two things behind that:
+
+- **The difficulty label is a keyword guess.** "Refactor", "production" and
+  "edge cases" made a small task "hard". The bug-fix prompt was labelled easy.
+  Under the old router a wrong label cost almost nothing, because every level
+  went to a cheap model. Now it decides between a $0.003 run and a $0.13 run.
+- **The scores say cheap models fail hard work.** DeepSeek V4.1 Flash is rated
+  about 27% on hard tasks against 40% for GPT-6.1 Sol. That is measured on
+  genuinely hard benchmark tasks; it does not describe a small "refactor".
+
+Not covered live: step-up after a failure, sticking with the serving model, and
+a user-fixed thinking level under Smart routing. All three are unit-tested.
+
+Status: committed on `claude/model-scoring-763885`, **not merged** into
+`token-optimisation` until the cost on hard-labelled prompts is decided.
