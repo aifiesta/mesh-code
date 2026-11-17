@@ -270,3 +270,57 @@ Unit-tested only.
 
 Status: committed on `claude/model-scoring-763885`, not merged into
 `token-optimisation`.
+
+---
+
+# A Standard task starts cheap too (18 November 2026)
+
+All three levels that wording can assign (Lookup, Small change, Standard task)
+are now priced at the gateway's live token prices for a typical task of that
+size. Complex task and Deep work, reached only by step-up or the user's
+choice, keep the benchmark cost. The wait estimate now shrinks with each
+entry's cost instead of by one fixed fraction.
+
+- Three recorded runs in the real app, **$0.016 billed** (ceiling was $0.30).
+  224 unit tests pass.
+- Evidence: `~/Desktop/mesh-code-model-scoring/6-start-cheap-in-app/`.
+
+Same three prompts and starting project as every section above.
+
+| Level | Old engine | Before this change | Now |
+|---|---|---|---|
+| Lookup | Seed 1.6 Flash, $0.0008, 6 s | DeepSeek V4.1 Flash 1017 at max, $0.0008, 8 s | Claude Haiku 5.5 at max, $0.0017, 10 s |
+| Small change | Seed 1.6 Flash, $0.0014, 16 s | DeepSeek V4.1 Flash 1017 at max, $0.0015, 22 s | Claude Haiku 5.5 at max, $0.0049, 28 s |
+| Standard task | DeepSeek V4 Flash, $0.0027, 39 s, 6 tests | GPT-6.1 Sol at medium, $0.0580, 83 s, 23 tests | Claude Haiku 5.5 at max, $0.0096, 49 s, 19 tests |
+
+All runs did what was asked.
+
+What this shows:
+
+- **The Standard task now costs a sixth of what it did** ($0.0096 against
+  $0.058), and a fourteenth of the first version ($0.133).
+- **All three starting levels pick the same model.** Claude Haiku 5.5 at max
+  edges out DeepSeek V4.1 Flash 1017 at max by one or two points of chance for
+  about the same estimated cost. The levels now differ in where a step-up
+  goes, not in where they start.
+- **It is still two to three and a half times the old engine's cost**, in
+  fractions of a cent. The old engine's picks (Seed 1.6 Flash, DeepSeek V4
+  Flash) have no third-party scores, so the new list cannot choose them.
+
+How well the wait estimate fits, on the six earlier recorded runs:
+
+| Entry | Level | Estimated | Real |
+|---|---|---|---|
+| DeepSeek V4.1 Flash 1017, max | Lookup | 4 s | 7 s |
+| DeepSeek V4.1 Flash 1017, max | Small change | 15 s | 26 s |
+| GPT-6.1 Sol, low | Small change | 33 s | 37 s |
+| GPT-6.1 Sol, max | Small change | 104 s | 84 s |
+| GPT-6.1 Sol, medium | Standard task | 92 s | 83 s |
+| GPT-6.1 Sol, extra high | Standard task | 125 s | 205 s |
+
+Where a step-up goes now (simulated, default sliders): from Lookup or Small
+change to Gemini 4 Carbon at high, then Claude Opus 5.5 at max; from Standard
+task to GPT-6.1 Sol at extra high, then Claude Opus 5.5 at max.
+
+Not covered live: step-up, sticking with the serving model, a forced level.
+Unit-tested only.
