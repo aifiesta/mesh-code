@@ -3,7 +3,7 @@ import type { ToolCard } from '../types'
 import { Caret } from './Chevron'
 
 const ICON: Record<string, string> = {
-  read_file: '◇', write_file: '◆', run_bash: '›_', web_search: '⌕',
+  read_file: '◇', write_file: '◆', edit_file: '✎', run_bash: '›_', web_search: '⌕',
   start_server: '▶', remember: '✦', create_plan: '☰', update_step: '☑',
 }
 

@@ -99,6 +99,8 @@ def _describe_action(tc: dict, results: dict) -> str:
         content = args.get("content")
         n = len(content) if isinstance(content, str) else "?"
         return f"wrote {args.get('path') or 'a file'} ({n} chars)"
+    if name == "edit_file":
+        return f"edited {args.get('path') or 'a file'}"
     if name == "read_file":
         part = ("part of " if args.get("offset") is not None
                 or args.get("limit") is not None else "")

@@ -64,13 +64,15 @@ def build_system_prompt(cfg: dict, cwd: "str | Path | None" = None) -> str:
         "treat starting a server as the final step — while any plan step is "
         "still pending or in progress. Either finish every remaining step "
         "first, or clearly tell the user which steps are not done and why.\n\n"
-        "COMPLETENESS — deliver working code, not scaffolding. When you "
-        "create or edit a file, write the FULL implementation: every "
-        "function body filled in with real logic. Never leave placeholder "
-        "comments like 'TODO', 'add game logic here', or 'implementation "
-        "goes here', never leave empty function bodies, and never "
-        "abbreviate a file with markers like '... rest of the code remains "
-        "the same' — always write the whole file. Before telling the user "
+        "COMPLETENESS — deliver working code, not scaffolding. Everything "
+        "you write is the FULL implementation: every function body filled "
+        "in with real logic. Never leave placeholder comments like 'TODO', "
+        "'add game logic here', or 'implementation goes here', never leave "
+        "empty function bodies, and never stand in for code with markers "
+        "like '... rest of the code remains the same'. Write a NEW file "
+        "whole. To change a file that ALREADY EXISTS, replace only the "
+        "lines that need to change — do not send the whole file again "
+        "unless most of it is changing. Before telling the user "
         "something is done, or starting its server, make sure every file "
         "you wrote actually contains its complete implementation — a page "
         "that loads but does nothing is not done. If the full code is too "
@@ -105,10 +107,11 @@ def build_system_prompt(cfg: dict, cwd: "str | Path | None" = None) -> str:
         "of the whole file; if that was not enough, read a wider range. "
         "Reading a short file whole is fine. Do not read lockfiles, "
         "minified bundles or build output in full.\n\n"
-        "Create and replace files with the file-writing tool, never with "
-        "shell heredocs, `cat >`, or a scripting language writing the file: "
-        "the user sees a diff card for each write, and a 10KB heredoc in a "
-        "shell command is unreviewable. Use the shell to RUN things. To "
+        "Create and change files with the file tools, never with shell "
+        "heredocs, `cat >`, `sed -i`, or a scripting language writing the "
+        "file: the user sees a diff card for each change, and a 10KB "
+        "heredoc in a shell command is unreviewable. Use the shell to RUN "
+        "things. To "
         "check a page or script, prefer one short command whose output "
         "answers the question (grep, a node/python one-liner against the "
         "file) over building a test harness.\n\n"
@@ -194,7 +197,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Create or overwrite a file with the given content. Parent directories are created if missing.",
+            "description": (
+                "Create a new file, or replace a file completely, with the "
+                "given content. Parent directories are created if missing. "
+                "To change part of an existing file, use edit_file instead."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -202,6 +209,38 @@ TOOLS = [
                     "content": {"type": "string", "description": "Full file contents"},
                 },
                 "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": (
+                "Change part of an existing file by replacing old_text with "
+                "new_text. Send only the lines that change, not the whole "
+                "file. old_text must be copied exactly from the file (same "
+                "indentation, no line numbers) and must match exactly one "
+                "place — add a neighbouring line if it could match more."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File to change"},
+                    "old_text": {
+                        "type": "string",
+                        "description": "Exact text currently in the file",
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "Text to put in its place (\"\" deletes it)",
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "Replace every match instead of requiring exactly one",
+                    },
+                },
+                "required": ["path", "old_text", "new_text"],
             },
         },
     },
@@ -530,6 +569,20 @@ def validate_call(name: str, arguments: dict) -> str | None:
             return "Error: write_file requires a `path` argument."
         if arguments.get("content") is None:
             return "Error: write_file requires a `content` argument (use \"\" for an empty file)."
+    elif name == "edit_file":
+        if not arguments.get("path"):
+            return "Error: edit_file requires a `path` argument."
+        old, new = arguments.get("old_text"), arguments.get("new_text")
+        if not isinstance(old, str) or not old:
+            return ("Error: edit_file requires a non-empty `old_text` — the "
+                    "exact text to replace, copied from the file. To create "
+                    "a new file, write it whole instead.")
+        if not isinstance(new, str):
+            return ("Error: edit_file requires a `new_text` argument (use "
+                    "\"\" to delete the old text).")
+        if old == new:
+            return ("Error: edit_file `old_text` and `new_text` are identical "
+                    "— nothing would change.")
     elif name in ("run_bash", "start_server"):
         if not arguments.get("command"):
             return f"Error: {name} requires a `command` argument."
@@ -1089,6 +1142,173 @@ def read_file_detail(arguments: dict, cwd: "str | Path | None" = None) -> dict:
     return result(f"{body}\n{footer}", shown=True, content=content)
 
 
+_LINE_PREFIX_RE = re.compile(r"(?m)^[ \t]*\d+\t")
+EDIT_QUOTE_CHARS = 1_500   # most of the file's real text an error may quote
+
+
+def _line_of(text: str, index: int) -> int:
+    return text.count("\n", 0, index) + 1
+
+
+def _loose_hits(file_lines: list, want: list) -> list:
+    """0-based starts where the file has `want` once leading and trailing
+    whitespace on every line is ignored."""
+    if not want:
+        return []
+    have = [ln.strip() for ln in file_lines]
+    k, first = len(want), want[0]
+    return [i for i in range(len(have) - k + 1)
+            if have[i] == first and have[i:i + k] == want]
+
+
+def _edit_miss(shown: str, text: str, old: str, quote: bool) -> str:
+    """Why `old` is not in `text`, said precisely enough to recover in one
+    step. Never applies anything.
+
+    `quote` allows the message to include the file's real lines. Callers
+    pass True only when the model has already been shown this file in the
+    conversation — otherwise a failed edit would be a way to read a file
+    nobody approved reading.
+    """
+    base = f"Error: old_text was not found in {shown}"
+
+    # 1. Line numbers copied in from a ranged read.
+    stripped = _LINE_PREFIX_RE.sub("", old)
+    if stripped != old and stripped and stripped in text:
+        return (f"{base}: it includes the line-number prefixes from a ranged "
+                "read (\"120<tab>…\"). Those are not part of the file — send "
+                "the same text without them.")
+
+    file_lines = text.split("\n")
+    want = [ln.strip() for ln in old.split("\n")]
+    while want and not want[0]:
+        want.pop(0)
+    while want and not want[-1]:
+        want.pop()
+    k = len(want)
+
+    def excerpt(start: int) -> str:
+        return "\n".join(file_lines[start:start + k])[:EDIT_QUOTE_CHARS]
+
+    # 2. Same text, different indentation or trailing spaces.
+    hits = _loose_hits(file_lines, want)
+    if hits:
+        a = hits[0] + 1
+        b = a + k - 1
+        others = (f" (and {len(hits) - 1} other place"
+                  f"{'s' if len(hits) > 2 else ''})" if len(hits) > 1 else "")
+        msg = (f"{base}: the indentation or spacing differs from the file. "
+               f"Lines {a}-{b}{others} hold the same text")
+        if quote:
+            return (f"{msg}, exactly like this — copy it character for "
+                    f"character:\n{excerpt(hits[0])}")
+        return (f"{msg}. Read lines {a}-{b} and copy them exactly, "
+                "including the indentation.")
+
+    # 3. The first line is there; what follows is not what was sent.
+    anchors = [i for i, ln in enumerate(file_lines) if want and ln.strip() == want[0]]
+    long_hint = (" A shorter old_text — only the lines that change plus one "
+                 "line of context — is easier to match.") if k > 15 else ""
+    if anchors:
+        where = ", ".join(str(i + 1) for i in anchors[:5])
+        more = ", …" if len(anchors) > 5 else ""
+        a = anchors[0] + 1
+        b = min(len(file_lines), a + k - 1)
+        msg = (f"{base}. Its first line is at line {where}{more}, but the "
+               "lines after it are not what you sent.")
+        if quote and len(anchors) == 1:
+            return (f"{msg} Lines {a}-{b} really are:\n{excerpt(anchors[0])}"
+                    f"\nCopy from that exactly.{long_hint}")
+        return (f"{msg} Read lines {a}-{b} and copy the text exactly."
+                f"{long_hint}")
+
+    # 4. Nothing recognisable.
+    return (f"{base} — not even its first line is in the file. The file may "
+            "have changed, or the text is from another file. Search for it "
+            "(grep -n) or read the lines again, then copy them exactly."
+            f"{long_hint}")
+
+
+def plan_edit(target: Path, old: str, new: str, replace_all: bool = False,
+              quote: bool = False, shown: "str | None" = None) -> dict:
+    """Work out an exact-text replacement without touching the disk.
+
+    Returns {"error": message} when it cannot be applied, else
+    {"before", "after", "write", "count", "line", "end_line"}:
+      before/after — the file's text with \n line endings, old and new.
+      write        — what to put on disk (original line endings kept).
+      count        — how many places are replaced.
+      line/end_line — where the first replacement sits in `after`.
+    Exact match only: a near match is reported, never applied.
+    """
+    shown = shown or str(target)
+    try:
+        with open(target, newline="") as f:   # keep \r\n as it is on disk
+            raw = f.read()
+    except FileNotFoundError:
+        return {"error": (f"Error: {shown} does not exist. An edit changes a "
+                          "file that is already there — to create this file, "
+                          "write it whole.")}
+    except IsADirectoryError:
+        return {"error": f"Error: {shown} is a directory, not a file."}
+    except UnicodeDecodeError:
+        return {"error": f"Error: {shown} is not a text file; it cannot be edited as text."}
+    except OSError as e:
+        return {"error": f"Error: {e}"}
+
+    # A file that uses \r\n throughout is matched and edited with \n, then
+    # written back with \r\n — otherwise one small edit would rewrite every
+    # line ending in the file. Mixed files are edited byte for byte.
+    crlf = "\r\n" in raw and "\n" not in raw.replace("\r\n", "")
+    text = raw.replace("\r\n", "\n") if crlf else raw
+    if crlf or "\r\n" not in raw:
+        old, new = old.replace("\r\n", "\n"), new.replace("\r\n", "\n")
+
+    count = text.count(old)
+    if count == 0:
+        return {"error": _edit_miss(shown, text, old, quote)}
+    if count > 1 and not replace_all:
+        starts, at = [], text.find(old)
+        while at != -1 and len(starts) < 10:
+            starts.append(_line_of(text, at))
+            at = text.find(old, at + len(old))
+        more = ", …" if count > len(starts) else ""
+        return {"error": (
+            f"Error: old_text matches {count} places in {shown} (lines "
+            f"{', '.join(map(str, starts))}{more}). Add a neighbouring line "
+            "to old_text so it matches exactly one place, or set "
+            "replace_all to true to change all of them.")}
+
+    first = text.find(old)
+    after = text.replace(old, new) if replace_all else text.replace(old, new, 1)
+    line = _line_of(text, first)
+    return {
+        "before": text, "after": after,
+        "write": after.replace("\n", "\r\n") if crlf else after,
+        "count": count if replace_all else 1,
+        "line": line, "end_line": line + new.count("\n"),
+    }
+
+
+def apply_edit(target: Path, old: str, new: str, replace_all: bool = False,
+               quote: bool = False, shown: "str | None" = None) -> tuple:
+    """Apply an exact-text replacement. Returns (message, plan) — plan is
+    None when nothing was written."""
+    plan = plan_edit(target, old, new, replace_all, quote=quote, shown=shown)
+    if "error" in plan:
+        return plan["error"], None
+    try:
+        with open(target, "w", newline="") as f:
+            f.write(plan["write"])
+    except OSError as e:
+        return f"Error: {e}", None
+    n = plan["count"]
+    where = (f"now lines {plan['line']}-{plan['end_line']}" if n == 1
+             else f"first at line {plan['line']}")
+    return (f"OK — replaced {n} occurrence{'s' if n != 1 else ''} in "
+            f"{target} ({where})"), plan
+
+
 def execute(name: str, arguments: dict, cfg: "dict | None" = None,
             cwd: "str | Path | None" = None,
             cancel: "threading.Event | None" = None) -> str:
@@ -1138,6 +1358,13 @@ def execute(name: str, arguments: dict, cfg: "dict | None" = None,
 
     if name == "read_file":
         return read_file_detail(arguments, cwd=root)["text"]
+
+    if name == "edit_file":
+        message, _ = apply_edit(
+            _resolve(arguments.get("path")), arguments.get("old_text"),
+            arguments.get("new_text"), bool(arguments.get("replace_all")),
+            shown=arguments.get("path"))
+        return message
 
     if name == "write_file":
         path = arguments.get("path")
@@ -1241,6 +1468,15 @@ def summarize_call(name: str, arguments: dict) -> str:
         path = arguments.get("path") or "(missing path)"
         n = len(arguments.get("content") or "")
         return f"write_file: {path} ({n} chars)"
+    if name == "edit_file":
+        path = arguments.get("path") or "(missing path)"
+        old, new = arguments.get("old_text"), arguments.get("new_text")
+        if not isinstance(old, str) or not isinstance(new, str):
+            return f"edit_file: {path}"
+        n_old = old.count("\n") + 1
+        n_new = new.count("\n") + 1 if new else 0
+        every = ", every match" if arguments.get("replace_all") else ""
+        return f"edit_file: {path} ({n_old} → {n_new} lines{every})"
     if name == "run_bash":
         cmd = _strip_cd_prefix(arguments.get("command") or "(missing command)")
         if len(cmd) > 200:

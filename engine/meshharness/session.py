@@ -109,6 +109,10 @@ class Session:
             "session_id": self.id,
             "plan": None,
             "stub_files": {},
+            # Files whose content the model has been shown in this chat.
+            # A failed edit may quote the file's real lines only for these.
+            "read_paths": set(),
+            "edit_misses": {},
             "session_allow": set(),
             "doom_streak": {},
             "mode": mode,
@@ -251,6 +255,8 @@ class Session:
         self.state["plan"] = None
         self.state["session_reads"] = {}
         self.state["stub_files"] = {}
+        self.state["read_paths"] = set()
+        self.state["edit_misses"] = {}
         self.emit(Event.CHAT_CLEARED)
         self._status()
         self.save_state()
@@ -1276,6 +1282,19 @@ class Session:
 
         self.state.setdefault("doom_streak", {}).pop(name, None)
 
+        # An edit that cannot apply (no match, several matches, no such
+        # file) is answered before anyone is asked: "approve this?" for a
+        # call that can only fail is a wasted click.
+        if name == "edit_file":
+            doomed = self._edit_precheck(args)
+            if doomed is not None:
+                self.emit(Event.TOOL_STARTED, call_id=p["id"], name=name,
+                          summary=summarize_call(name, args),
+                          args=_safe_args(name, args), turn_id=turn_id, hop=hop)
+                self.emit(Event.TOOL_RESULT, call_id=p["id"], name=name,
+                          ok=False, result=doomed)
+                return doomed
+
         # --- gated: mode set, then the safety guards, then the user
         mode = self.mode          # live read, so a mid-batch change applies
         approved = name in AUTO_APPROVE.get(mode, set())
@@ -1325,6 +1344,8 @@ class Session:
             return result
         if name == "write_file":
             return self._write_file(args, p["id"])
+        if name == "edit_file":
+            return self._edit_file(args, p["id"])
         if name == "read_file":
             return self._read_file(args, p["id"])
 
@@ -1338,7 +1359,7 @@ class Session:
 
     def _safety_check(self, name: str, args: dict, mode: Mode,
                       always: bool = False):
-        if name == "write_file":
+        if name in ("write_file", "edit_file"):
             return safety.is_path_safe_for_auto_write(
                 args.get("path"), mode, self.workspace)
         if name == "read_file":
@@ -1394,11 +1415,17 @@ class Session:
             return {"kind": "diff", "path": str(target), "exists": bool(old),
                     "old": _clip(old, 20000), "new": _clip(content, 20000),
                     "bytes": len(content)}
+        if name == "edit_file":
+            return self._edit_preview(args)
         if name in ("run_bash", "start_server"):
             return {"kind": "command", "command": args.get("command") or "",
                     "cwd": str(self.workspace)}
         if name == "read_file":
-            return {"kind": "path", "path": args.get("path") or ""}
+            path = args.get("path") or ""
+            if args.get("offset") is not None or args.get("limit") is not None:
+                # "read_file: a.py (lines 120-199)" -> "a.py (lines 120-199)"
+                path = summarize_call(name, args).split(": ", 1)[-1]
+            return {"kind": "path", "path": path}
         if name == "web_search":
             return {"kind": "query", "query": args.get("query") or ""}
         return {"kind": "json", "value": _safe_args(name, args)}
@@ -1441,8 +1468,139 @@ class Session:
             except Exception:
                 pass
             self.state.setdefault("_turn_files", []).append(key)
+            self._mark_shown(target)
             self.emit(Event.FILE_CHANGED, path=key, bytes=len(content),
                       action="write")
+        return result
+
+    # -- targeted edits ---------------------------------------------------
+    def _target(self, path: str) -> Path:
+        target = Path(path or "").expanduser()
+        return target if target.is_absolute() else self.workspace / target
+
+    def _mark_shown(self, target: Path) -> None:
+        try:
+            self.state.setdefault("read_paths", set()).add(str(target.resolve()))
+        except (OSError, RuntimeError):
+            pass
+
+    def _was_shown(self, target: Path) -> bool:
+        try:
+            return str(target.resolve()) in self.state.get("read_paths", set())
+        except (OSError, RuntimeError):
+            return False
+
+    def _plan_edit(self, args: dict) -> dict:
+        target = self._target(args.get("path"))
+        return tools_mod.plan_edit(
+            target, args.get("old_text") or "", args.get("new_text") or "",
+            bool(args.get("replace_all")), quote=self._was_shown(target),
+            shown=args.get("path"))
+
+    def _edit_miss_note(self, target: Path, message: str) -> str:
+        """Count consecutive misses on one file; from the second, say to
+        look again instead of guessing a third time."""
+        misses = self.state.setdefault("edit_misses", {})
+        key = str(target)
+        misses[key] = misses.get(key, 0) + 1
+        if misses[key] >= 2:
+            message += ("\nThat is " + str(misses[key]) + " failed edits of this "
+                        "file in a row. Stop guessing: read the lines you "
+                        "want to change again (a small range is enough), "
+                        "then copy old_text from that result.")
+        return message
+
+    def _edit_precheck(self, args: dict) -> "str | None":
+        """The error a doomed edit would produce, or None to carry on.
+
+        Runs only where a read would be approved without asking (inside the
+        project, not an environment or credential file). Anywhere else the
+        call goes to the user first: even "0 matches" tells the model
+        something about a file nobody agreed to open."""
+        ok, _ = safety.is_path_safe_for_auto_read(
+            args.get("path"), Mode.AUTO, self.workspace, workspace_only=True)
+        if not ok:
+            return None
+        plan = self._plan_edit(args)
+        if "error" not in plan:
+            return None
+        return self._edit_miss_note(self._target(args.get("path")), plan["error"])
+
+    def _edit_preview(self, args: dict) -> dict:
+        """The changed lines with a little context, numbered as in the file."""
+        target = self._target(args.get("path"))
+        old, new = args.get("old_text") or "", args.get("new_text") or ""
+        plan = tools_mod.plan_edit(target, old, new, bool(args.get("replace_all")))
+        if "error" in plan:
+            # Outside the pre-check's reach (a path that needs approval just
+            # to look at). Show what was asked for; the result will explain.
+            return {"kind": "diff", "path": str(target), "exists": True,
+                    "old": _clip(old, 20000), "new": _clip(new, 20000),
+                    "bytes": len(new), "start_line": 1, "note": ""}
+        context = 3
+        first = plan["line"]
+        start = max(1, first - context)
+        before, after = plan["before"].split("\n"), plan["after"].split("\n")
+        old_end = first + old.count("\n") + context
+        new_end = first + new.count("\n") + context
+        extra = plan["count"] - 1
+        note = (f"and {extra} more identical replacement"
+                f"{'s' if extra != 1 else ''} elsewhere in the file"
+                if extra > 0 else "")
+        return {"kind": "diff", "path": str(target), "exists": True,
+                "old": _clip("\n".join(before[start - 1:old_end]), 20000),
+                "new": _clip("\n".join(after[start - 1:new_end]), 20000),
+                "bytes": len(plan["after"]), "start_line": start, "note": note}
+
+    def _edit_file(self, args: dict, call_id: str) -> str:
+        target = self._target(args.get("path"))
+        new_text = args.get("new_text") or ""
+        result, plan = tools_mod.apply_edit(
+            target, args.get("old_text") or "", new_text,
+            bool(args.get("replace_all")), quote=self._was_shown(target),
+            shown=args.get("path"))
+        ok = plan is not None
+        if not ok and result.startswith("Error: old_text"):
+            result = self._edit_miss_note(target, result)
+        self.emit(Event.TOOL_RESULT, call_id=call_id, name="edit_file",
+                  ok=ok, result=result)
+        if not ok:
+            return result
+        key = str(target)
+        content = plan["after"]
+        self.state.setdefault("edit_misses", {}).pop(key, None)
+        try:
+            # The quality guard looks at what the model just wrote, placed
+            # at its real line numbers — not at the whole file, or a TODO
+            # that was already there would be blamed on a one-line edit.
+            stubs = self.state.setdefault("stub_files", {})
+            found = find_stub_markers(
+                key, "\n" * (plan["line"] - 1) + new_text)
+            if found:
+                stubs[key] = found
+                self.emit(Event.NOTICE, level="warn", message=(
+                    f"{target.name} looks like scaffolding, not finished code"),
+                    detail=found[:5], path=key)
+            elif key in stubs:
+                # Flagged earlier in this turn: is it clean now?
+                still = find_stub_markers(key, content)
+                if still:
+                    stubs[key] = still
+                else:
+                    stubs.pop(key, None)
+        except Exception:
+            pass
+        try:
+            memory.capture(self.state["memory_root"], key, content)
+            # Only the replaced lines are in the conversation, so nothing
+            # may claim the file's full content is.
+            memory.forget_read(self.state, key)
+        except Exception:
+            pass
+        self.state.setdefault("_turn_files", []).append(key)
+        self._mark_shown(target)
+        self.emit(Event.FILE_CHANGED, path=key, bytes=len(content),
+                  action="edit")
         return result
 
     def _read_file(self, args: dict, call_id: str) -> str:
@@ -1471,6 +1629,8 @@ class Session:
         ok = not result.startswith("Error:")
         self.emit(Event.TOOL_RESULT, call_id=call_id, name="read_file",
                   ok=ok, result=_clip(result), bytes=len(result))
+        if ok and detail["shown"]:
+            self._mark_shown(Path(abspath))
         if ok and detail["whole"]:
             # ONLY a whole-file result is recorded: the dedupe stub tells the
             # model "the full content is already in this conversation", which

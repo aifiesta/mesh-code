@@ -8,6 +8,7 @@ against the fake gateway, like test_session.py.
 import json
 import shutil
 import subprocess
+import time
 
 import pytest
 from fake_gateway import sse_turn
@@ -483,3 +484,409 @@ def test_bypass_reads_are_unchanged_and_credentials_still_ask():
     ok, why = safety.is_path_safe_for_auto_read(
         "~/.ssh/id_rsa", Mode.AUTO, workspace_only=True)
     assert not ok and "denylist" in why
+
+
+# ---------------------------------------------------------------------------
+# edit_file: exact-text replacement
+# ---------------------------------------------------------------------------
+
+SAMPLE = (
+    "def area(w, h):\n"
+    "    return w * h\n"
+    "\n"
+    "def perimeter(w, h):\n"
+    "    total = 2 * (w + h)\n"
+    "    return total\n"
+    "\n"
+    "def label(w, h):\n"
+    "    return f\"{w}x{h}\"\n"
+)
+
+
+def _edit(tmp_path, **args):
+    return tools.execute("edit_file", {"path": "shapes.py", **args}, cwd=tmp_path)
+
+
+def test_edit_replaces_exactly_the_matched_text(tmp_path):
+    f = tmp_path / "shapes.py"
+    f.write_text(SAMPLE)
+    out = _edit(tmp_path, old_text="    total = 2 * (w + h)\n    return total",
+                new_text="    return 2 * (w + h)")
+    assert out.startswith("OK — replaced 1 occurrence in ")
+    assert out.endswith("(now lines 5-5)")
+    assert f.read_text() == SAMPLE.replace(
+        "    total = 2 * (w + h)\n    return total", "    return 2 * (w + h)")
+
+
+def test_edit_can_delete_text(tmp_path):
+    f = tmp_path / "shapes.py"
+    f.write_text(SAMPLE)
+    assert _edit(tmp_path, old_text="    total = 2 * (w + h)\n", new_text="").startswith("OK")
+    assert "total = 2" not in f.read_text()
+
+
+def test_ambiguous_edit_changes_nothing_and_lists_the_lines(tmp_path):
+    f = tmp_path / "shapes.py"
+    f.write_text(SAMPLE)
+    out = _edit(tmp_path, old_text="(w, h):", new_text="(width, height):")
+    assert out.startswith("Error: old_text matches 3 places in shapes.py (lines 1, 4, 8).")
+    assert "replace_all" in out and "neighbouring line" in out
+    assert f.read_text() == SAMPLE
+
+
+def test_replace_all_changes_every_match(tmp_path):
+    f = tmp_path / "shapes.py"
+    f.write_text(SAMPLE)
+    out = _edit(tmp_path, old_text="(w, h):", new_text="(w, h=1):", replace_all=True)
+    assert out.startswith("OK — replaced 3 occurrences in ") and "first at line 1" in out
+    assert f.read_text().count("(w, h=1):") == 3
+
+
+def test_edit_never_creates_a_file(tmp_path):
+    out = _edit(tmp_path, old_text="a", new_text="b")
+    assert out.startswith("Error: shapes.py does not exist.")
+    assert "write it whole" in out
+    assert not (tmp_path / "shapes.py").exists()
+
+
+@pytest.mark.parametrize("args, expect", [
+    ({"old_text": "x", "new_text": "y"}, "`path`"),
+    ({"path": "f", "new_text": "y"}, "non-empty `old_text`"),
+    ({"path": "f", "old_text": "", "new_text": "y"}, "non-empty `old_text`"),
+    ({"path": "f", "old_text": "x"}, "`new_text`"),
+    ({"path": "f", "old_text": "x", "new_text": "x"}, "identical"),
+])
+def test_edit_arguments_are_validated(args, expect):
+    err = tools.validate_call("edit_file", args)
+    assert err and err.startswith("Error:") and expect in err
+
+
+def test_edit_keeps_windows_line_endings(tmp_path):
+    f = tmp_path / "shapes.py"
+    f.write_bytes(SAMPLE.replace("\n", "\r\n").encode())
+    # The model sends plain \n, as it saw the text.
+    out = _edit(tmp_path, old_text="    total = 2 * (w + h)\n    return total",
+                new_text="    return 2 * (w + h)\n    # done")
+    assert out.startswith("OK")
+    raw = f.read_bytes().decode()
+    assert "    return 2 * (w + h)\r\n    # done\r\n" in raw
+    assert "\n" not in raw.replace("\r\n", ""), "no bare \\n may be introduced"
+
+
+def test_edit_leaves_unix_line_endings_alone(tmp_path):
+    f = tmp_path / "shapes.py"
+    f.write_text(SAMPLE)
+    _edit(tmp_path, old_text="return w * h", new_text="return h * w")
+    assert b"\r" not in f.read_bytes()
+
+
+# ---- when the text is not there: the message has to be enough to recover ----
+
+def test_miss_with_wrong_indentation_points_at_the_lines(tmp_path):
+    f = tmp_path / "shapes.py"
+    f.write_text(SAMPLE)
+    out = _edit(tmp_path, old_text="total = 2 * (w + h)\nreturn total", new_text="x")
+    assert out.startswith("Error: old_text was not found in shapes.py: the "
+                          "indentation or spacing differs")
+    assert "Lines 5-6 hold the same text" in out
+    assert "Read lines 5-6" in out
+    # Not shown to the model before, so the file's text is not quoted.
+    assert "    total" not in out
+    assert f.read_text() == SAMPLE
+
+
+def test_miss_with_wrong_indentation_quotes_the_file_when_allowed(tmp_path):
+    (tmp_path / "shapes.py").write_text(SAMPLE)
+    plan = tools.plan_edit(tmp_path / "shapes.py",
+                           "total = 2 * (w + h)\nreturn total", "x",
+                           quote=True, shown="shapes.py")
+    assert plan["error"].endswith(
+        "copy it character for character:\n    total = 2 * (w + h)\n    return total")
+
+
+def test_miss_caused_by_copied_line_numbers_says_so(tmp_path):
+    (tmp_path / "shapes.py").write_text(SAMPLE)
+    out = _edit(tmp_path, old_text="5\t    total = 2 * (w + h)\n6\t    return total",
+                new_text="    return 2 * (w + h)")
+    assert "line-number prefixes" in out and "without them" in out
+
+
+def test_miss_where_only_the_first_line_matches(tmp_path):
+    (tmp_path / "shapes.py").write_text(SAMPLE)
+    out = _edit(tmp_path, old_text="def perimeter(w, h):\n    return 2 * w + 2 * h",
+                new_text="x")
+    assert "Its first line is at line 4, but the lines after it are not what you sent." in out
+    assert "Read lines 4-5" in out
+
+
+def test_miss_with_nothing_recognisable(tmp_path):
+    (tmp_path / "shapes.py").write_text(SAMPLE)
+    out = _edit(tmp_path, old_text="def volume(w, h, d):", new_text="x")
+    assert "not even its first line is in the file" in out and "grep -n" in out
+
+
+def test_a_near_match_is_reported_never_applied(tmp_path):
+    f = tmp_path / "shapes.py"
+    f.write_text(SAMPLE)
+    for old in ("return w*h", "RETURN w * h", "return w * h ;"):
+        assert _edit(tmp_path, old_text=old, new_text="return 0").startswith("Error:")
+    assert f.read_text() == SAMPLE
+
+
+def test_edit_summary_and_schema_hint():
+    assert tools.summarize_call("edit_file", {
+        "path": "a.py", "old_text": "a\nb\nc", "new_text": "a\nb"}) == "edit_file: a.py (3 → 2 lines)"
+    assert tools.summarize_call("edit_file", {
+        "path": "a.py", "old_text": "a", "new_text": "", "replace_all": True,
+    }) == "edit_file: a.py (1 → 0 lines, every match)"
+    assert tools.summarize_call("edit_file", {}) == "edit_file: (missing path)"
+    hint = tools.schema_hint("edit_file")
+    assert '"old_text": "..."' in hint and "optional: replace_all" in hint
+
+
+def test_compaction_summary_names_an_edit():
+    from meshharness.core import compact
+    tc = {"id": "c1", "function": {"name": "edit_file", "arguments": json.dumps(
+        {"path": "a.py", "old_text": "x", "new_text": "y"})}}
+    assert compact._describe_action(tc, {}) == "edited a.py"
+
+
+def test_system_prompt_stays_tool_name_free_and_drops_whole_file_rewrites():
+    prompt = tools.build_system_prompt({"repo_memory": False}, "/tmp")
+    for name in ("read_file", "write_file", "edit_file"):
+        assert name not in prompt, f"{name} must not be named in the prompt"
+    assert "always write the whole file" not in prompt
+    assert "replace only the lines that need to change" in prompt
+    # Still forbids placeholder code.
+    assert "Never leave placeholder comments" in prompt
+    assert "rest of the code remains the same" in prompt
+
+
+# ---------------------------------------------------------------------------
+# edit_file through the engine
+# ---------------------------------------------------------------------------
+
+def test_edit_asks_with_a_diff_of_the_changed_lines(gateway, harness, tmp_path):
+    f = tmp_path / "shapes.py"
+    f.write_text("# header\n" * 20 + SAMPLE)
+    gateway.script(
+        _call("edit_file", path="shapes.py",
+              old_text="    total = 2 * (w + h)\n    return total",
+              new_text="    return 2 * (w + h)"),
+        sse_turn("Simplified it."))
+    h = harness(mode=Mode.DEFAULT)
+    h.session.submit("simplify perimeter")
+
+    proposal = h.wait_for(Event.TOOL_PROPOSED)
+    assert proposal["data"]["name"] == "edit_file"
+    preview = proposal["data"]["preview"]
+    assert preview["kind"] == "diff" and preview["exists"] is True
+    # A window around the change, numbered as in the file — not 30 lines of file.
+    assert preview["start_line"] == 22
+    assert preview["old"].splitlines()[3:5] == ["    total = 2 * (w + h)", "    return total"]
+    assert "    return 2 * (w + h)" in preview["new"].splitlines()
+    assert "# header" not in preview["old"]
+    assert f.read_text().count("total") == 2, "must not edit before approval"
+
+    h.session.respond_approval(proposal["data"]["token"], Decision.ALLOW)
+    h.wait_for(Event.TURN_FINISHED)
+    assert "total" not in f.read_text()
+    changed = h.of(Event.FILE_CHANGED)[0]["data"]
+    assert changed["path"].endswith("shapes.py") and changed["action"] == "edit"
+    assert _tool_results(gateway)[0].startswith("OK — replaced 1 occurrence")
+
+
+def test_a_doomed_edit_is_answered_without_asking_the_user(gateway, harness, tmp_path):
+    (tmp_path / "shapes.py").write_text(SAMPLE)
+    gateway.script(
+        _call("edit_file", path="shapes.py", old_text="def volume():", new_text="x"),
+        sse_turn("I'll look again."))
+    h = harness(mode=Mode.DEFAULT)
+    h.session.submit("edit")
+    h.wait_for(Event.TURN_FINISHED)
+
+    assert not h.of(Event.TOOL_PROPOSED), "nothing to approve: the edit cannot apply"
+    failed = [e for e in h.of(Event.TOOL_RESULT) if e["data"]["name"] == "edit_file"]
+    assert failed and failed[0]["data"]["ok"] is False
+    assert _tool_results(gateway)[0].startswith("Error: old_text was not found in shapes.py")
+    assert (tmp_path / "shapes.py").read_text() == SAMPLE
+
+
+@pytest.mark.parametrize("mode", [Mode.ACCEPT_EDITS, Mode.AUTO, Mode.BYPASS])
+def test_edit_is_auto_approved_wherever_a_write_is(gateway, harness, tmp_path, mode):
+    f = tmp_path / "shapes.py"
+    f.write_text(SAMPLE)
+    gateway.script(
+        _call("edit_file", path="shapes.py", old_text="return w * h", new_text="return h * w"),
+        sse_turn("done"))
+    h = harness(mode=mode)
+    h.session.submit("edit")
+    h.wait_for(Event.TURN_FINISHED)
+    assert not h.of(Event.TOOL_PROPOSED)
+    assert "return h * w" in f.read_text()
+
+
+def test_edit_outside_the_project_asks_like_a_write_does(gateway, harness, tmp_path):
+    outside = tmp_path.parent / "outside-edit.py"
+    outside.write_text("x = 1\n")
+    gateway.script(
+        _call("edit_file", path=str(outside), old_text="x = 1", new_text="x = 2"),
+        sse_turn("ok"))
+    h = harness(mode=Mode.ACCEPT_EDITS)
+    h.session.submit("edit outside")
+    proposal = h.wait_for(Event.TOOL_PROPOSED)
+    assert "outside the current project directory" in proposal["data"]["blocked_reason"]
+    h.session.respond_approval(proposal["data"]["token"], Decision.DENY)
+    h.wait_for(Event.TURN_FINISHED)
+    assert outside.read_text() == "x = 1\n"
+
+
+def test_a_missed_edit_outside_the_project_reveals_nothing_before_approval(
+        gateway, harness, tmp_path):
+    """No pre-check there: even a match count is information about a file
+    the user has not agreed to open."""
+    outside = tmp_path.parent / "outside-secret.py"
+    outside.write_text("token = 'abc'\n")
+    gateway.script(
+        _call("edit_file", path=str(outside), old_text="nope", new_text="x"),
+        sse_turn("ok"))
+    h = harness(mode=Mode.DEFAULT)
+    h.session.submit("probe")
+    proposal = h.wait_for(Event.TOOL_PROPOSED)
+    assert proposal["data"]["preview"]["old"] == "nope"
+    h.session.respond_approval(proposal["data"]["token"], Decision.DENY)
+    h.wait_for(Event.TURN_FINISHED)
+    assert _tool_results(gateway) == ["User denied this tool call."]
+
+
+def test_a_failed_edit_quotes_the_file_only_after_it_was_read(gateway, harness, tmp_path):
+    (tmp_path / "shapes.py").write_text(SAMPLE)
+    wrong = {"path": "shapes.py", "old_text": "total = 2 * (w + h)\nreturn total",
+             "new_text": "return 2 * (w + h)"}
+    gateway.script(
+        _call("edit_file", "c1", **wrong),
+        _call("read_file", "c2", path="shapes.py", offset=4, limit=3),
+        _call("edit_file", "c3", **wrong),
+        sse_turn("done"))
+    h = harness(mode=Mode.BYPASS)
+    h.session.submit("edit")
+    h.wait_for(Event.TURN_FINISHED)
+
+    before, _read, after = _tool_results(gateway)
+    assert "Read lines 5-6" in before and "    total = 2" not in before
+    assert "copy it character for character:\n    total = 2 * (w + h)\n    return total" in after
+    # Second miss in a row on the same file: told to stop guessing.
+    assert "2 failed edits of this file in a row" in after
+    assert "2 failed edits" not in before
+
+
+def test_after_an_edit_the_file_is_not_claimed_to_be_in_context(gateway, harness, tmp_path):
+    f = tmp_path / "mod.py"
+    f.write_text(_numbered(200))
+    gateway.script(
+        _call("read_file", "c1", path="mod.py"),
+        _call("edit_file", "c2", path="mod.py", old_text="line 50\n", new_text="line fifty\n"),
+        _call("read_file", "c3", path="mod.py"),
+        sse_turn("done"))
+    h = harness(mode=Mode.BYPASS, optimize=0.0)
+    h.session.submit("edit then re-read")
+    h.wait_for(Event.TURN_FINISHED)
+
+    _first, edit, reread = _tool_results(gateway)
+    assert edit.startswith("OK")
+    # The re-read returns the NEW content in full, not "already in your context".
+    assert reread == f.read_text() and "line fifty" in reread
+
+
+def test_edit_drops_the_dedupe_entry_even_when_bytes_are_restored(
+        gateway, harness, tmp_path):
+    """Edit away and back: the bytes match the recorded read again, but the
+    record must be gone — the entry is dropped on every successful edit."""
+    (tmp_path / "mod.py").write_text(_numbered(200))
+    gateway.script(
+        _call("read_file", "c1", path="mod.py"),
+        _call("edit_file", "c2", path="mod.py", old_text="line 50\n", new_text="line fifty\n"),
+        _call("edit_file", "c3", path="mod.py", old_text="line fifty\n", new_text="line 50\n"),
+        sse_turn("done"))
+    h = harness(mode=Mode.BYPASS, optimize=0.0)
+    h.session.submit("edit twice")
+    h.wait_for(Event.TURN_FINISHED)
+    assert h.session.state["session_reads"] == {}
+
+
+def test_placeholder_guard_covers_what_an_edit_writes(gateway, harness, tmp_path):
+    (tmp_path / "game.js").write_text("function start() {\n  run();\n}\n")
+    gateway.script(
+        _call("edit_file", path="game.js", old_text="  run();",
+              new_text="  // TODO: add game logic here"),
+        sse_turn("done"), sse_turn("ok"), sse_turn("ok"))
+    h = harness(mode=Mode.BYPASS)
+    h.session.submit("make the game")
+    h.wait_for(Event.TURN_FINISHED)
+    notices = [e["data"] for e in h.of(Event.NOTICE)
+               if "scaffolding" in e["data"].get("message", "")]
+    assert notices and notices[0]["detail"][0].startswith("line 2:")
+
+
+def test_placeholder_guard_ignores_todos_the_edit_did_not_write(gateway, harness, tmp_path):
+    (tmp_path / "game.js").write_text(
+        "// TODO: tidy this file one day\nfunction start() {\n  run();\n}\n")
+    gateway.script(
+        _call("edit_file", path="game.js", old_text="  run();", new_text="  runGame();"),
+        sse_turn("done"))
+    h = harness(mode=Mode.BYPASS)
+    h.session.submit("rename the call")
+    h.wait_for(Event.TURN_FINISHED)
+    assert h.session.state["stub_files"] == {}
+    assert not [e for e in h.of(Event.NOTICE)
+                if "scaffolding" in e["data"].get("message", "")]
+
+
+def test_truncated_edit_arguments_take_the_malformed_call_path(gateway, harness, tmp_path):
+    (tmp_path / "shapes.py").write_text(SAMPLE)
+    gateway.script(
+        sse_turn(tool_calls=[{"id": "c1", "name": "edit_file", "arguments":
+                              '{"path": "shapes.py", "old_text": "return w * h", "new_text": "retu'}]),
+        sse_turn("Trying again."))
+    h = harness(mode=Mode.BYPASS)
+    h.session.submit("edit")
+    skipped = h.wait_for(Event.TOOL_SKIPPED)
+    assert skipped["data"]["name"] == "edit_file"
+    assert skipped["data"]["kind"] in ("truncated", "unparseable")
+    h.wait_for(Event.TURN_FINISHED)
+    feedback = _tool_results(gateway)[0]
+    assert "cut off" in feedback and "edit_file expects" in feedback
+    assert (tmp_path / "shapes.py").read_text() == SAMPLE
+
+
+def test_edit_missing_a_required_argument_is_skipped_with_the_schema(gateway, harness, tmp_path):
+    (tmp_path / "shapes.py").write_text(SAMPLE)
+    gateway.script(
+        _call("edit_file", path="shapes.py", new_text="x"),
+        sse_turn("ok"))
+    h = harness(mode=Mode.BYPASS)
+    h.session.submit("edit")
+    h.wait_for(Event.TURN_FINISHED)
+    feedback = _tool_results(gateway)[0]
+    assert "non-empty `old_text`" in feedback and "edit_file expects" in feedback
+    assert h.of(Event.TOOL_SKIPPED)[0]["data"]["kind"] == "invalid"
+
+
+def test_repeating_the_same_failed_edit_trips_the_stall_detector(gateway, harness, tmp_path):
+    """A model stuck re-sending one failing edit is nudged after 3 identical
+    hops and stopped by the 9th — the existing loop guard covers the new tool."""
+    (tmp_path / "shapes.py").write_text(SAMPLE)
+    miss = _call("edit_file", path="shapes.py", old_text="def volume():", new_text="x")
+    gateway.script(*([miss] * 14), sse_turn("giving up"))
+    h = harness(mode=Mode.BYPASS)
+    h.session.submit("edit")
+    end = time.time() + 40
+    while time.time() < end and not (h.of(Event.TURN_FINISHED) or h.of(Event.TURN_ABORTED)):
+        time.sleep(0.05)
+    assert h.of(Event.TURN_FINISHED) or h.of(Event.TURN_ABORTED)
+
+    edits = [e for e in h.of(Event.TOOL_RESULT) if e["data"]["name"] == "edit_file"]
+    assert 3 <= len(edits) <= 9, "the loop guard must stop it before the script runs out"
+    sent = json.dumps([r["messages"] for r in gateway.requests])
+    assert "repeating the same action" in sent, "the model must be told it is looping"
+    assert (tmp_path / "shapes.py").read_text() == SAMPLE

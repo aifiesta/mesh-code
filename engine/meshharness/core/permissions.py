@@ -48,10 +48,11 @@ LABELS = {
 # handle_tool_calls checks `tc.name in AUTO_APPROVE[mode]`.
 AUTO_APPROVE: dict = {
     Mode.DEFAULT:      set(),
-    Mode.ACCEPT_EDITS: {"write_file", "read_file"},
-    Mode.AUTO:         {"write_file", "read_file", "run_bash", "web_search"},
-    Mode.BYPASS:       {"write_file", "run_bash", "read_file", "start_server",
+    Mode.ACCEPT_EDITS: {"write_file", "edit_file", "read_file"},
+    Mode.AUTO:         {"write_file", "edit_file", "read_file", "run_bash",
                         "web_search"},
+    Mode.BYPASS:       {"write_file", "edit_file", "run_bash", "read_file",
+                        "start_server", "web_search"},
 }
 
 # Modes that warrant a more aggressive footer hint.
