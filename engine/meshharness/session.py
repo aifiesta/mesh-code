@@ -1023,6 +1023,14 @@ class Session:
         self.state["_smart_effort"] = info.get("effort") if info.get("scored") else None
         self.turn_model = info["model"]
 
+    def _asks_for_caching(self) -> bool:
+        """Does this session mark its requests for caching? (The Optimize
+        setting does; without it Anthropic models bill every token in full.)"""
+        try:
+            return float(self.cfg.get("optimize") or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
     def _serving(self) -> tuple:
         """(model, thinking level) of the pick serving right now."""
         return (self.state.get("_smart_pick"), self.state.get("_smart_level"))
@@ -1074,7 +1082,8 @@ class Session:
                                 needs_tools=True, needs_ctx=self._needs_ctx(),
                                 incumbent=self.state.get("_smart_last"),
                                 exclude=exclude,
-                                level=self.cfg.get("reasoning_effort"))
+                                level=self.cfg.get("reasoning_effort"),
+                                asks_for_caching=self._asks_for_caching())
             if got and got.get("model"):
                 self._apply_pick(got, difficulty)
                 self.emit(Event.ROUTED, model=got["model"], cohort=cohort,
@@ -1113,7 +1122,8 @@ class Session:
                                 exclude=set(self.state.get("_smart_bad") or set()),
                                 # only something clearly stronger than what just struggled
                                 failed=prev if self.state.get("_smart_scored") else None,
-                                level=self.cfg.get("reasoning_effort"))
+                                level=self.cfg.get("reasoning_effort"),
+                                asks_for_caching=self._asks_for_caching())
             if not got or not got.get("model"):
                 return False
             self.state["_smart_escalations"] = self.state.get("_smart_escalations", 0) + 1
@@ -1157,7 +1167,8 @@ class Session:
                                 incumbent=self.state.get("_smart_last"),
                                 exclude=set(self.state.get("_smart_bad") or set()),
                                 incumbent_bonus=self._switch_cost_bonus(),
-                                level=self.cfg.get("reasoning_effort"))
+                                level=self.cfg.get("reasoning_effort"),
+                                asks_for_caching=self._asks_for_caching())
             if not got or not got.get("model"):
                 return
             prev = self._serving()
@@ -1226,7 +1237,8 @@ class Session:
                                 self.cfg.get("route_weights"), table, self.catalog,
                                 needs_tools=True, incumbent=self.cfg.get("model"),
                                 exclude=set(self.cfg.get("exclude_models") or []),
-                                level=self.cfg.get("reasoning_effort"))
+                                level=self.cfg.get("reasoning_effort"),
+                                asks_for_caching=self._asks_for_caching())
             out.update({
                 "available": bool(got),
                 "pick": (got or {}).get("model"),

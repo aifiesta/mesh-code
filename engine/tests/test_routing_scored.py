@@ -481,3 +481,138 @@ def test_a_bigger_level_is_priced_as_a_bigger_task():
     cost = {rung: router._at_token_prices(ents, _cat(), rung)[0]["cost_per_task"]
             for rung in ("low", "mid", "high")}
     assert cost["low"] < cost["mid"] < cost["high"]
+
+
+# ---- a failure is priced as one step up, not a jump to the strongest ----------------------
+
+def _k():
+    return router._slider_scale(None)
+
+
+def test_just_under_the_top_a_failure_costs_the_strongest_entry():
+    ents = router._live_entries(DOC, _cat(), None, False, 0, None)
+    strongest = DOC["models"]["t/strong"]["levels"]["max"]
+    assert abs(router._step_up_price(ents, "xhigh", _k())
+               - (strongest["cost_per_task"] + 0.05 * strongest["minutes_per_task"])) < 1e-9
+
+
+def test_lower_down_a_failure_costs_less_because_it_climbs_one_level_at_a_time():
+    ents = router._live_entries(DOC, _cat(), None, False, 0, None)
+    prices = [router._step_up_price(ents, rung, _k()) for rung in ("low", "mid", "high", "xhigh")]
+    assert prices == sorted(prices) and prices[0] < prices[-1]
+    # one level up from "high" is the best attempt at "xhigh", itself backed by the strongest
+    top = prices[-1]
+    best_xhigh = min(router._expected(e, "xhigh", _k(), top)["total"] for e in ents
+                     if router._chance(e, "xhigh") >= 0.6 * max(router._chance(x, "xhigh") for x in ents))
+    assert abs(prices[2] - best_xhigh) < 1e-9
+
+
+# A cheap model, and one fifteen times dearer that is 14 points likelier to finish.
+DEAR_BUT_BETTER = {"models": {
+    "t/cheap": {"name": "Cheap", "price_in_per_1m": 0.2, "price_out_per_1m": 0.6,
+                "levels": {"max": _e(84, 31, 0.59, 15)}},
+    "t/dear": {"name": "Dear", "price_in_per_1m": 3.0, "price_out_per_1m": 15.0,
+               "levels": {"high": _e(90, 52, 7.2, 24)}},
+    "t/top": {"name": "Top", "price_in_per_1m": 4.0, "price_out_per_1m": 20.0,
+              "levels": {"max": _e(89, 54, 20.0, 25)}},
+}}
+
+
+def _dear_cat():
+    return [{"id": m, "context_length": 200000,
+             "pricing": {"prompt_usd_per_1m": str(v["price_in_per_1m"]),
+                         "completion_usd_per_1m": str(v["price_out_per_1m"])}}
+            for m, v in DEAR_BUT_BETTER["models"].items()]
+
+
+def test_a_much_dearer_model_does_not_start_a_task_for_a_few_points_of_chance():
+    for rung in ("low", "mid", "high"):
+        got = router.pick_scored(rung, None, DEAR_BUT_BETTER, _dear_cat())
+        assert got["model"] == "t/cheap", rung
+    # the user can still ask for it
+    assert router.pick_scored("high", {"cost": 0.02, "cap": 0.96, "speed": 0.02},
+                              DEAR_BUT_BETTER, _dear_cat())["model"] != "t/cheap"
+
+
+# ---- too close to call: the one that is cheapest to try ---------------------------------------
+
+def _two(cost_b, hard_b=41):
+    return {"models": {
+        "t/a": {"name": "A", "levels": {"medium": _e(82, 41, 1.00, 4)}},
+        "t/b": {"name": "B", "levels": {"medium": _e(82, hard_b, cost_b, 4)}},
+        "t/strong": DOC["models"]["t/strong"]}}
+
+
+def _plain(*ids):
+    return [{"id": m, "context_length": 200000} for m in ids]      # no prices: benchmark figures
+
+
+def test_between_two_entries_too_close_to_call_the_cheaper_attempt_wins():
+    # B is five points likelier to finish and its total is a shade lower, but it costs 50% more to try
+    got = router.pick_scored("xhigh", None, _two(1.5, hard_b=46), _plain("t/a", "t/b", "t/strong"))
+    totals = {r["model"]: r["expected"] for r in got["ranked"]}
+    assert totals["t/b"] < totals["t/a"] < totals["t/b"] * 1.10
+    assert got["model"] == "t/a"
+
+
+def test_a_clear_difference_is_not_treated_as_a_tie():
+    got = router.pick_scored("xhigh", None, _two(1.5, hard_b=52), _plain("t/a", "t/b", "t/strong"))
+    totals = {r["model"]: r["expected"] for r in got["ranked"]}
+    assert totals["t/a"] > totals["t/b"] * 1.10
+    assert got["model"] == "t/b"
+
+
+# ---- the estimate follows how the app is really billed ------------------------------------------
+
+def _cache_cat(model, cache_price="0.02"):
+    return [{"id": model, "context_length": 200000,
+             "pricing": {"prompt_usd_per_1m": "1.0", "completion_usd_per_1m": "4.0",
+                         "cache_read_input_usd_per_1m": cache_price}}]
+
+
+def _priced(model, **kw):
+    doc = {"models": {model: {"name": "M", "levels": {"high": _e(80, 40, 1.0, 5)}}}}
+    cat = kw.pop("catalog", None) or _cache_cat(model)
+    ents = router._live_entries(doc, cat, None, False, 0, None)
+    return router._at_token_prices(ents, cat, "mid", **kw)[0]
+
+
+def test_resent_input_is_counted_at_the_cached_price_where_it_is_billed_that_way():
+    sent, written = router.TOKEN_PRICED["mid"]
+    e = _priced("deepseek/x")
+    want = (sent * 0.25 * 1.0 + sent * 0.75 * 0.02 + written * 4.0) / 1e6
+    assert abs(e["cost_per_task"] - want) < 1e-9
+    listed = (sent * 1.0 + written * 4.0) / 1e6
+    assert e["cost_per_task"] < 0.4 * listed
+
+
+def test_a_model_with_no_cached_price_is_counted_in_full():
+    sent, written = router.TOKEN_PRICED["mid"]
+    cat = [{"id": "deepseek/x", "context_length": 200000,
+            "pricing": {"prompt_usd_per_1m": "1.0", "completion_usd_per_1m": "4.0"}}]
+    assert abs(_priced("deepseek/x", catalog=cat)["cost_per_task"]
+               - (sent * 1.0 + written * 4.0) / 1e6) < 1e-9
+
+
+def test_anthropic_models_are_full_price_until_the_app_asks_for_caching():
+    full = _priced("anthropic/claude-x")["cost_per_task"]
+    cached = _priced("anthropic/claude-x", asks_for_caching=True)["cost_per_task"]
+    assert cached < 0.4 * full
+    assert abs(cached - _priced("deepseek/x")["cost_per_task"]) < 1e-9
+
+
+def test_caching_makes_a_task_cheaper_not_faster():
+    assert _priced("deepseek/x")["minutes_per_task"] == \
+        _priced("anthropic/claude-x")["minutes_per_task"]
+
+
+def test_the_session_tells_the_router_whether_it_asks_for_caching(harness, monkeypatch):
+    seen = []
+    real = router.choose
+    monkeypatch.setattr(router, "choose",
+                        lambda *a, **kw: seen.append(kw.get("asks_for_caching")) or real(*a, **kw))
+    off = _scored_session(harness, monkeypatch)
+    off.session.explain_route("fix the typo in README.md")
+    on = _scored_session(harness, monkeypatch, optimize=0.3)
+    on.session.explain_route("fix the typo in README.md")
+    assert seen == [False, True]

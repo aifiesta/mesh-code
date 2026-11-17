@@ -473,7 +473,8 @@ def _ranked_view(ranked: list, score) -> list:
 #
 # Everything is in dollars, so nothing arbitrary is added together. The
 # chance of failure uses score minus margin, so thin evidence ranks lower by
-# itself. A rescue is priced as running the strongest available entry.
+# itself. A rescue is priced as what the cascade really does next: one rung
+# up, where the attempt can fail and climb again (see _step_up_price).
 # Other kinds of prompt (vision, writing, research…) are not covered by these
 # scores and stay on the table above. `choose()` is the one entry point.
 
@@ -481,6 +482,10 @@ SCORED_COHORTS = ("agentic", "coding")
 TIME_VALUE = 0.05        # dollars per minute of waiting, at the default speed weight
 SCORED_FLOOR = 0.6       # never pick under 60% of the best chance available
 STICKY_MARGIN = 0.10     # keep the serving model while it is within 10% of the best
+# The scores carry margins of 5 to 12 points, so two entries whose expected
+# costs are this close cannot be told apart. Between them, take the one that
+# is cheapest to try: that part of the bill is certain.
+TIE_MARGIN = 0.10
 # How much of each rung is everyday work; the rest is judged on the hard score.
 EVERYDAY_SHARE = {"low": 1.0, "mid": 0.75, "high": 0.5, "xhigh": 0.0}
 # The file's cost and minutes come from long benchmark tasks, where thinking
@@ -495,6 +500,23 @@ EVERYDAY_SHARE = {"low": 1.0, "mid": 0.75, "high": 0.5, "xhigh": 0.0}
 # keep the benchmark figures: a task that has already beaten a model is no
 # longer a small one.
 TOKEN_PRICED = {"low": (12_000, 300), "mid": (40_000, 1_500), "high": (100_000, 3_000)}
+# Most of what an agent sends is the earlier conversation sent again, and most
+# providers bill that at a much lower cached rate without being asked: in the
+# recorded runs about three quarters of the input was billed that way. List
+# prices alone made two models look tied whose bills were three times apart.
+# Anthropic models cache only when the request asks for it (the Optimize
+# setting), so they are counted at full price until it does.
+CACHED_SHARE = 0.75
+
+
+def _bills_cached(model: str, catalog_row: dict, asks_for_caching: bool) -> bool:
+    """Is re-sent input billed at the cached rate for this model, as the app
+    is set up right now?"""
+    if (catalog_row.get("pricing") or {}).get("cache_read_input_usd_per_1m") is None:
+        return False
+    if (model or "").startswith("anthropic/"):
+        return bool(asks_for_caching)
+    return True
 _LEVEL_ORDER = ("default", "none", "low", "medium", "high", "xhigh", "max")
 _TABLE_RUNG = {"low": "low", "mid": "low", "high": "mid", "xhigh": "high", "max": "max"}
 
@@ -527,6 +549,26 @@ def _expected(e: dict, band: str, k: dict, rescue: float) -> dict:
     wait = k["speed"] * TIME_VALUE * e["minutes_per_task"]
     risk = k["cap"] * (1.0 - _chance(e, band)) * rescue
     return {"total": attempt + wait + risk, "attempt": attempt, "wait": wait, "risk": risk}
+
+
+def _step_up_price(ents: list, band: str, k: dict) -> float:
+    """What a failed attempt on this rung costs: finishing the task one rung
+    up, where that attempt can fail and climb again, all the way to the
+    strongest entry at the top.
+
+    A failure does not jump straight to the strongest model — the cascade
+    climbs one rung at a time — so pricing it as if it did made every point of
+    success chance look worth far more than it is, and a dear model beat a
+    cheap one for a handful of points. `ents` are already priced for the task
+    in hand, which keeps its size as it climbs."""
+    top = max(ents, key=lambda e: (_chance(e, "max"), -e["cost_per_task"]))
+    price = top["cost_per_task"] + TIME_VALUE * top["minutes_per_task"]
+    above = ESCALATION_LADDER[ESCALATION_LADDER.index(band) + 1:-1]
+    for rung in reversed(above):                 # from just under the top, down
+        best = max(_chance(e, rung) for e in ents)
+        able = [e for e in ents if _chance(e, rung) >= SCORED_FLOOR * best] or ents
+        price = min(_expected(e, rung, k, price)["total"] for e in able)
+    return price
 
 
 def _live_entries(doc, catalog, exclude, needs_tools, needs_ctx, level) -> list:
@@ -571,27 +613,35 @@ def _live_entries(doc, catalog, exclude, needs_tools, needs_ctx, level) -> list:
     return out
 
 
-def _at_token_prices(ents: list, catalog, band: str) -> "list | None":
-    """The same entries priced for a typical task on this rung at the
-    gateway's live prices, or None when any price is unknown (the caller keeps
+def _at_token_prices(ents: list, catalog, band: str,
+                     asks_for_caching: bool = False) -> "list | None":
+    """The same entries priced for a typical task on this rung the way the
+    gateway would bill it, or None when any price is unknown (the caller keeps
     the benchmark figures for all of them — never a mix of the two scales).
 
-    The wait shrinks with the cost, entry by entry: minutes per dollar is a
-    property of the model and its thinking level, so a task that costs a
-    twentieth of the benchmark one takes about a twentieth of the time. Across
-    six recorded app runs this lands within about a third of the real wait,
-    where one fixed fraction for every model was off by up to ten times."""
+    The wait shrinks with the work, entry by entry: minutes per dollar of
+    uncached work is a property of the model and its thinking level, so a task
+    that is a twentieth of the benchmark one takes about a twentieth of the
+    time. Across six recorded app runs this lands within about a third of the
+    real wait, where one fixed fraction for every model was off by up to ten
+    times. Caching makes a task cheaper, not faster, so the wait is scaled by
+    the list-price cost."""
     from .pricing import estimate_cost
     sent, written = TOKEN_PRICED[band]
+    rows = {m.get("id"): m for m in catalog or [] if isinstance(m, dict)}
     out = []
     for e in ents:
-        cost = estimate_cost(e["model"], {
-            "prompt_tokens": sent,
-            "completion_tokens": int(written * e.get("writes", 1.0))}, catalog)
-        if not cost or cost <= 0:
+        usage = {"prompt_tokens": sent,
+                 "completion_tokens": int(written * e.get("writes", 1.0))}
+        listed = estimate_cost(e["model"], usage, catalog)
+        if not listed or listed <= 0:
             return None
+        cost = listed
+        if _bills_cached(e["model"], rows.get(e["model"]) or {}, asks_for_caching):
+            cost = estimate_cost(e["model"], dict(usage, prompt_tokens_details={
+                "cached_tokens": int(sent * CACHED_SHARE)}), catalog) or listed
         out.append(dict(e, cost_per_task=cost,
-                        minutes_per_task=e["minutes_per_task"] * cost / e["cost_per_task"]))
+                        minutes_per_task=e["minutes_per_task"] * listed / e["cost_per_task"]))
     return out
 
 
@@ -608,14 +658,17 @@ def pick_scored(difficulty: str, weights: "dict | None", doc: "dict | None",
                 needs_ctx: int = 0, incumbent: "str | None" = None,
                 exclude: "set | None" = None, incumbent_bonus: float = 0.0,
                 failed: "tuple | None" = None,
-                level: "str | None" = None) -> "dict | None":
+                level: "str | None" = None,
+                asks_for_caching: bool = False) -> "dict | None":
     """Choose a model and thinking level for coding work, or None when the
     scores cover nothing the gateway offers (the caller falls back).
 
     `failed` = (model, level) that was just serving and visibly struggled:
     only entries clearly stronger than it are considered — their cautious
     chance must beat its full score. `level` = a thinking level the user
-    fixed. Pure — no I/O, no mutation of its inputs."""
+    fixed. `asks_for_caching` = the app marks its requests for caching, which
+    is what makes Anthropic models bill re-sent input at the cached rate.
+    Pure — no I/O, no mutation of its inputs."""
     try:
         band = _band(difficulty)
         ents = _live_entries(doc, catalog, exclude, needs_tools, needs_ctx, level)
@@ -623,12 +676,11 @@ def pick_scored(difficulty: str, weights: "dict | None", doc: "dict | None",
             return None
         scale = "benchmark task"
         if band in TOKEN_PRICED:
-            priced = _at_token_prices(ents, catalog, band)
+            priced = _at_token_prices(ents, catalog, band, asks_for_caching)
             if priced:
                 ents, scale = priced, "token prices"
         k = _slider_scale(weights)
-        strongest = max(ents, key=lambda e: (_chance(e, "max"), -e["cost_per_task"]))
-        rescue = strongest["cost_per_task"] + TIME_VALUE * strongest["minutes_per_task"]
+        rescue = _step_up_price(ents, band if band in ESCALATION_LADDER[:-1] else "xhigh", k)
 
         cands = ents
         if failed:
@@ -651,7 +703,11 @@ def pick_scored(difficulty: str, weights: "dict | None", doc: "dict | None",
             able = [e for e in cands if _chance(e, band) >= SCORED_FLOOR * best] or cands
             costs = {id(e): _expected(e, band, k, rescue) for e in able}
             ranked = sorted(able, key=lambda e: costs[id(e)]["total"])
-            chosen, sticky = ranked[0], False
+            lowest = costs[id(ranked[0])]["total"]
+            # too close to call: the one that is cheapest to try
+            close = [e for e in ranked if costs[id(e)]["total"] <= lowest * (1.0 + TIE_MARGIN)]
+            chosen = min(close, key=lambda e: (e["cost_per_task"], costs[id(e)]["total"]))
+            sticky = False
             # Switching models throws away the provider's prompt cache and
             # re-sends the whole history, so the serving model keeps the turn
             # while its best entry is close to the best there is — closer
@@ -659,7 +715,7 @@ def pick_scored(difficulty: str, weights: "dict | None", doc: "dict | None",
             if incumbent and incumbent != chosen["model"]:
                 mine = next((e for e in ranked if e["model"] == incumbent), None)
                 slack = 1.0 + STICKY_MARGIN + max(0.0, incumbent_bonus) / 100.0
-                if mine and costs[id(mine)]["total"] <= costs[id(chosen)]["total"] * slack:
+                if mine and costs[id(mine)]["total"] <= lowest * slack:
                     chosen, sticky = mine, True
 
         def view(e):
@@ -683,7 +739,8 @@ def choose(cohort: str, difficulty: str, weights: "dict | None",
            needs_tools: bool = False, needs_ctx: int = 0,
            incumbent: "str | None" = None, exclude: "set | None" = None,
            incumbent_bonus: float = 0.0, failed: "tuple | None" = None,
-           level: "str | None" = None, scores_doc: "dict | None" = None) -> "dict | None":
+           level: "str | None" = None, scores_doc: "dict | None" = None,
+           asks_for_caching: bool = False) -> "dict | None":
     """The router's one entry point. Coding work is picked from the per-level
     scores; anything they do not cover — another kind of prompt, or an account
     that offers none of the scored models — falls back to the routing table,
@@ -695,7 +752,8 @@ def choose(cohort: str, difficulty: str, weights: "dict | None",
         got = pick_scored(difficulty, weights, scores_doc, catalog,
                           needs_tools=needs_tools, needs_ctx=needs_ctx,
                           incumbent=incumbent, exclude=exclude,
-                          incumbent_bonus=incumbent_bonus, failed=failed, level=level)
+                          incumbent_bonus=incumbent_bonus, failed=failed, level=level,
+                          asks_for_caching=asks_for_caching)
         if got:
             got["cohort"] = cohort
             return got
