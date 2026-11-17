@@ -1367,8 +1367,11 @@ class Session:
             # the project, never an environment file. Bypass and the user's
             # own "Always allow" keep the denylist-only rule they had.
             scoped = not always and mode in (Mode.ACCEPT_EDITS, Mode.AUTO)
+            # The engine's own command logs count as readable alongside the
+            # project: a trimmed command result points the model at one.
             return safety.is_path_safe_for_auto_read(
-                args.get("path"), mode, self.workspace, workspace_only=scoped)
+                args.get("path"), mode, self.workspace, workspace_only=scoped,
+                extra_roots=(tools_mod.shell_log_dir(),))
         if name in ("run_bash", "start_server"):
             return safety.is_command_safe_for_auto(
                 args.get("command"), mode, self.workspace)

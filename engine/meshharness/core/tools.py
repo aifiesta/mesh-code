@@ -2,8 +2,10 @@
 import json
 import os
 import re
+import secrets
 import signal
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -837,6 +839,134 @@ def _truncate(text: str) -> str:
     return f"{text[:OUTPUT_LIMIT]}{tail}"
 
 
+# ---------------------------------------------------------------------------
+# Shell output. Test and build tools print what failed, and the summary, at
+# the END — exactly what a plain "first OUTPUT_LIMIT chars" cut throws away,
+# after which the model re-runs the command with a filter. Long output is
+# instead returned as its head, the lines that look like failures, and its
+# tail, with the full text saved to a log the model can read by line range.
+_ANSI_RE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]"                # CSI: colours, cursor moves
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"    # OSC: titles, hyperlinks
+    r"|\x1b[@-Z\\-_]")                        # two-byte escapes
+_FAILURE_RE = re.compile(
+    r"(?i)\b(?:fail\w*|error\w*|exception|traceback|panic\w*|assert\w*|fatal)\b")
+SHELL_HEAD_CHARS = 1_000
+SHELL_FAILURE_CHARS = 3_000
+SHELL_TAIL_CHARS = 3_000
+SHELL_LINE_CLIP = 300          # one failure line shown in the middle section
+SHELL_LOG_MAX_AGE = 24 * 3600  # seconds a saved log is kept
+
+
+def clean_output(text: str) -> str:
+    """Drop terminal control codes and the overwritten half of progress
+    lines ("10%\\r20%\\r30%" -> "30%") — bytes that cost tokens and say
+    nothing."""
+    text = _ANSI_RE.sub("", text).replace("\r\n", "\n")
+    if "\r" in text:
+        text = "\n".join(line.rsplit("\r", 1)[-1] for line in text.split("\n"))
+    return text
+
+
+def shell_log_dir() -> Path:
+    """Where full command output is saved. The system temp folder, not the
+    config home: ~/.mesh-code is on the credential denylist, so a log there
+    could never be read back without a prompt."""
+    uid = os.getuid() if hasattr(os, "getuid") else "user"
+    return Path(tempfile.gettempdir()) / f"mesh-code-logs-{uid}"
+
+
+def _save_log(text: str) -> "Path | None":
+    """Write `text` to a new owner-only log file; None if that is not
+    possible. Old logs are pruned on the way."""
+    try:
+        folder = shell_log_dir()
+        folder.mkdir(mode=0o700, exist_ok=True)
+        info = os.lstat(folder)
+        import stat as _stat
+        # A shared temp folder is world-writable: refuse a pre-made symlink
+        # or someone else's directory rather than write output into it.
+        if not _stat.S_ISDIR(info.st_mode):
+            return None
+        if hasattr(os, "getuid") and info.st_uid != os.getuid():
+            return None
+        cutoff = time.time() - SHELL_LOG_MAX_AGE
+        for old in folder.iterdir():
+            try:
+                if old.is_file() and old.stat().st_mtime < cutoff:
+                    old.unlink()
+            except OSError:
+                pass
+        name = f"cmd-{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}.log"
+        path = folder / name
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        return path
+    except Exception:
+        return None
+
+
+def condense_output(text: str) -> str:
+    """`text` unchanged when it fits OUTPUT_LIMIT; otherwise head + lines
+    that look like failures + tail, within the same limit, plus where the
+    full output was saved."""
+    if len(text) <= OUTPUT_LIMIT:
+        return text
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    total = len(lines)
+
+    head_end, used = 0, 0
+    while head_end < total and used + len(lines[head_end]) + 1 <= SHELL_HEAD_CHARS:
+        used += len(lines[head_end]) + 1
+        head_end += 1
+    tail_start, used = total, 0
+    while tail_start > head_end and used + len(lines[tail_start - 1]) + 1 <= SHELL_TAIL_CHARS:
+        used += len(lines[tail_start - 1]) + 1
+        tail_start -= 1
+    head = "\n".join(lines[:head_end]) if head_end else lines[0][:SHELL_HEAD_CHARS]
+    tail = ("\n".join(lines[tail_start:]) if tail_start < total
+            else lines[-1][-SHELL_TAIL_CHARS:])
+
+    # Failure-looking lines from the part left out, each with the line
+    # before it and the two after, numbered so a range of the log can be
+    # asked for.
+    wanted = set()
+    for i in range(head_end, tail_start):
+        if _FAILURE_RE.search(lines[i]):
+            wanted.update(range(max(head_end, i - 1), min(tail_start, i + 3)))
+    middle, used, prev = [], 0, None
+    for i in sorted(wanted):
+        row = f"{i + 1}: {lines[i][:SHELL_LINE_CLIP]}"
+        if used + len(row) + 2 > SHELL_FAILURE_CHARS:
+            middle.append("…")
+            break
+        if prev is not None and i != prev + 1:
+            middle.append("…")
+        middle.append(row)
+        used += len(row) + 1
+        prev = i
+
+    log = _save_log(text)
+    saved = (f"Full output saved to {log} — read a line range of that file "
+             "instead of running the command again."
+             if log else "The full output could not be saved; run the "
+             "command again with a filter if you need the rest.")
+    parts = [f"[output trimmed: {total} lines, {len(text)} chars. {saved}]", head]
+    left_out = tail_start - head_end
+    if left_out > 0:
+        parts.append(
+            f"[… lines {head_end + 1}-{tail_start} left out"
+            + ("; the ones that look like failures:]" if middle else ".]"))
+        if middle:
+            parts.append("\n".join(middle))
+        parts.append(f"[last lines, from line {tail_start + 1}:]")
+    parts.append(tail)
+    return "\n".join(parts)
+
+
 def _format_search_results(r) -> str:
     """Format a web-search response defensively — the schema is a formatting
     detail, never a crash. Known shape: {"results": [{title, url, snippet}]}.
@@ -1422,8 +1552,8 @@ def execute(name: str, arguments: dict, cfg: "dict | None" = None,
                     "pass a larger `timeout` (max 600s), or break the work into "
                     "smaller commands."
                 )
-            tail = "...[truncated]" if len(out) > OUTPUT_LIMIT else ""
-            return f"{out[:OUTPUT_LIMIT]}{tail}\n[exit {proc.returncode}]"
+            # The "[exit N]" suffix is parsed by compact._describe_action.
+            return f"{condense_output(clean_output(out))}\n[exit {proc.returncode}]"
         except Exception as e:
             return f"Error: {e}"
 

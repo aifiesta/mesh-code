@@ -890,3 +890,130 @@ def test_repeating_the_same_failed_edit_trips_the_stall_detector(gateway, harnes
     sent = json.dumps([r["messages"] for r in gateway.requests])
     assert "repeating the same action" in sent, "the model must be told it is looping"
     assert (tmp_path / "shapes.py").read_text() == SAMPLE
+
+
+# ---------------------------------------------------------------------------
+# run_bash: long output keeps its failures and its end
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def log_dir(tmp_path_factory, monkeypatch):
+    folder = tmp_path_factory.mktemp("logs") / "mesh-code-logs"
+    monkeypatch.setattr(tools, "shell_log_dir", lambda: folder)
+    return folder
+
+
+def _noisy(passing: int = 400) -> str:
+    rows = [f"tests/test_bulk.py::test_case_{i} PASSED" for i in range(1, passing + 1)]
+    rows[249] = "tests/test_bulk.py::test_case_250 FAILED"
+    rows += ["", "=== FAILURES ===", "___ test_case_250 ___",
+             "    assert compute(250) == 1", "E   AssertionError: assert 7 == 1",
+             "=== 1 failed, 399 passed in 2.31s ==="]
+    return "\n".join(rows) + "\n"
+
+
+def test_short_output_is_returned_as_before(tmp_path, log_dir):
+    out = tools.execute("run_bash", {"command": "printf 'one\\ntwo\\n'"}, cwd=tmp_path)
+    assert out == "one\ntwo\n\n[exit 0]"
+    assert not log_dir.exists(), "nothing is saved for output that fits"
+
+
+def test_long_output_keeps_head_failures_tail_and_exit_code(tmp_path, log_dir):
+    (tmp_path / "noisy.txt").write_text(_noisy())
+    out = tools.execute("run_bash", {"command": "cat noisy.txt; exit 3"}, cwd=tmp_path)
+
+    assert len(out) <= tools.OUTPUT_LIMIT + 20
+    assert out.startswith("[output trimmed: 406 lines, ")
+    assert "test_case_1 PASSED" in out                       # head
+    assert "250: tests/test_bulk.py::test_case_250 FAILED" in out   # failure, with its line number
+    assert "E   AssertionError: assert 7 == 1" in out        # tail: the reason
+    assert "=== 1 failed, 399 passed in 2.31s ===" in out    # tail: the summary
+    assert out.endswith("\n[exit 3]")
+    # The old cut kept only the first 8,000 chars: none of the above after the head.
+    assert "test_case_250 FAILED" not in _noisy()[:tools.OUTPUT_LIMIT]
+
+
+def test_the_full_output_is_saved_and_can_be_read_by_range(tmp_path, log_dir):
+    (tmp_path / "noisy.txt").write_text(_noisy())
+    out = tools.execute("run_bash", {"command": "cat noisy.txt"}, cwd=tmp_path)
+    logs = list(log_dir.iterdir())
+    assert len(logs) == 1 and str(logs[0]) in out
+    assert logs[0].read_text() == _noisy()
+    assert (logs[0].stat().st_mode & 0o777) == 0o600
+    assert (log_dir.stat().st_mode & 0o777) == 0o700
+
+    part = tools.execute("read_file", {"path": str(logs[0]), "offset": 249, "limit": 3},
+                         cwd=tmp_path)
+    assert part.splitlines()[1] == "250\ttests/test_bulk.py::test_case_250 FAILED"
+
+
+def test_old_logs_are_pruned(tmp_path, log_dir):
+    import os
+    log_dir.mkdir(mode=0o700)
+    stale, fresh = log_dir / "cmd-old.log", log_dir / "cmd-recent.log"
+    stale.write_text("old")
+    fresh.write_text("recent")
+    two_days_ago = time.time() - 2 * 24 * 3600
+    os.utime(stale, (two_days_ago, two_days_ago))
+    (tmp_path / "noisy.txt").write_text(_noisy())
+    tools.execute("run_bash", {"command": "cat noisy.txt"}, cwd=tmp_path)
+    assert not stale.exists() and fresh.exists()
+
+
+def test_output_is_still_returned_when_the_log_cannot_be_saved(tmp_path, monkeypatch):
+    blocker = tmp_path / "not-a-folder"
+    blocker.write_text("x")
+    monkeypatch.setattr(tools, "shell_log_dir", lambda: blocker)
+    (tmp_path / "noisy.txt").write_text(_noisy())
+    out = tools.execute("run_bash", {"command": "cat noisy.txt"}, cwd=tmp_path)
+    assert "could not be saved" in out
+    assert "=== 1 failed, 399 passed in 2.31s ===" in out and out.endswith("[exit 0]")
+
+
+def test_a_symlinked_log_folder_is_refused(tmp_path, monkeypatch):
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    link = tmp_path / "logs-link"
+    link.symlink_to(real)
+    monkeypatch.setattr(tools, "shell_log_dir", lambda: link)
+    assert tools._save_log("secret output") is None
+    assert list(real.iterdir()) == []
+
+
+def test_colour_codes_and_progress_redraws_are_dropped():
+    raw = "\x1b[32mPASSED\x1b[0m ok\r\n10%\r50%\r100% done\n\x1b]0;title\x07end\n"
+    assert tools.clean_output(raw) == "PASSED ok\n100% done\nend\n"
+
+
+def test_one_enormous_output_line_still_fits_the_limit(tmp_path, log_dir):
+    out = tools.execute("run_bash", {"command": "python3 -c \"print('x' * 50000)\""},
+                        cwd=tmp_path)
+    assert len(out) < tools.OUTPUT_LIMIT and out.endswith("[exit 0]")
+    assert "output trimmed: 1 lines, 50001 chars" in out
+
+
+def test_compaction_still_reads_the_exit_code_of_trimmed_output(tmp_path, log_dir):
+    from meshharness.core import compact
+    (tmp_path / "noisy.txt").write_text(_noisy())
+    out = tools.execute("run_bash", {"command": "cat noisy.txt; exit 2"}, cwd=tmp_path)
+    tc = {"id": "c1", "function": {"name": "run_bash", "arguments":
+                                   json.dumps({"command": "cat noisy.txt; exit 2"})}}
+    assert compact._describe_action(tc, {"c1": out}).endswith("→ exit 2")
+
+
+def test_the_saved_log_reads_without_a_prompt_in_auto_mode(
+        gateway, harness, tmp_path, log_dir):
+    (tmp_path / "noisy.txt").write_text(_noisy())
+    gateway.script(_call("run_bash", "c1", command="cat noisy.txt"), sse_turn("ok"))
+    h = harness(mode=Mode.AUTO)
+    h.session.submit("run it")
+    h.wait_for(Event.TURN_FINISHED)
+    log = next(log_dir.iterdir())
+
+    gateway.script(_call("read_file", "c2", path=str(log), offset=250, limit=1),
+                   sse_turn("done"))
+    h.session.submit("read the log")
+    h.wait_for(Event.TURN_FINISHED, min_count=2)
+    assert not h.of(Event.TOOL_PROPOSED), "the engine's own log must not prompt"
+    assert _tool_results(gateway)[-1].startswith(
+        "250\ttests/test_bulk.py::test_case_250 FAILED")
