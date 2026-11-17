@@ -324,3 +324,58 @@ task to GPT-6.1 Sol at extra high, then Claude Opus 5.5 at max.
 
 Not covered live: step-up, sticking with the serving model, a forced level.
 Unit-tested only.
+
+---
+
+# The estimate follows the real bill (18 November 2026)
+
+The previous change moved Lookup and Small change to Claude Haiku 5.5, which
+looked tied with DeepSeek V4.1 Flash 1017 on list prices and was billed about
+three times as much. Three fixes:
+
+- **Cached input is counted.** Most providers bill re-sent input at a much
+  lower cached rate without being asked; three quarters of the input is now
+  counted that way (the share in the recorded runs). Anthropic models stay at
+  full price until the app asks for caching (the Optimize setting).
+- **A failure costs one step up,** not a jump to the strongest model.
+- **Near-ties go to the cheaper attempt.** Entries within 10% of the best
+  expected cost cannot be told apart given the scores' margins.
+
+- Three recorded runs in the real app, **$0.0055 billed** (ceiling was $0.10).
+  234 unit tests pass.
+- Evidence: `~/Desktop/mesh-code-model-scoring/7-real-bill-estimate-in-app/`.
+
+Same three prompts and starting project as every section above. All three
+levels now pick DeepSeek V4.1 Flash 1017 at max.
+
+| Level | Old engine | Previous change (Haiku) | Now | Router's estimate |
+|---|---|---|---|---|
+| Lookup | $0.0008, 6 s | $0.0017, 10 s | $0.0007, 7 s | $0.0007 |
+| Small change | $0.0014, 16 s | $0.0049, 28 s | $0.0011, 15 s | $0.0027 |
+| Standard task | $0.0027, 39 s, 6 tests | $0.0096, 49 s, 19 tests | $0.0037, 58 s, 31 tests | $0.0062 |
+
+All runs did what was asked.
+
+What this shows:
+
+- **Lookup and Small change are back at or below the old engine's cost.**
+- **The Standard task costs $0.0037**, against $0.0096 one step earlier,
+  $0.058 before that and $0.133 in the first version. It is about a third more
+  than the old engine's pick, for a more thorough result (31 tests against 6).
+- **The estimate is now in the right range**: exact on the Lookup, about
+  twice the bill on the other two. Before, it was off by up to four times and
+  in a different direction for each provider.
+
+Other picks after this change (simulated, default sliders, caching off):
+
+- Complex task: GPT-6.1 Sol at medium (was extra high; the three Sol levels
+  are within 2% of each other, so the cheapest to try wins).
+- Deep work: Claude Opus 5.5 at max, unchanged.
+- Step-ups: from Lookup or Small change to Gemini 4 Carbon at high, then
+  Claude Opus 5.5 at max; from Standard task to GPT-6.1 Sol at medium, then
+  Claude Opus 5.5 at max.
+- If caching is switched on for Claude models, Claude Haiku 5.5 at max takes
+  the Lookup level; Small change and Standard task stay on DeepSeek.
+
+Not covered live: step-up, sticking with the serving model, a forced level,
+and the caching-on case. Unit-tested or simulated only.
