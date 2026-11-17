@@ -484,16 +484,17 @@ STICKY_MARGIN = 0.10     # keep the serving model while it is within 10% of the 
 # How much of each rung is everyday work; the rest is judged on the hard score.
 EVERYDAY_SHARE = {"low": 1.0, "mid": 0.75, "high": 0.5, "xhigh": 0.0}
 # The file's cost and minutes come from long benchmark tasks, where thinking
-# dominates. A lookup or a small change is mostly the prompt and the files
-# read, so its cost follows the token price instead — one model can be twenty
-# times cheaper there while costing the same on a benchmark task. The two
-# lowest rungs are therefore priced as a typical small task at the gateway's
-# live prices. These three figures are ours, read off the app's own recorded
-# runs (docs/bench/model_scoring/RESULTS.md); the scores stay third-party.
-SMALL_RUNGS = ("low", "mid")
-SMALL_TASK_INPUT = 40_000     # tokens sent over the whole task
-SMALL_TASK_OUTPUT = 1_500     # tokens written at a model's cheapest level
-SMALL_TIME_SHARE = 1 / 15     # of the benchmark task's minutes
+# dominates. What the app is asked to do is far smaller and is mostly the
+# prompt and the files read, so its cost follows the token price instead — one
+# model can be twenty times cheaper there while costing the same on a
+# benchmark task. The three rungs wording can assign are therefore priced as a
+# typical task of that size at the gateway's live prices: (tokens sent over
+# the whole task, tokens written at a model's cheapest level). These sizes are
+# ours, read off the app's own recorded runs (docs/bench/model_scoring/
+# RESULTS.md); the scores stay third-party. The rungs reached only by step-up
+# keep the benchmark figures: a task that has already beaten a model is no
+# longer a small one.
+TOKEN_PRICED = {"low": (12_000, 300), "mid": (40_000, 1_500), "high": (100_000, 3_000)}
 _LEVEL_ORDER = ("default", "none", "low", "medium", "high", "xhigh", "max")
 _TABLE_RUNG = {"low": "low", "mid": "low", "high": "mid", "xhigh": "high", "max": "max"}
 
@@ -570,20 +571,27 @@ def _live_entries(doc, catalog, exclude, needs_tools, needs_ctx, level) -> list:
     return out
 
 
-def _as_small_tasks(ents: list, catalog) -> "list | None":
-    """The same entries priced for a small task at the gateway's live prices,
-    or None when any price is unknown (the caller keeps the benchmark figures
-    for all of them — never a mix of the two scales)."""
+def _at_token_prices(ents: list, catalog, band: str) -> "list | None":
+    """The same entries priced for a typical task on this rung at the
+    gateway's live prices, or None when any price is unknown (the caller keeps
+    the benchmark figures for all of them — never a mix of the two scales).
+
+    The wait shrinks with the cost, entry by entry: minutes per dollar is a
+    property of the model and its thinking level, so a task that costs a
+    twentieth of the benchmark one takes about a twentieth of the time. Across
+    six recorded app runs this lands within about a third of the real wait,
+    where one fixed fraction for every model was off by up to ten times."""
     from .pricing import estimate_cost
+    sent, written = TOKEN_PRICED[band]
     out = []
     for e in ents:
         cost = estimate_cost(e["model"], {
-            "prompt_tokens": SMALL_TASK_INPUT,
-            "completion_tokens": int(SMALL_TASK_OUTPUT * e.get("writes", 1.0))}, catalog)
+            "prompt_tokens": sent,
+            "completion_tokens": int(written * e.get("writes", 1.0))}, catalog)
         if not cost or cost <= 0:
             return None
         out.append(dict(e, cost_per_task=cost,
-                        minutes_per_task=e["minutes_per_task"] * SMALL_TIME_SHARE))
+                        minutes_per_task=e["minutes_per_task"] * cost / e["cost_per_task"]))
     return out
 
 
@@ -614,10 +622,10 @@ def pick_scored(difficulty: str, weights: "dict | None", doc: "dict | None",
         if not ents:
             return None
         scale = "benchmark task"
-        if band in SMALL_RUNGS:
-            small = _as_small_tasks(ents, catalog)
-            if small:
-                ents, scale = small, "small task"
+        if band in TOKEN_PRICED:
+            priced = _at_token_prices(ents, catalog, band)
+            if priced:
+                ents, scale = priced, "token prices"
         k = _slider_scale(weights)
         strongest = max(ents, key=lambda e: (_chance(e, "max"), -e["cost_per_task"]))
         rescue = strongest["cost_per_task"] + TIME_VALUE * strongest["minutes_per_task"]

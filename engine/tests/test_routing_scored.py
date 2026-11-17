@@ -49,11 +49,11 @@ def _id(got):
 # ---- the pick -------------------------------------------------------------------
 
 def test_each_rung_of_the_ladder_gets_the_entry_that_is_cheapest_to_finish_with():
-    assert _id(_pick("low")) == ("t/cheap", "high")          # Lookup
-    assert _id(_pick("mid")) == ("t/cheap", "high")          # Small change
-    assert _id(_pick("high")) == ("t/mid", "medium")         # Standard task
+    # the three levels wording can assign all start on the cheap model
+    for rung in ("low", "mid", "high"):                      # Lookup, Small change, Standard task
+        assert _id(_pick(rung)) == ("t/cheap", "high"), rung
     assert _pick("xhigh")["model"] == "t/mid", \
-        "trying the mid model first beats paying for the strong one up front"
+        "once a task has beaten a model, the mid one is tried before the strong one"
     assert _id(_pick("max")) == ("t/strong", "max")          # Deep work
 
 
@@ -82,13 +82,13 @@ def test_max_means_the_strongest_whatever_it_costs():
 
 
 def test_the_three_sliders_each_move_the_pick_their_own_way():
-    assert _pick("mid", weights={"cost": 0.9, "cap": 0.05, "speed": 0.05})["model"] in ("t/cheap", "t/mid")
-    quality = _pick("mid", weights={"cost": 0.1, "cap": 0.8, "speed": 0.1})
-    cheap = _pick("mid", weights={"cost": 0.9, "cap": 0.05, "speed": 0.05})
-    assert quality["ranked"][0]["chance"] >= cheap["ranked"][0]["chance"]
-    fast = _pick("low", weights={"cost": 0.1, "cap": 0.1, "speed": 0.8})
-    assert _pick("low")["model"] == "t/cheap" and fast["model"] == "t/mid", \
-        "when speed leads, the 10-minute cheap entry loses to a model that answers in a few"
+    base = _pick("xhigh")["ranked"][0]
+    cheap = _pick("xhigh", weights={"cost": 0.9, "cap": 0.05, "speed": 0.05})["ranked"][0]
+    quality = _pick("xhigh", weights={"cost": 0.05, "cap": 0.9, "speed": 0.05})["ranked"][0]
+    fast = _pick("xhigh", weights={"cost": 0.05, "cap": 0.05, "speed": 0.9})["ranked"][0]
+    assert cheap["cost"] <= base["cost"] and fast["minutes"] <= base["minutes"]
+    assert quality["chance"] >= base["chance"]
+    assert quality["chance"] > cheap["chance"] and fast["minutes"] < quality["minutes"]
 
 
 # ---- stepping up after a failure ----------------------------------------------------
@@ -117,13 +117,13 @@ def test_the_serving_model_keeps_the_turn_while_it_is_close_to_the_best():
     near = copy.deepcopy(DOC)
     near["models"]["t/other"] = {"name": "Other", "levels": {"medium": _e(82, 41, 0.75, 4)}}
     cat = _cat() + [{"id": "t/other", "context_length": 200000}]
-    assert _pick("high", doc=near, catalog=cat)["model"] == "t/mid"
-    kept = _pick("high", doc=near, catalog=cat, incumbent="t/other")
+    assert _pick("xhigh", doc=near, catalog=cat)["model"] == "t/mid"
+    kept = _pick("xhigh", doc=near, catalog=cat, incumbent="t/other")
     assert kept["model"] == "t/other" and kept["sticky"] is True
 
 
 def test_it_does_not_keep_the_turn_when_it_is_clearly_worse():
-    got = _pick("high", incumbent="t/strong")
+    got = _pick("xhigh", incumbent="t/strong")
     assert got["model"] == "t/mid" and got["sticky"] is False
 
 
@@ -131,29 +131,29 @@ def test_more_cached_context_widens_how_close_counts():
     far = copy.deepcopy(DOC)
     far["models"]["t/other"] = {"name": "Other", "levels": {"medium": _e(82, 41, 2.6, 4)}}
     cat = _cat() + [{"id": "t/other", "context_length": 200000}]
-    assert _pick("high", doc=far, catalog=cat, incumbent="t/other")["model"] == "t/mid"
-    assert _pick("high", doc=far, catalog=cat, incumbent="t/other",
+    assert _pick("xhigh", doc=far, catalog=cat, incumbent="t/other")["model"] == "t/mid"
+    assert _pick("xhigh", doc=far, catalog=cat, incumbent="t/other",
                  incumbent_bonus=12.0)["model"] == "t/other"
 
 
 # ---- what is available ----------------------------------------------------------------
 
 def test_only_models_the_gateway_offers_and_that_fit_the_job_are_considered():
-    assert _pick("high")["model"] == "t/mid"
-    assert _pick("high", catalog=_cat("t/cheap", "t/strong"))["model"] != "t/mid"
-    assert _pick("high", exclude={"t/mid"})["model"] != "t/mid"
+    assert _pick("xhigh")["model"] == "t/mid"
+    assert _pick("xhigh", catalog=_cat("t/cheap", "t/strong"))["model"] != "t/mid"
+    assert _pick("xhigh", exclude={"t/mid"})["model"] != "t/mid"
     small = _cat("t/cheap", "t/strong") + [{"id": "t/mid", "context_length": 8000}]
-    assert _pick("high", catalog=small, needs_ctx=50000)["model"] != "t/mid"
+    assert _pick("xhigh", catalog=small, needs_ctx=50000)["model"] != "t/mid"
     no_tools = _cat("t/cheap", "t/strong") + [{"id": "t/mid", "supports_tools": False}]
-    assert _pick("high", catalog=no_tools, needs_tools=True)["model"] != "t/mid"
-    assert _pick("high", catalog=_cat("not/scored")) is None
+    assert _pick("xhigh", catalog=no_tools, needs_tools=True)["model"] != "t/mid"
+    assert _pick("xhigh", catalog=_cat("not/scored")) is None
 
 
 def test_a_price_change_at_the_gateway_moves_the_cost_with_it():
-    before = _pick("high")["ranked"][0]
+    before = _pick("xhigh")["ranked"][0]
     dear = [dict(r, pricing={"prompt_usd_per_1m": 8, "completion_usd_per_1m": 40})
             if r["id"] == "t/mid" else r for r in _cat()]            # t/mid now costs 4x
-    after = next(r for r in _pick("high", catalog=dear)["ranked"]
+    after = next(r for r in _pick("xhigh", catalog=dear)["ranked"]
                  if (r["model"], r["level"]) == (before["model"], before["level"]))
     assert abs(after["cost"] - 4 * before["cost"]) < 0.02
 
@@ -362,15 +362,15 @@ def _same_cat():
 
 
 def test_a_small_change_goes_to_the_model_with_the_cheaper_tokens():
-    for rung in ("low", "mid"):
+    for rung in ("low", "mid", "high"):
         got = router.pick_scored(rung, None, SAME_BENCH, _same_cat())
-        assert got["model"] == "t/cheap-tokens" and got["priced_as"] == "small task"
+        assert got["model"] == "t/cheap-tokens" and got["priced_as"] == "token prices"
         a, b = got["ranked"][0], got["ranked"][1]
         assert b["cost"] > 15 * a["cost"], "the token price gap must show in the cost"
 
 
-def test_bigger_tasks_keep_the_benchmark_cost():
-    got = router.pick_scored("high", None, SAME_BENCH, _same_cat())
+def test_levels_reached_only_by_step_up_keep_the_benchmark_cost():
+    got = router.pick_scored("xhigh", None, SAME_BENCH, _same_cat())
     assert got["priced_as"] == "benchmark task"
     assert {r["cost"] for r in got["ranked"]} == {0.6}
 
@@ -397,11 +397,11 @@ def test_the_bundled_scores_send_small_work_cheap_and_the_top_to_the_strongest()
                         "completion_usd_per_1m": str(v["price_out_per_1m"])}}
            for m, v in doc["models"].items()]
     price = {m: v["price_in_per_1m"] for m, v in doc["models"].items()}
-    small = router.pick_scored("mid", None, doc, cat)
-    standard = router.pick_scored("high", None, doc, cat)
     deep = router.pick_scored("max", None, doc, cat)
-    assert price[small["model"]] <= 0.25, "a small change should not start on a dear model"
-    assert price[standard["model"]] < price[deep["model"]]
+    for rung in ("low", "mid", "high"):
+        start = router.pick_scored(rung, None, doc, cat)
+        assert price[start["model"]] <= 0.25, f"{rung} should not start on a dear model"
+        assert price[start["model"]] < price[deep["model"]]
     best_hard = max(e["hard"]["score"] - e["hard"]["margin"] for e in scores.entries(doc))
     top = next(e for e in scores.entries(doc) if (e["model"], e["level"]) == (deep["model"], deep["level"]))
     assert top["hard"]["score"] - top["hard"]["margin"] == best_hard
@@ -440,7 +440,11 @@ def test_a_prompt_full_of_hard_words_starts_no_higher_than_a_standard_task(gatew
     h.wait_for(Event.TURN_FINISHED)
     routed = h.of(Event.ROUTED)[0]["data"]
     assert routed["task"] == "Standard task"
-    assert (routed["model"], routed["thinking"]) == ("t/mid", "medium")
+    assert routed["model"] == "t/cheap", "a standard task starts on the cheap model"
+    # ...and only climbs when the model visibly struggles
+    assert h.session._smart_escalate("test") is True
+    assert h.session.state["_smart_difficulty"] == "xhigh"
+    assert h.session._serving()[0] in ("t/mid", "t/strong")
 
 
 def test_the_level_the_user_forces_is_the_level_used(gateway, harness, monkeypatch):
@@ -463,3 +467,17 @@ def test_settings_name_the_five_levels():
     from meshharness import settings
     labels = [o["label"] for o in settings.BY_KEY["route_effort"]["options"]]
     assert labels == ["Auto", "Lookup", "Small change", "Standard task", "Complex task", "Deep work"]
+
+
+def test_the_wait_shrinks_with_the_cost_entry_by_entry():
+    ents = router._live_entries(DOC, _cat(), None, False, 0, None)
+    for e, p in zip(ents, router._at_token_prices(ents, _cat(), "mid")):
+        assert abs(p["minutes_per_task"] / e["minutes_per_task"]
+                   - p["cost_per_task"] / e["cost_per_task"]) < 1e-9
+
+
+def test_a_bigger_level_is_priced_as_a_bigger_task():
+    ents = router._live_entries(DOC, _cat(), None, False, 0, None)
+    cost = {rung: router._at_token_prices(ents, _cat(), rung)[0]["cost_per_task"]
+            for rung in ("low", "mid", "high")}
+    assert cost["low"] < cost["mid"] < cost["high"]
