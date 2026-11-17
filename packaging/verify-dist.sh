@@ -48,6 +48,8 @@ for f in "Contents/Resources/engine/mesh-code-engine" "Contents/Resources/ui/ind
 done
 TABLE=$(find "$MOUNTED/$APP_NAME.app/Contents/Resources/engine" -name routing_table.json | wc -l | tr -d ' ')
 [ "$TABLE" = "1" ] && ok "routing_table.json bundled" || bad "routing table missing (smart routing degrades silently)"
+SCORES=$(find "$MOUNTED/$APP_NAME.app/Contents/Resources/engine" -name model_scores.json | wc -l | tr -d ' ')
+[ "$SCORES" = "1" ] && ok "model_scores.json bundled" || bad "model scores missing"
 
 info "simulating a real transfer (quarantine, as a browser/AirDrop sets it)"
 cp -R "$MOUNTED/$APP_NAME.app" "$STAGE/"

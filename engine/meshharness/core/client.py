@@ -133,8 +133,11 @@ def build_payload(messages: list, cfg: dict, tools: Optional[list] = None) -> di
     Pure function (unit-testable without a network). Mesh extensions:
       - auto_route  -> model:"auto" (gateway Auto Router picks per prompt)
       - fallback_models -> `models` ordered fallback list
-      - reasoning_effort -> passed through when set ("none" is a real level;
-        None means "don't send")
+      - reasoning_effort (our setting) -> sent as `reasoning: {"effort": …}`
+        when set ("none" is a real level; None means "don't send"). The
+        gateway's older top-level `reasoning_effort` field is deprecated and
+        refuses anything above "high"; `reasoning.effort` takes every level
+        up to "max" (checked live 2026-11-17, docs/bench/model_scoring).
     """
     payload: dict = {
         "model": "auto" if cfg.get("auto_route") else cfg["model"],
@@ -144,11 +147,27 @@ def build_payload(messages: list, cfg: dict, tools: Optional[list] = None) -> di
     if cfg.get("fallback_models"):
         payload["models"] = list(cfg["fallback_models"])
     if cfg.get("reasoning_effort"):
-        payload["reasoning_effort"] = cfg["reasoning_effort"]
+        payload["reasoning"] = {"effort": cfg["reasoning_effort"]}
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
     return payload
+
+
+def is_reasoning_rejection(err) -> bool:
+    """True when a gateway error is a model refusing the thinking level.
+
+    The readable `message` often does not say so ("Provider returned error");
+    the evidence sits deeper in the error object — `param: reasoning.effort`
+    from one provider, a raw upstream string naming `reasoning_effort` from
+    another — so look at the whole thing, not just the message.
+    """
+    try:
+        blob = json.dumps(err)
+    except (TypeError, ValueError):
+        blob = str(err)
+    blob = blob.lower()
+    return "reasoning.effort" in blob or "reasoning_effort" in blob
 
 
 def _drop_empty_assistant(messages: list) -> list:
@@ -301,6 +320,8 @@ def stream_chat(
                         retry_raw = True
                     else:
                         last_meta["error"] = msg
+                        if is_reasoning_rejection(err):
+                            last_meta["reasoning_rejected"] = True
                     break
 
                 if obj.get("model"):
@@ -390,6 +411,8 @@ def complete_chat(messages: list, cfg: dict, tools: "Optional[list]" = None,
     if isinstance(data, dict) and data.get("error"):
         err = data["error"]
         meta["error"] = err.get("message") if isinstance(err, dict) else str(err)
+        if is_reasoning_rejection(err):
+            meta["reasoning_rejected"] = True
         return "", meta
 
     choices = (data or {}).get("choices") or []

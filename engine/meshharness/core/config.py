@@ -73,7 +73,7 @@ DEFAULT_CONFIG = {
     # The CLI only ever built this implicitly (a session blacklist after a
     # model failed live); the harness lets the user state it up front.
     "exclude_models": [],
-    "reasoning_effort": None,   # high|medium|low|none, or None = not sent
+    "reasoning_effort": None,   # max|xhigh|high|medium|low|none, or None = not sent
     # Mesh Optimize dial (BETA). 0 = off. 0 to 0.95: how aggressively to
     # cut token spend. See /optimize in the REPL and README for details.
     "optimize": 0.0,

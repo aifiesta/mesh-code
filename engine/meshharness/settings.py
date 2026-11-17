@@ -114,6 +114,8 @@ SCHEMA: list[dict] = [
             _opt("low", "Low", ""),
             _opt("medium", "Medium", ""),
             _opt("high", "High", "Think longer before answering."),
+            _opt("xhigh", "Extra high", ""),
+            _opt("max", "Max", "The most thinking the model allows. Slowest and most expensive."),
         ],
         "help": "Passed to models that support a reasoning budget.",
         "why": "Higher settings cost more tokens and take longer, and help most on planning and debugging.",

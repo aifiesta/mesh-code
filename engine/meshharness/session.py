@@ -543,19 +543,21 @@ class Session:
 
             if meta.get("error"):
                 msg = str(meta["error"])
-                # A model that rejects reasoning_effort: record it and retry
-                # without the field, keeping the setting for models that take
-                # it. (Same evidence-based rule as the CLI — never trust the
-                # catalog's supports_thinking flag.)
-                if ("reasoning_effort" in msg
-                        and self.cfg.get("reasoning_effort")
-                        and self._effective_model() not in
+                # A model that rejects this thinking level: record the pair
+                # and retry without the field, keeping the setting for the
+                # models and levels that take it. A model can refuse one level
+                # and accept the rest (one refuses only "none"), so the memory
+                # is per model AND level. (Same evidence-based rule as the CLI
+                # — never trust the catalog's supports_thinking flag.)
+                pair = (self._effective_model(), self.cfg.get("reasoning_effort"))
+                if ((meta.get("reasoning_rejected") or "reasoning_effort" in msg)
+                        and pair[1]
+                        and pair not in
                         (self.state.get("_reasoning_rejected") or set())):
-                    self.state.setdefault("_reasoning_rejected", set()).add(
-                        self._effective_model())
+                    self.state.setdefault("_reasoning_rejected", set()).add(pair)
                     self.emit(Event.NOTICE, level="info", message=(
-                        "this model rejected the reasoning-effort setting — "
-                        "retrying without it"))
+                        f"this model does not take the '{pair[1]}' reasoning "
+                        "level — retrying without it"))
                     continue
                 # If a SMART PICK errored, abandon it and retry on the pinned
                 # model — the model answering now beats the table's opinion.
@@ -953,7 +955,7 @@ class Session:
         cfg = dict(self.cfg)
         cfg["model"] = self._effective_model()
         rejected = self.state.get("_reasoning_rejected") or set()
-        if cfg.get("reasoning_effort") and cfg["model"] in rejected:
+        if (cfg["model"], cfg.get("reasoning_effort")) in rejected:
             cfg.pop("reasoning_effort", None)
         return cfg
 
