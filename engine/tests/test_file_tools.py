@@ -389,3 +389,97 @@ def test_compaction_summary_marks_a_partial_read():
     assert compact._describe_action(tc, {}) == "read part of a.py"
     tc["function"]["arguments"] = json.dumps({"path": "a.py"})
     assert compact._describe_action(tc, {}) == "read a.py"
+
+
+# ---------------------------------------------------------------------------
+# read approvals: reads inside the project in accept-edits and auto modes
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("mode", [Mode.ACCEPT_EDITS, Mode.AUTO])
+def test_reads_inside_the_project_do_not_prompt(gateway, harness, tmp_path, mode):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('hi')\n")
+    gateway.script(_call("read_file", path="src/app.py"), sse_turn("done"))
+    h = harness(mode=mode)
+    h.session.submit("read it")
+    h.wait_for(Event.TURN_FINISHED)
+
+    assert not h.of(Event.TOOL_PROPOSED), "a project read should not prompt"
+    assert h.of(Event.TOOL_DECIDED)[0]["data"]["auto"] is True
+    assert _tool_results(gateway) == ["print('hi')\n"]
+
+
+def test_default_mode_still_asks_before_every_read(gateway, harness, tmp_path):
+    (tmp_path / "app.py").write_text("print('hi')\n")
+    gateway.script(_call("read_file", path="app.py"), sse_turn("done"))
+    h = harness(mode=Mode.DEFAULT)
+    h.session.submit("read it")
+    proposal = h.wait_for(Event.TOOL_PROPOSED)
+    assert proposal["data"]["name"] == "read_file"
+    h.session.respond_approval(proposal["data"]["token"], Decision.DENY)
+    h.wait_for(Event.TURN_FINISHED)
+    assert _tool_results(gateway) == ["User denied this tool call."]
+
+
+@pytest.mark.parametrize("mode", [Mode.ACCEPT_EDITS, Mode.AUTO])
+def test_reads_outside_the_project_still_ask(gateway, harness, tmp_path, mode):
+    outside = tmp_path.parent / f"outside-{mode.value}.txt"
+    outside.write_text("not yours\n")
+    gateway.script(_call("read_file", path=str(outside)), sse_turn("ok"))
+    h = harness(mode=mode)
+    h.session.submit("read outside")
+    proposal = h.wait_for(Event.TOOL_PROPOSED)
+    assert "outside the current project directory" in proposal["data"]["blocked_reason"]
+    h.session.respond_approval(proposal["data"]["token"], Decision.DENY)
+    h.wait_for(Event.TURN_FINISHED)
+    assert "not yours" not in "".join(_tool_results(gateway))
+
+
+@pytest.mark.parametrize("name", [".env", ".env.local", "prod.env", ".envrc"])
+def test_environment_files_still_ask_in_auto_modes(gateway, harness, tmp_path, name):
+    (tmp_path / name).write_text("API_KEY=sk-live-secret\n")
+    gateway.script(_call("read_file", path=name), sse_turn("ok"))
+    h = harness(mode=Mode.AUTO)
+    h.session.submit("read env")
+    proposal = h.wait_for(Event.TOOL_PROPOSED)
+    assert "environment files" in proposal["data"]["blocked_reason"]
+    h.session.respond_approval(proposal["data"]["token"], Decision.DENY)
+    h.wait_for(Event.TURN_FINISHED)
+    assert "sk-live-secret" not in json.dumps(gateway.requests[-1]["messages"])
+
+
+def test_env_file_detection_spares_templates_and_code():
+    from meshharness.core import safety
+    for name in (".env", ".ENV", ".env.production", "staging.env", ".envrc"):
+        assert safety.is_env_file(name), name
+    for name in (".env.example", ".env.sample", ".env.template", "env.py",
+                 "environment.ts", "vite-env.d.ts", "README.md"):
+        assert not safety.is_env_file(name), name
+
+
+def test_always_allow_for_reads_keeps_its_wider_reach(gateway, harness, tmp_path):
+    """The user's own "Always allow read file" click is not narrowed to the
+    project by this change — only the mode's silent approval is."""
+    outside = tmp_path.parent / "lib-source.py"
+    outside.write_text("library code\n")
+    (tmp_path / "a.py").write_text("a\n")
+    gateway.script(
+        _call("read_file", "c1", path="a.py"),
+        _call("read_file", "c2", path=str(outside)),
+        sse_turn("done"))
+    h = harness(mode=Mode.DEFAULT)
+    h.session.submit("read two files")
+    first = h.wait_for(Event.TOOL_PROPOSED)
+    h.session.respond_approval(first["data"]["token"], Decision.ALWAYS)
+    h.wait_for(Event.TURN_FINISHED)
+    assert len(h.of(Event.TOOL_PROPOSED)) == 1
+    assert _tool_results(gateway) == ["a\n", "library code\n"]
+
+
+def test_bypass_reads_are_unchanged_and_credentials_still_ask():
+    from meshharness.core import safety
+    ok, _ = safety.is_path_safe_for_auto_read("/usr/share/dict/words", Mode.BYPASS)
+    assert ok, "bypass keeps reading outside the project without asking"
+    ok, why = safety.is_path_safe_for_auto_read(
+        "~/.ssh/id_rsa", Mode.AUTO, workspace_only=True)
+    assert not ok and "denylist" in why

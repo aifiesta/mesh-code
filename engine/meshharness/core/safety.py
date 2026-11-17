@@ -166,8 +166,23 @@ def is_path_safe_for_auto_write(
     return True, None
 
 
+# Environment files hold live secrets (API keys, database URLs). `.env`,
+# `.env.local`, `prod.env` and `.envrc` match; a template that is meant to
+# be shared (`.env.example`, `.env.sample`, ...) does not.
+_ENV_FILE_RE = re.compile(r"^(?:\.env(?:\..+)?|.+\.env|\.envrc)$", re.IGNORECASE)
+_ENV_TEMPLATE_RE = re.compile(
+    r"(?:^|[.\-_])(?:example|sample|template|dist|defaults?)(?:$|[.\-_])",
+    re.IGNORECASE)
+
+
+def is_env_file(name: str) -> bool:
+    """True for a file that is likely to hold real environment secrets."""
+    return bool(_ENV_FILE_RE.match(name)) and not _ENV_TEMPLATE_RE.search(name)
+
+
 def is_path_safe_for_auto_read(
-    path_str: Optional[str], mode: Mode, root: "Path | None" = None
+    path_str: Optional[str], mode: Mode, root: "Path | None" = None,
+    workspace_only: bool = False, extra_roots: tuple = (),
 ) -> Tuple[bool, Optional[str]]:
     """Should `read_file(path)` auto-approve in `mode`?
 
@@ -175,6 +190,13 @@ def is_path_safe_for_auto_read(
     more often legitimate than writing outside cwd — e.g. reading
     /usr/local/lib/.../some.py). The denylist still bites though, because
     reading a denylisted path leaks its contents to the LLM provider.
+
+    `workspace_only` is the stricter rule for a read nobody clicked on at
+    all — the mode alone approved it (accept-edits, auto). It adds two
+    checks: the path must be inside the workspace (or one of `extra_roots`,
+    the engine's own command-log folder), and it must not be an environment
+    file. Without it, reading file contents to the model provider would be
+    one mode switch away for `.env` and for anything on the disk.
     """
     if mode == Mode.DEFAULT:
         return True, None
@@ -190,6 +212,16 @@ def is_path_safe_for_auto_read(
             return False, f"path is in the sensitive denylist ({sensitive})"
     if _SENSITIVE_EXT_PATTERN.search(resolved_str):
         return False, "path has a secret/key file extension"
+    if workspace_only:
+        if is_env_file(resolved.name):
+            return False, "environment files can hold secrets"
+        try:
+            scopes = [Path(root).resolve() if root is not None else Path.cwd().resolve()]
+            scopes += [Path(r).resolve() for r in extra_roots if r]
+        except OSError as e:
+            return False, f"can't read the workspace directory: {e}"
+        if not any(_is_inside(resolved, scope) for scope in scopes):
+            return False, "path is outside the current project directory"
     return True, None
 
 

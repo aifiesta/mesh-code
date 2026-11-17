@@ -1280,12 +1280,16 @@ class Session:
         mode = self.mode          # live read, so a mid-batch change applies
         approved = name in AUTO_APPROVE.get(mode, set())
         safety_mode = mode
-        if not approved and name in self.state.get("session_allow", set()):
+        # "Always allow" is the user's own click for this tool, so it is
+        # checked at the looser, pre-existing strictness; a call approved
+        # only by the MODE gets the stricter project-only rule for reads.
+        always = name in self.state.get("session_allow", set())
+        if not approved and always:
             approved, safety_mode = True, Mode.AUTO
 
         reason = ""
         if approved:
-            ok, why = self._safety_check(name, args, safety_mode)
+            ok, why = self._safety_check(name, args, safety_mode, always=always)
             if not ok:
                 approved, reason = False, why or "safety check failed"
                 self.emit(Event.NOTICE, level="warn",
@@ -1332,13 +1336,18 @@ class Session:
             raise KeyboardInterrupt
         return result
 
-    def _safety_check(self, name: str, args: dict, mode: Mode):
+    def _safety_check(self, name: str, args: dict, mode: Mode,
+                      always: bool = False):
         if name == "write_file":
             return safety.is_path_safe_for_auto_write(
                 args.get("path"), mode, self.workspace)
         if name == "read_file":
+            # Approved by the mode alone (accept-edits, auto): only inside
+            # the project, never an environment file. Bypass and the user's
+            # own "Always allow" keep the denylist-only rule they had.
+            scoped = not always and mode in (Mode.ACCEPT_EDITS, Mode.AUTO)
             return safety.is_path_safe_for_auto_read(
-                args.get("path"), mode, self.workspace)
+                args.get("path"), mode, self.workspace, workspace_only=scoped)
         if name in ("run_bash", "start_server"):
             return safety.is_command_safe_for_auto(
                 args.get("command"), mode, self.workspace)
