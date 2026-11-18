@@ -1,0 +1,350 @@
+[
+ {
+  "level": "low",
+  "task": "small",
+  "run": "low-small-run1",
+  "thinking_sent": [
+   "low"
+  ],
+  "models": [
+   "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+  ],
+  "stepped_up": false,
+  "steps": 6,
+  "tokens": 26115,
+  "cost": 0.0011,
+  "seconds": 20.18,
+  "fresh_usd": 0.00070349,
+  "cached_usd": 8.567e-05,
+  "output_usd": 0.00031053,
+  "thinking_usd": 7.436e-05,
+  "output_tokens": 739,
+  "thinking_tokens": 177,
+  "fresh_tokens": 5024,
+  "cached_tokens": 20352,
+  "planned": false,
+  "passed": 6,
+  "checks": 6,
+  "aborted": false,
+  "notices": []
+ },
+ {
+  "level": "low",
+  "task": "small",
+  "run": "low-small-run2",
+  "thinking_sent": [
+   "low"
+  ],
+  "models": [
+   "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+  ],
+  "stepped_up": false,
+  "steps": 5,
+  "tokens": 22374,
+  "cost": 0.001136,
+  "seconds": 19.63,
+  "fresh_usd": 0.00072447,
+  "cached_usd": 6.89e-05,
+  "output_usd": 0.00034283,
+  "thinking_usd": 7.562e-05,
+  "output_tokens": 816,
+  "thinking_tokens": 180,
+  "fresh_tokens": 5174,
+  "cached_tokens": 16384,
+  "planned": false,
+  "passed": 6,
+  "checks": 6,
+  "aborted": false,
+  "notices": []
+ },
+ {
+  "level": "low",
+  "task": "standard",
+  "run": "low-standard-run1",
+  "thinking_sent": [
+   "low"
+  ],
+  "models": [
+   "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+  ],
+  "stepped_up": false,
+  "steps": 16,
+  "tokens": 125866,
+  "cost": 0.004152,
+  "seconds": 173.73,
+  "fresh_usd": 0.00141778,
+  "cached_usd": 0.00046399,
+  "output_usd": 0.00227002,
+  "thinking_usd": 0.00080398,
+  "output_tokens": 5404,
+  "thinking_tokens": 1914,
+  "fresh_tokens": 10126,
+  "cached_tokens": 110336,
+  "planned": true,
+  "passed": 10,
+  "checks": 10,
+  "aborted": false,
+  "notices": []
+ },
+ {
+  "level": "low",
+  "task": "standard",
+  "run": "low-standard-run2",
+  "thinking_sent": [
+   "low"
+  ],
+  "models": [
+   "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+  ],
+  "stepped_up": false,
+  "steps": 21,
+  "tokens": 155732,
+  "cost": 0.004817,
+  "seconds": 90.29,
+  "fresh_usd": 0.0014763,
+  "cached_usd": 0.00058308,
+  "output_usd": 0.00275792,
+  "thinking_usd": 0.00108541,
+  "output_tokens": 6565,
+  "thinking_tokens": 2584,
+  "fresh_tokens": 10543,
+  "cached_tokens": 138624,
+  "planned": true,
+  "passed": 10,
+  "checks": 10,
+  "aborted": false,
+  "notices": []
+ },
+ {
+  "level": "high",
+  "task": "small",
+  "run": "high-small-run1",
+  "thinking_sent": [
+   "high"
+  ],
+  "models": [
+   "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+  ],
+  "stepped_up": false,
+  "steps": 5,
+  "tokens": 22160,
+  "cost": 0.001123,
+  "seconds": 19.46,
+  "fresh_usd": 0.00071284,
+  "cached_usd": 6.849e-05,
+  "output_usd": 0.00034157,
+  "thinking_usd": 7.016e-05,
+  "output_tokens": 813,
+  "thinking_tokens": 167,
+  "fresh_tokens": 5091,
+  "cached_tokens": 16256,
+  "planned": false,
+  "passed": 6,
+  "checks": 6,
+  "aborted": false,
+  "notices": []
+ },
+ {
+  "level": "high",
+  "task": "small",
+  "run": "high-small-run2",
+  "thinking_sent": [
+   "high"
+  ],
+  "models": [
+   "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+  ],
+  "stepped_up": false,
+  "steps": 6,
+  "tokens": 26753,
+  "cost": 0.00118,
+  "seconds": 31.03,
+  "fresh_usd": 0.00071724,
+  "cached_usd": 8.725e-05,
+  "output_usd": 0.00037601,
+  "thinking_usd": 9.537e-05,
+  "output_tokens": 895,
+  "thinking_tokens": 227,
+  "fresh_tokens": 5122,
+  "cached_tokens": 20736,
+  "planned": false,
+  "passed": 6,
+  "checks": 6,
+  "aborted": false,
+  "notices": []
+ },
+ {
+  "level": "high",
+  "task": "standard",
+  "run": "high-standard-run1",
+  "thinking_sent": [
+   "high"
+  ],
+  "models": [
+   "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+  ],
+  "stepped_up": false,
+  "steps": 18,
+  "tokens": 149407,
+  "cost": 0.004922,
+  "seconds": 139.31,
+  "fresh_usd": 0.00163915,
+  "cached_usd": 0.00055187,
+  "output_usd": 0.00273089,
+  "thinking_usd": 0.00109679,
+  "output_tokens": 6501,
+  "thinking_tokens": 2611,
+  "fresh_tokens": 11706,
+  "cached_tokens": 131200,
+  "planned": true,
+  "passed": 10,
+  "checks": 10,
+  "aborted": false,
+  "notices": []
+ },
+ {
+  "level": "high",
+  "task": "standard",
+  "run": "high-standard-run2",
+  "thinking_sent": [
+   "high"
+  ],
+  "models": [
+   "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+  ],
+  "stepped_up": false,
+  "steps": 13,
+  "tokens": 97338,
+  "cost": 0.004518,
+  "seconds": 72.18,
+  "fresh_usd": 0.00147073,
+  "cached_usd": 0.000338,
+  "output_usd": 0.00270927,
+  "thinking_usd": 0.00117819,
+  "output_tokens": 6450,
+  "thinking_tokens": 2805,
+  "fresh_tokens": 10504,
+  "cached_tokens": 80384,
+  "planned": true,
+  "passed": 10,
+  "checks": 10,
+  "aborted": false,
+  "notices": []
+ },
+ {
+  "level": "auto",
+  "task": "small",
+  "run": "auto-small-run1",
+  "thinking_sent": [
+   "max"
+  ],
+  "models": [
+   "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+  ],
+  "stepped_up": false,
+  "steps": 7,
+  "tokens": 33650,
+  "cost": 0.001471,
+  "seconds": 40.95,
+  "fresh_usd": 0.00079624,
+  "cached_usd": 0.00011212,
+  "output_usd": 0.00056303,
+  "thinking_usd": 0.00015461,
+  "output_tokens": 1340,
+  "thinking_tokens": 368,
+  "fresh_tokens": 5686,
+  "cached_tokens": 26624,
+  "planned": false,
+  "passed": 6,
+  "checks": 6,
+  "aborted": false,
+  "notices": []
+ },
+ {
+  "level": "auto",
+  "task": "small",
+  "run": "auto-small-run2",
+  "thinking_sent": [
+   "max"
+  ],
+  "models": [
+   "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+  ],
+  "stepped_up": false,
+  "steps": 5,
+  "tokens": 21710,
+  "cost": 0.00107,
+  "seconds": 26.35,
+  "fresh_usd": 0.00069798,
+  "cached_usd": 6.736e-05,
+  "output_usd": 0.00030456,
+  "thinking_usd": 5.04e-05,
+  "output_tokens": 725,
+  "thinking_tokens": 120,
+  "fresh_tokens": 4985,
+  "cached_tokens": 16000,
+  "planned": false,
+  "passed": 6,
+  "checks": 6,
+  "aborted": false,
+  "notices": []
+ },
+ {
+  "level": "auto",
+  "task": "standard",
+  "run": "auto-standard-run1",
+  "thinking_sent": [
+   "max"
+  ],
+  "models": [
+   "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+  ],
+  "stepped_up": false,
+  "steps": 13,
+  "tokens": 94221,
+  "cost": 0.004435,
+  "seconds": 87.84,
+  "fresh_usd": 0.00141677,
+  "cached_usd": 0.00032682,
+  "output_usd": 0.00269131,
+  "thinking_usd": 0.0012635,
+  "output_tokens": 6407,
+  "thinking_tokens": 3008,
+  "fresh_tokens": 10118,
+  "cached_tokens": 77696,
+  "planned": false,
+  "passed": 10,
+  "checks": 10,
+  "aborted": false,
+  "notices": []
+ },
+ {
+  "level": "auto",
+  "task": "standard",
+  "run": "auto-standard-run2",
+  "thinking_sent": [
+   "max"
+  ],
+  "models": [
+   "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+  ],
+  "stepped_up": false,
+  "steps": 13,
+  "tokens": 97612,
+  "cost": 0.004339,
+  "seconds": 70.66,
+  "fresh_usd": 0.00151158,
+  "cached_usd": 0.00034028,
+  "output_usd": 0.00248714,
+  "thinking_usd": 0.00097615,
+  "output_tokens": 5921,
+  "thinking_tokens": 2324,
+  "fresh_tokens": 10795,
+  "cached_tokens": 80896,
+  "planned": true,
+  "passed": 10,
+  "checks": 10,
+  "aborted": false,
+  "notices": []
+ }
+]
