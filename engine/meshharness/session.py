@@ -635,6 +635,7 @@ class Session:
                               text=reply, model=model_used)
                     self.state["messages"].append(
                         {"role": "assistant", "content": reply})
+                    self._plan_finish()
                 break
 
             if has_reply:
@@ -1310,11 +1311,16 @@ class Session:
         self.state["_batch_assistant_idx"] = len(self.state["messages"]) - 1
 
         doomed = 0
+        worked = stepped = False
         for p in prepared:
             if self._interrupt.is_set():
                 return {"total": len(prepared), "doomed": doomed, "interrupted": True}
 
             name, args = p["name"], p["args"]
+            # `step` is the model telling the ENGINE which plan step this
+            # call belongs to. It is not the tool's argument: taken off here,
+            # before anything validates, previews or runs the call.
+            step = args.pop("step", None) if isinstance(args, dict) else None
 
             if p["kind"] in ("invalid", "truncated", "unparseable") and name not in PLAN_TOOLS:
                 doomed += 1
@@ -1331,6 +1337,10 @@ class Session:
                 self.emit(Event.TOOL_REPAIRED, call_id=p["id"], name=name,
                           kind=p["kind"])
 
+            if name not in UNGATED_TOOLS:
+                worked = True
+                stepped = self._plan_follow(step) or stepped
+
             try:
                 result = self._execute_one(p, turn_id, hop)
             except KeyboardInterrupt:
@@ -1343,6 +1353,8 @@ class Session:
 
             self._append_tool_result(p["id"], result)
 
+        if worked and not stepped:
+            self._plan_nudge()
         return {"total": len(prepared), "doomed": doomed, "interrupted": False}
 
     def _append_tool_result(self, call_id: str, result: str) -> None:
@@ -1737,13 +1749,20 @@ class Session:
             steps = args.get("steps")
             if not isinstance(steps, list) or not steps:
                 return "Error: create_plan requires a non-empty `steps` list."
-            plan = Plan(steps)
+            plan = Plan(steps, previous=self.state.get("plan"))
             if not plan.steps:
                 return "Error: all steps were empty after trimming whitespace."
+            plan.begin()
             self.state["plan"] = plan
+            self.state["_plan_nudged"] = False
             self.emit(Event.PLAN_UPDATED, **plan.to_dict())
-            return (f"Plan created with {len(plan.steps)} step(s). Now call "
-                    "update_step(1, 'in_progress') and start work.")
+            now = plan.current()
+            # No "now call ..." here: the old wording asked for a tick and
+            # got a round trip that did nothing else.
+            return (f"Plan created with {len(plan.steps)} step(s)"
+                    + (f"; step {now[0]} is in progress" if now else "")
+                    + ". Start the work now. Put `step` on your tool calls "
+                    "and the checklist follows — there is nothing to tick.")
 
         if name == "update_step":
             plan = self.state.get("plan")
@@ -1753,9 +1772,49 @@ class Session:
             if err:
                 return f"Error: {err}"
             self.emit(Event.PLAN_UPDATED, **plan.to_dict())
-            return f"Step {args['index']} → {args['status']}. {plan.summary()}"
+            # A retired tool (old chats still call it from habit). Honour
+            # the call, and say how it works now.
+            return (f"Step {args['index']} → {args['status']}. {plan.summary()} "
+                    "Steps are ticked for you now: put `step` on your tool "
+                    "calls instead of calling this.")
 
         return f"Error: unknown plan tool `{name}`"
+
+    # -- the engine keeps the checklist ---------------------------------
+    def _plan_follow(self, step) -> bool:
+        """A work call carried `step`. True when it named a real step."""
+        plan = self.state.get("plan")
+        if plan is None:
+            return False
+        changed = plan.follow(step)
+        if changed:
+            self.emit(Event.PLAN_UPDATED, **plan.to_dict())
+        return changed is not None
+
+    def _plan_nudge(self) -> None:
+        """Once per plan: work went by without a `step`, so the checklist is
+        standing still. Said at the point of action (on the result the model
+        reads next), because advice in the prompt is what cheap models skip."""
+        plan = self.state.get("plan")
+        if plan is None or plan.is_complete() or self.state.get("_plan_nudged"):
+            return
+        now = plan.current()
+        last = self.state["messages"][-1] if self.state["messages"] else None
+        if not now or not last or last.get("role") != "tool" \
+                or not isinstance(last.get("content"), str):
+            return
+        self.state["_plan_nudged"] = True
+        last["content"] += (
+            f"\n\n[plan] You are on step {now[0]} of {len(plan.steps)} "
+            f"({now[1].title}). Put `step` on your tool calls so the "
+            "checklist follows your work.")
+
+    def _plan_finish(self) -> None:
+        """The turn ended with an answer: tick the last step if it was the
+        one in progress."""
+        plan = self.state.get("plan")
+        if plan is not None and plan.finish():
+            self.emit(Event.PLAN_UPDATED, **plan.to_dict())
 
     def _ask_user(self, args: dict, turn_id: str) -> str:
         """The model's mid-task question — a dialog, not a curses picker."""
@@ -1901,9 +1960,8 @@ class Session:
                          if appended else "")
                 return (f"Server started: {url} (pid {proc.pid}). It runs in "
                         "the background and the user can already see it. Do "
-                        "not curl it, do not re-read the files — mark the "
-                        "plan step completed and end your turn with a brief "
-                        "acknowledgment." + extra)
+                        "not curl it, do not re-read the files — end your "
+                        "turn with a brief acknowledgment." + extra)
             time.sleep(0.25)
 
         _kill(proc.pid)

@@ -82,13 +82,13 @@ def test_server_rules_are_in_the_tool_and_its_result():
     # What to do AFTER the start is said when it happens, in the result.
     result_text = inspect.getsource(Session._start_server)
     assert "Do " in result_text and "not curl it" in result_text
-    assert "end your turn" in result_text
-    assert "plan step completed" in result_text
+    assert "end your" in result_text and "turn with a brief acknowledgment" in result_text
+    # It no longer asks for a tick: the engine keeps the checklist.
+    assert "plan step completed" not in result_text
 
 
 def test_prompt_keeps_what_no_tool_definition_says():
     prompt = _prompt()
-    assert "BEFORE starting a long-running server, bring the plan up to date" in prompt
     for workaround in ("nohup", "disown", "setsid", "timeout N npm run dev"):
         assert workaround in prompt
     # Untouched neighbours.
@@ -100,8 +100,9 @@ def test_prompt_keeps_what_no_tool_definition_says():
 # -- size -------------------------------------------------------------------
 
 def test_fixed_text_per_step_shrank():
-    """6,988 chars of prompt before this change (cwd /tmp, no base prompt);
-    the tool block grew by the one clause moved into `remember`."""
+    """Before any of this: 6,988 chars of prompt (cwd /tmp, no base prompt)
+    and 8,213 of tool definitions, 15,201 together."""
     import json
-    assert len(_prompt()) < 5_750
-    assert len(json.dumps(tools.TOOLS)) < 8_300
+    assert len(_prompt()) < 4_900
+    assert len(json.dumps(tools.TOOLS)) < 8_250
+    assert len(_prompt()) + len(json.dumps(tools.TOOLS)) < 13_100

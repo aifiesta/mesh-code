@@ -41,23 +41,12 @@ def build_system_prompt(cfg: dict, cwd: "str | Path | None" = None) -> str:
         "already answers, or permission to run a tool. If the user "
         "dismisses the picker, choose the most reasonable option, say which "
         "and why, and keep going.\n\n"
-        "PLAN BEFORE ACTING. For any request that will need more than ~3 "
-        "tool calls (building features, multi-file edits, scaffolding a "
-        "project), FIRST call create_plan with a numbered list of small, "
-        "focused steps. Each step should be completable in one or two "
-        "tool calls and finish in under 30 seconds. Then for each step "
-        "call update_step(i, \"in_progress\"), do the work, and call "
-        "update_step(i, \"completed\"). Send plan updates IN THE SAME "
-        "RESPONSE as the tool call that does the step's work — a response "
-        "containing only update_step costs a full round trip and does "
-        "nothing. If a step turns out to be wrong "
-        "or impossible, mark it \"blocked\" and call create_plan again "
-        "with a revised plan. For simple one-shot requests (read a file, "
-        "answer a question, run one command), skip the plan and act "
+        "PLAN BEFORE ACTING. For work that will take more than a few tool "
+        "calls, make a plan first; for a simple one-shot request, act "
         "directly. NEVER tell the user the task is finished — and do not "
         "treat starting a server as the final step — while any plan step is "
-        "still pending or in progress. Either finish every remaining step "
-        "first, or clearly tell the user which steps are not done and why.\n\n"
+        "still undone. Either finish every remaining step first, or clearly "
+        "tell the user which steps are not done and why.\n\n"
         "COMPLETENESS — deliver working code, not scaffolding. Everything "
         "you write is the FULL implementation: every function body filled "
         "in with real logic. Never leave placeholder comments like 'TODO', "
@@ -115,11 +104,10 @@ def build_system_prompt(cfg: dict, cwd: "str | Path | None" = None) -> str:
         # What a tool is for, and how to call it, is said ONCE, in that
         # tool's definition (and, for what to do after a server starts, in
         # the tool's result). Only what no tool definition says stays here.
-        "BEFORE starting a long-running server, bring the plan up to date "
-        "— mark every already-finished step completed. Don't keep a server "
-        "alive with shell workarounds like `nohup &`, `disown`, `setsid`, "
-        "or `timeout N npm run dev` — `timeout` doesn't exist on macOS and "
-        "backgrounding via shell loses output capture."
+        "Don't keep a long-running server alive with shell workarounds like "
+        "`nohup &`, `disown`, `setsid`, or `timeout N npm run dev` — "
+        "`timeout` doesn't exist on macOS and backgrounding via shell loses "
+        "output capture."
     )
     # Warm start: REPO MEMORY block from previous sessions in this cwd
     # (best-effort — a memory bug must never break session start).
@@ -170,6 +158,10 @@ TOOLS = [
                         "type": "integer",
                         "description": "How many lines to read from offset.",
                     },
+                    "step": {
+                        "type": "integer",
+                        "description": "Plan step this call belongs to, if there is a plan.",
+                    },
                 },
                 "required": ["path"],
             },
@@ -189,6 +181,10 @@ TOOLS = [
                 "properties": {
                     "path": {"type": "string", "description": "File path to write"},
                     "content": {"type": "string", "description": "Full file contents"},
+                    "step": {
+                        "type": "integer",
+                        "description": "Plan step this call belongs to, if there is a plan.",
+                    },
                 },
                 "required": ["path", "content"],
             },
@@ -221,6 +217,10 @@ TOOLS = [
                         "type": "boolean",
                         "description": "Replace every match instead of requiring exactly one",
                     },
+                    "step": {
+                        "type": "integer",
+                        "description": "Plan step this call belongs to, if there is a plan.",
+                    },
                 },
                 "required": ["path", "old_text", "new_text"],
             },
@@ -249,6 +249,10 @@ TOOLS = [
                             f"(default {BASH_TIMEOUT}, max 600). Use for "
                             "known-slow builds or test suites."
                         ),
+                    },
+                    "step": {
+                        "type": "integer",
+                        "description": "Plan step this call belongs to, if there is a plan.",
                     },
                 },
                 "required": ["command"],
@@ -347,11 +351,14 @@ TOOLS = [
             "name": "create_plan",
             "description": (
                 "Create or replace the numbered plan for a multi-step task. CALL "
-                "THIS FIRST for any request that needs more than ~3 tool calls. "
-                "Each step should be small, action-oriented, and finishable in one "
-                "or two tool calls (under ~30s). After this, call update_step for "
-                "each step as you work through it. Skip create_plan entirely for "
-                "simple one-shot requests."
+                "THIS FIRST for any request that needs more than ~3 tool calls "
+                "(building features, multi-file edits, scaffolding); skip it for "
+                "simple one-shot requests. Each step should be small, "
+                "action-oriented, and finishable in one or two tool calls. "
+                "Then just work: put `step` (the step's number) on your tool "
+                "calls and the checklist is ticked for you — there is no tool "
+                "for ticking, and nothing to send besides the work itself. If "
+                "the plan turns out wrong, call this again with the revised steps."
             ),
             "parameters": {
                 "type": "object",
@@ -414,6 +421,10 @@ TOOLS = [
                         "type": "integer",
                         "description": "Max seconds to wait for the port to open. Default 30; bump for slow installs.",
                     },
+                    "step": {
+                        "type": "integer",
+                        "description": "Plan step this call belongs to, if there is a plan.",
+                    },
                 },
                 "required": ["command"],
             },
@@ -445,35 +456,6 @@ TOOLS = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "update_step",
-            "description": (
-                "Update a step's status in the current plan. Call with "
-                "status='in_progress' when starting step i, then status='completed' "
-                "when done. ALWAYS send these alongside the tool call that does the "
-                "work, in the same response — e.g. update_step(2,'completed') + "
-                "update_step(3,'in_progress') + the first call of step 3 together. "
-                "Never reply with only update_step calls. Use 'blocked' if the step "
-                "can't be done — then call create_plan again with a revised plan."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "index": {
-                        "type": "integer",
-                        "description": "1-based step number from the current plan.",
-                    },
-                    "status": {
-                        "type": "string",
-                        "enum": ["in_progress", "completed", "blocked"],
-                    },
-                },
-                "required": ["index", "status"],
-            },
-        },
-    },
 ]
 
 OUTPUT_LIMIT = 8000
@@ -483,6 +465,8 @@ OUTPUT_LIMIT = 8000
 # (~20k tokens) is plenty for any file a model should read in one piece.
 READ_LIMIT = 80_000
 MAX_BASH_TIMEOUT = 600  # model-requested run_bash timeout ceiling (seconds)
+# update_step is retired (the engine ticks the plan) but stays here so an old
+# chat that still calls it is answered without an approval prompt.
 PLAN_TOOLS = ("create_plan", "update_step")  # meta — auto-approved, no side effects
 # Asking the user a question has no side effects and is answered by the user
 # in person — gating it behind a y/n approval would be absurd.
