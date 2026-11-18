@@ -123,22 +123,18 @@ def estimate_cost(model_id: str, usage: dict,
     return cost
 
 
-def fetch_request_cost(cfg: dict, request_ids: list,
-                       timeout: float = 3.0) -> "float | None":
-    """Billed USD for one hop from GET /usage/requests/{id}, summed over ids.
-
-    A hop can carry several ids (optimized attempt degraded to raw); every
-    accepted attempt was billed. None only when no id could be settled.
-    """
+def _fetch_request_events(cfg: dict, request_ids: list,
+                          timeout: float = 3.0) -> list:
+    """The billing record of each settled request id (those with a cost)."""
     if not request_ids:
-        return None
+        return []
     try:
         import httpx
     except Exception:
-        return None
+        return []
     base = cfg["base_url"].rstrip("/")
     headers = {"Authorization": f"Bearer {cfg['api_key']}"}
-    total, found = 0.0, False
+    events = []
     for rid in request_ids:
         if not rid:
             continue
@@ -150,11 +146,195 @@ def fetch_request_cost(cfg: dict, request_ids: list,
             ev = (r.json() or {}).get("event") or {}
             if ev.get("cost_usd") is None:
                 continue
-            total += float(ev["cost_usd"])
-            found = True
+            float(ev["cost_usd"])
+            events.append(ev)
         except Exception:
             continue
-    return total if found else None
+    return events
+
+
+def fetch_request_cost(cfg: dict, request_ids: list,
+                       timeout: float = 3.0) -> "float | None":
+    """Billed USD for one hop from GET /usage/requests/{id}, summed over ids.
+
+    A hop can carry several ids (optimized attempt degraded to raw); every
+    accepted attempt was billed. None only when no id could be settled.
+    """
+    events = _fetch_request_events(cfg, request_ids, timeout)
+    return sum(float(ev["cost_usd"]) for ev in events) if events else None
+
+
+# ---------------------------------------------------------------------------
+# Where a bill goes.
+#
+# Total tokens and total dollars hide the thing that decides what is worth
+# optimizing: input the provider has cached costs a few percent of fresh
+# input (DeepSeek: $0.006 against $0.20 per 1M), output costs several times
+# input, and thinking is billed as output. A run can halve its tokens and
+# lose a fifth of its bill. So every step reports the split.
+#
+# A "bill" is a flat dict so two of them add up key by key:
+#   *_tokens / *_usd for fresh (input billed in full), cached (input read
+#   from the provider's cache), cache_write (input written to it, usually
+#   dearer than fresh), output (everything the model wrote, thinking
+#   included), thinking (the part of output that was reasoning — a SHARE of
+#   output, never added on top), other_usd (anything billed that is not
+#   tokens, e.g. a tool fee), and `estimated` (the split was computed from
+#   catalog rates, not read from the gateway's bill).
+
+BILL_PARTS = ("fresh", "cached", "cache_write", "output", "thinking")
+
+
+def empty_bill() -> dict:
+    bill = {f"{part}_{unit}": 0 for part in BILL_PARTS for unit in ("tokens", "usd")}
+    for part in BILL_PARTS:
+        bill[f"{part}_usd"] = 0.0
+    bill["other_usd"] = 0.0
+    bill["estimated"] = False
+    return bill
+
+
+def add_bill(total: dict, part: "dict | None") -> dict:
+    """total += part, in place. Returns total."""
+    if not part:
+        return total
+    for key, value in part.items():
+        if key == "estimated":
+            total["estimated"] = bool(total.get("estimated")) or bool(value)
+        elif isinstance(value, (int, float)):
+            total[key] = total.get(key, 0) + value
+    return total
+
+
+def round_bill(bill: dict) -> dict:
+    """A copy fit for an event: dollars to 8 places, tokens whole."""
+    return {k: (v if isinstance(v, bool) else round(v, 8) if k.endswith("_usd") else int(v))
+            for k, v in bill.items()}
+
+
+def bill_total(bill: dict) -> float:
+    """Dollars in the bill. Thinking is inside output, so it is not added."""
+    return sum(float(bill.get(f"{p}_usd") or 0) for p in ("fresh", "cached", "cache_write", "output")) \
+        + float(bill.get("other_usd") or 0)
+
+
+def _int(value) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def usage_tokens(usage: "dict | None") -> dict:
+    """Token counts by part from a chat completion's `usage`. Cached and
+    cache-written tokens are SUBSETS of prompt_tokens; thinking is a subset
+    of completion_tokens."""
+    usage = usage or {}
+    prompt, completion = _int(usage.get("prompt_tokens")), _int(usage.get("completion_tokens"))
+    details = usage.get("prompt_tokens_details") or {}
+    cached = min(_int(details.get("cached_tokens")), prompt)
+    written = sum(_int(v) for k, v in details.items() if str(k).startswith("cache_write"))
+    written = min(written, prompt - cached)
+    thinking = min(_int((usage.get("completion_tokens_details") or {}).get("reasoning_tokens")), completion)
+    return {"fresh": prompt - cached - written, "cached": cached, "cache_write": written,
+            "output": completion, "thinking": thinking}
+
+
+def _line_part(kind) -> "str | None":
+    kind = str(kind or "").lower()
+    if kind == "input":
+        return "fresh"
+    if kind.startswith("cache_read") or kind == "cached_input":
+        return "cached"
+    if kind.startswith("cache_write") or kind.startswith("cache_creation"):
+        return "cache_write"
+    if kind == "output":
+        return "output"
+    return None
+
+
+def bill_from_events(events: list, usage: "dict | None" = None) -> "dict | None":
+    """The split as the gateway BILLED it, from each request's
+    `cost_breakdown.lines`. Every part is scaled so the parts add up to the
+    billed figure exactly (an account discount or rounding is spread over
+    the lines in proportion). None when no event carries a breakdown."""
+    bill, seen = empty_bill(), False
+    for ev in events or []:
+        lines = ((ev.get("cost_breakdown") or {}).get("lines")) or []
+        if not lines:
+            continue
+        try:
+            cost = float(ev["cost_usd"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        charged = [l for l in lines if l.get("charged") is not False]
+        listed = sum(_dec(l.get("amount_usd")) or 0.0 for l in charged)
+        scale = cost / listed if listed > 0 else 0.0
+        for line in charged:
+            part = _line_part(line.get("kind"))
+            usd = (_dec(line.get("amount_usd")) or 0.0) * scale
+            if part is None:
+                bill["other_usd"] += usd
+            else:
+                bill[f"{part}_usd"] += usd
+                bill[f"{part}_tokens"] += _int(line.get("tokens"))
+        if listed <= 0:
+            bill["other_usd"] += cost       # billed, but not through any line
+        seen = True
+    if not seen:
+        return None
+    _set_thinking(bill, usage)
+    return bill
+
+
+def _set_thinking(bill: dict, usage: "dict | None") -> None:
+    """Thinking is billed as output; show how much of output it was."""
+    thinking = usage_tokens(usage)["thinking"]
+    out = bill["output_tokens"]
+    thinking = min(thinking, out)
+    bill["thinking_tokens"] = thinking
+    bill["thinking_usd"] = bill["output_usd"] * thinking / out if out else 0.0
+
+
+def bill_from_usage(model_id: str, usage: "dict | None", models: "list | None",
+                    cost: float = 0.0) -> dict:
+    """The split ESTIMATED from token counts and the catalog's rates, for a
+    step the gateway gave no breakdown for. When the step's total is known
+    (`cost`), the parts are scaled to add up to it; marked estimated either
+    way. Tokens are always real."""
+    bill = empty_bill()
+    bill["estimated"] = True
+    tokens = usage_tokens(usage)
+    for part in ("fresh", "cached", "cache_write", "output"):
+        bill[f"{part}_tokens"] = tokens[part]
+    pricing = (find_model(model_id, models) or {}).get("pricing") or {}
+    prompt_rate = _dec(pricing.get("prompt_usd_per_1m")) or 0.0
+    out_rate = _dec(pricing.get("completion_usd_per_1m")) or 0.0
+    read_rate = _dec(pricing.get("cache_read_input_usd_per_1m"))
+    write_rate = _dec(pricing.get("cache_write_input_usd_per_1m"))
+    rates = {"fresh": prompt_rate, "output": out_rate,
+             "cached": read_rate if read_rate is not None else prompt_rate,
+             "cache_write": write_rate if write_rate is not None else prompt_rate}
+    listed = {part: tokens[part] * rates[part] / 1_000_000 for part in rates}
+    total = sum(listed.values())
+    scale = (cost / total) if (cost and cost > 0 and total > 0) else 1.0
+    for part, usd in listed.items():
+        bill[f"{part}_usd"] = usd * scale
+    if cost and cost > 0 and total <= 0:
+        bill["other_usd"] = cost            # billed, but the catalog has no rates to split it
+    _set_thinking(bill, usage)
+    return bill
+
+
+def fetch_request_bill(cfg: dict, request_ids: list, usage: "dict | None" = None,
+                       timeout: float = 3.0) -> tuple:
+    """(billed USD or None, bill or None) for one hop, from one lookup per
+    request id. The bill is None when the gateway settled the request but
+    sent no breakdown."""
+    events = _fetch_request_events(cfg, request_ids, timeout)
+    if not events:
+        return None, None
+    return sum(float(ev["cost_usd"]) for ev in events), bill_from_events(events, usage)
 
 
 def fetch_actual_costs(cfg: dict, request_ids: list, since: str,

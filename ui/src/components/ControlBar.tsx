@@ -3,6 +3,7 @@ import { useDismissable } from '../useDismissable'
 import type { RouteExplain, SettingSpec, SettingsDoc, Status } from '../types'
 import { fmtTokens, fmtUsd, pricePerM, type CatalogModel } from '../types'
 import { Field } from './Field'
+import { BillTable } from './BillSplit'
 
 /**
  * The dials you touch often, where you are already looking.
@@ -130,6 +131,7 @@ export function ControlBar({ status, settings, catalog, routeExplain, onSet, onO
               <div><dt>This turn</dt><dd>{(status?.turn_tokens ?? 0).toLocaleString()}</dd></div>
               <div><dt>Session</dt><dd>{(status?.session_tokens ?? 0).toLocaleString()}</dd></div>
             </dl>
+            <BillTable session={status?.session_bill} turn={status?.turn_bill} live={live} />
             <p className="pop-note">
               Counted from the usage the gateway reports on every hop, so it
               includes tool results and re-sent history — not just your prompt.
@@ -157,6 +159,7 @@ export function ControlBar({ status, settings, catalog, routeExplain, onSet, onO
               <div><dt>Tokens</dt><dd>{tokens.toLocaleString()}</dd></div>
               <div><dt>Rate</dt><dd>{fmtUsd(inPrice)} / 1M in</dd></div>
             </dl>
+            <BillTable session={status?.session_bill} turn={status?.turn_bill} live={live} />
             <p className="pop-note">
               {estimated
                 ? 'Marked ~ because this model reported no cost, so this is '

@@ -40,6 +40,7 @@ import httpx
 from .bridge import Cancelled, Pending
 from .core import compact, loopguard, memory, router
 from .core import journal, safety
+from .core import pricing as _pricing
 from .core import tools as tools_mod
 from .core.client import (complete_chat, nearest_level, reasoning_refusal,
                           stream_chat)
@@ -94,6 +95,11 @@ class Session:
         self.turn_cost = 0.0
         self.turn_tokens = 0
         self.turn_estimated = False
+        # Where the money went: fresh input, cached input, cache writes,
+        # output, thinking (see pricing.empty_bill). Same lifetimes as the
+        # totals above — the turn's bill folds into the session's at turn end.
+        self.turn_bill = _pricing.empty_bill()
+        self.session_bill = _pricing.empty_bill()
         self.servers: list[dict] = []
         self.catalog: list | None = None
         # The user's own shell, created on first use. Not gated by permission
@@ -166,6 +172,8 @@ class Session:
             turn_cost=round(self.turn_cost, 6),
             turn_tokens=self.turn_tokens,
             turn_estimated=self.turn_estimated,
+            turn_bill=_pricing.round_bill(self.turn_bill),
+            session_bill=_pricing.round_bill(self.session_bill),
             workspace=str(self.workspace),
             busy=self._busy.is_set(),
             servers=[{k: s.get(k) for k in ("pid", "port", "url", "cmd")}
@@ -285,6 +293,7 @@ class Session:
                 "model": self.cfg.get("model"),
                 "session_cost": self.session_cost,
                 "session_tokens": self.session_tokens,
+                "session_bill": self.session_bill,
                 "messages": self.state.get("messages") or [],
                 "plan": self.state["plan"].to_dict() if self.state.get("plan") else None,
             })
@@ -304,6 +313,10 @@ class Session:
         s.chat_label = data.get("label") or ""
         s.session_cost = float(data.get("session_cost") or 0)
         s.session_tokens = int(data.get("session_tokens") or 0)
+        if isinstance(data.get("session_bill"), dict):
+            # A chat saved before the split existed has none: its earlier
+            # spend stays in the totals and is simply not broken down.
+            _pricing.add_bill(s.session_bill, data["session_bill"])
         if data.get("model"):
             s.cfg["model"] = data["model"]
         msgs = data.get("messages") or []
@@ -499,6 +512,7 @@ class Session:
         self.turn_estimated = False
         self.turn_tokens = 0
         self.turn_model = None
+        self.turn_bill = _pricing.empty_bill()
 
         # Smart routing resolves locally and stores its pick in
         # _smart_pick (NOT cfg["model"], which stays the user's pin). After
@@ -575,14 +589,16 @@ class Session:
             # Billed figure by request id first (settles ~250ms after the
             # stream), then an in-body cost, then the catalog estimate.
             hop_cost, estimated = 0.0, False
+            hop_bill, priced_as = None, self._effective_model()
             rids = meta.get("request_ids") or (
                 [meta["request_id"]] if meta.get("request_id") else [])
             if rids and usage:
                 try:
                     from .core import pricing
-                    billed = pricing.fetch_request_cost(self.cfg, rids)
+                    billed, hop_bill = pricing.fetch_request_bill(
+                        self.cfg, rids, usage)
                 except Exception:
-                    billed = None
+                    billed, hop_bill = None, None
                 if billed is not None:
                     hop_cost = float(billed)
             if hop_cost <= 0:
@@ -605,6 +621,7 @@ class Session:
                             continue
                         guess = pricing.estimate_cost(candidate, usage, self.catalog)
                         if guess is not None:
+                            priced_as = candidate
                             break
                     if guess:
                         hop_cost, estimated = float(guess), True
@@ -613,6 +630,24 @@ class Session:
             self.turn_cost += hop_cost
             if estimated:
                 self.turn_estimated = True
+            # The split. From the gateway's own bill when it sent one;
+            # otherwise worked out from the token counts and the catalog's
+            # rates, scaled to this step's total, and marked estimated.
+            if usage:
+                try:
+                    if hop_bill is None:
+                        hop_bill = _pricing.bill_from_usage(
+                            priced_as or model_used, usage, self.catalog,
+                            cost=hop_cost)
+                    _pricing.add_bill(self.turn_bill, hop_bill)
+                    self.emit(Event.HOP_USAGE, turn_id=turn_id, hop=hop,
+                              model=model_used,
+                              tokens=int(usage.get("total_tokens") or 0),
+                              cost=round(hop_cost, 8),
+                              cost_estimated=estimated,
+                              bill=_pricing.round_bill(hop_bill))
+                except Exception:
+                    pass        # the split is reporting; it must never break a turn
             # Publish the running tally now, while the turn is still going.
             self._status()
 
@@ -701,6 +736,8 @@ class Session:
 
         self.session_cost += self.turn_cost
         self.session_tokens += self.turn_tokens
+        _pricing.add_bill(self.session_bill, self.turn_bill)
+        turn_bill = _pricing.round_bill(self.turn_bill)
         elapsed = time.time() - started
         turn_cost, turn_tokens, turn_estimated = (
             self.turn_cost, self.turn_tokens, self.turn_estimated)
@@ -714,12 +751,14 @@ class Session:
                       sealed=sealed, elapsed=round(elapsed, 2),
                       model=model_used, cost=round(turn_cost, 6),
                       cost_estimated=turn_estimated, tokens=turn_tokens,
+                      bill=turn_bill,
                       session_cost=round(self.session_cost, 6))
         else:
             self.emit(Event.TURN_FINISHED, turn_id=turn_id, hops=hop,
                       model=model_used, cost=round(turn_cost, 6),
                       cost_estimated=turn_estimated,
                       tokens=turn_tokens, elapsed=round(elapsed, 2),
+                      bill=turn_bill,
                       session_cost=round(self.session_cost, 6),
                       plan=self.state["plan"].to_dict() if self.state["plan"] else None,
                       stubs=sorted(self.state.get("stub_files") or {}))
@@ -740,6 +779,7 @@ class Session:
         self.turn_tokens = 0
         self.turn_estimated = False
         self.turn_model = None
+        self.turn_bill = _pricing.empty_bill()
         # A max_tokens shrink was derived from one over-long request's input.
         # Left set, it clips output for every later (now shorter) turn. Clear
         # it at turn end so the next turn re-derives from its own input.

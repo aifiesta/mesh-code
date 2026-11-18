@@ -587,6 +587,7 @@ export function reduce(state: AppState, action: Action): AppState {
           // Carry the estimate flag onto the permanent record so a computed
           // cost is shown as ~ here too, not just in the live bar.
           estimated: !!d.cost_estimated,
+          bill: d.bill ?? null,
         }]
         // The engine ticks the plan from the step number the model puts on
         // its tool calls. A model can do the work and never say which step
