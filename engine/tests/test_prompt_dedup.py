@@ -103,6 +103,6 @@ def test_fixed_text_per_step_shrank():
     """Before any of this: 6,988 chars of prompt (cwd /tmp, no base prompt)
     and 8,213 of tool definitions, 15,201 together."""
     import json
-    assert len(_prompt()) < 4_900
-    assert len(json.dumps(tools.TOOLS)) < 8_250
-    assert len(_prompt()) + len(json.dumps(tools.TOOLS)) < 13_100
+    assert len(_prompt()) < 5_050
+    assert len(json.dumps(tools.TOOLS)) < 8_350
+    assert len(_prompt()) + len(json.dumps(tools.TOOLS)) < 13_350

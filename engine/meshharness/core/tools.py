@@ -41,9 +41,12 @@ def build_system_prompt(cfg: dict, cwd: "str | Path | None" = None) -> str:
         "already answers, or permission to run a tool. If the user "
         "dismisses the picker, choose the most reasonable option, say which "
         "and why, and keep going.\n\n"
-        "PLAN BEFORE ACTING. For work that will take more than a few tool "
-        "calls, make a plan first; for a simple one-shot request, act "
-        "directly. NEVER tell the user the task is finished — and do not "
+        "PLAN BEFORE ACTING. For any request that will need more than ~3 "
+        "tool calls (building features, multi-file edits, scaffolding a "
+        "project), FIRST make a plan: a numbered list of small, focused "
+        "steps. For simple one-shot requests (read a file, answer a "
+        "question, run one command), skip the plan and act directly. "
+        "NEVER tell the user the task is finished — and do not "
         "treat starting a server as the final step — while any plan step is "
         "still undone. Either finish every remaining step first, or clearly "
         "tell the user which steps are not done and why.\n\n"
@@ -160,7 +163,7 @@ TOOLS = [
                     },
                     "step": {
                         "type": "integer",
-                        "description": "Plan step this call belongs to, if there is a plan.",
+                        "description": "Plan step this call works on (not needed for step 1).",
                     },
                 },
                 "required": ["path"],
@@ -183,7 +186,7 @@ TOOLS = [
                     "content": {"type": "string", "description": "Full file contents"},
                     "step": {
                         "type": "integer",
-                        "description": "Plan step this call belongs to, if there is a plan.",
+                        "description": "Plan step this call works on (not needed for step 1).",
                     },
                 },
                 "required": ["path", "content"],
@@ -219,7 +222,7 @@ TOOLS = [
                     },
                     "step": {
                         "type": "integer",
-                        "description": "Plan step this call belongs to, if there is a plan.",
+                        "description": "Plan step this call works on (not needed for step 1).",
                     },
                 },
                 "required": ["path", "old_text", "new_text"],
@@ -252,7 +255,7 @@ TOOLS = [
                     },
                     "step": {
                         "type": "integer",
-                        "description": "Plan step this call belongs to, if there is a plan.",
+                        "description": "Plan step this call works on (not needed for step 1).",
                     },
                 },
                 "required": ["command"],
@@ -355,10 +358,12 @@ TOOLS = [
                 "(building features, multi-file edits, scaffolding); skip it for "
                 "simple one-shot requests. Each step should be small, "
                 "action-oriented, and finishable in one or two tool calls. "
-                "Then just work: put `step` (the step's number) on your tool "
-                "calls and the checklist is ticked for you — there is no tool "
-                "for ticking, and nothing to send besides the work itself. If "
-                "the plan turns out wrong, call this again with the revised steps."
+                "Then just work. Step 1 is in progress already; from step 2 "
+                "on, put the step's number in `step` on the tool calls that do "
+                "that step, and the checklist is ticked for you. Never make a "
+                "call only to report progress: there is no tool for ticking, "
+                "and nothing to send besides the work itself. If the plan "
+                "turns out wrong, call this again with the revised steps."
             ),
             "parameters": {
                 "type": "object",
@@ -423,7 +428,7 @@ TOOLS = [
                     },
                     "step": {
                         "type": "integer",
-                        "description": "Plan step this call belongs to, if there is a plan.",
+                        "description": "Plan step this call works on (not needed for step 1).",
                     },
                 },
                 "required": ["command"],

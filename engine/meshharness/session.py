@@ -50,6 +50,9 @@ from .terminal import Terminal
 from .protocol import Decision, Event, event
 
 PLAN_TOOLS = {"create_plan", "update_step"}
+# Batches of work with no `step` named before the engine says, once, that the
+# checklist is standing still.
+PLAN_QUIET_BATCHES = 3
 INTERACTIVE_TOOLS = {"ask_user"}
 UNGATED_TOOLS = PLAN_TOOLS | INTERACTIVE_TOOLS | {"remember"}
 
@@ -1322,6 +1325,25 @@ class Session:
             # before anything validates, previews or runs the call.
             step = args.pop("step", None) if isinstance(args, dict) else None
 
+            if (p["kind"] == "invalid" and name == "edit_file" and step is not None
+                    and isinstance(args.get("old_text"), str) and args.get("old_text")
+                    and args.get("old_text") == args.get("new_text")):
+                # An edit that changes nothing, carrying a step number: a
+                # model announcing "I am on step N" the only way it found.
+                # It is not a broken call — counting it as one made the
+                # router step up to a model 10x the price (seen live). Take
+                # the step, say there is nothing to announce, move on.
+                worked = True
+                stepped = self._plan_follow(step) or stepped
+                result = ("Nothing changed: old_text and new_text are the same. "
+                          "There is no need to announce a plan step — just do "
+                          "the work, with `step` on the calls that do it.")
+                self.emit(Event.TOOL_SKIPPED, call_id=p["id"], name=name,
+                          kind="noop", reason=result.split(".")[0] + ".",
+                          turn_id=turn_id, hop=hop)
+                self._append_tool_result(p["id"], result)
+                continue
+
             if p["kind"] in ("invalid", "truncated", "unparseable") and name not in PLAN_TOOLS:
                 doomed += 1
                 streaks = self.state.setdefault("doom_streak", {})
@@ -1353,8 +1375,8 @@ class Session:
 
             self._append_tool_result(p["id"], result)
 
-        if worked and not stepped:
-            self._plan_nudge()
+        if worked:
+            self._plan_nudge(stepped)
         return {"total": len(prepared), "doomed": doomed, "interrupted": False}
 
     def _append_tool_result(self, call_id: str, result: str) -> None:
@@ -1755,14 +1777,14 @@ class Session:
             plan.begin()
             self.state["plan"] = plan
             self.state["_plan_nudged"] = False
+            self.state["_plan_quiet"] = 0
             self.emit(Event.PLAN_UPDATED, **plan.to_dict())
             now = plan.current()
             # No "now call ..." here: the old wording asked for a tick and
             # got a round trip that did nothing else.
             return (f"Plan created with {len(plan.steps)} step(s)"
                     + (f"; step {now[0]} is in progress" if now else "")
-                    + ". Start the work now. Put `step` on your tool calls "
-                    "and the checklist follows — there is nothing to tick.")
+                    + ". Start the work now.")
 
         if name == "update_step":
             plan = self.state.get("plan")
@@ -1791,23 +1813,31 @@ class Session:
             self.emit(Event.PLAN_UPDATED, **plan.to_dict())
         return changed is not None
 
-    def _plan_nudge(self) -> None:
-        """Once per plan: work went by without a `step`, so the checklist is
-        standing still. Said at the point of action (on the result the model
-        reads next), because advice in the prompt is what cheap models skip."""
+    def _plan_nudge(self, stepped: bool) -> None:
+        """Once per plan: several batches of work went by and none named a
+        step, so the checklist may be standing still. Said at the point of
+        action (on the result the model reads next), because advice in the
+        prompt is what cheap models skip. Step 1 needs no number, so the
+        first batches after a plan are expected to be quiet."""
         plan = self.state.get("plan")
-        if plan is None or plan.is_complete() or self.state.get("_plan_nudged"):
+        if plan is None or plan.is_complete():
+            return
+        if stepped:
+            self.state["_plan_quiet"] = 0
+            return
+        self.state["_plan_quiet"] = self.state.get("_plan_quiet", 0) + 1
+        if self.state["_plan_quiet"] < PLAN_QUIET_BATCHES or self.state.get("_plan_nudged"):
             return
         now = plan.current()
         last = self.state["messages"][-1] if self.state["messages"] else None
-        if not now or not last or last.get("role") != "tool" \
+        if not now or len(plan.steps) < 2 or not last or last.get("role") != "tool" \
                 or not isinstance(last.get("content"), str):
             return
         self.state["_plan_nudged"] = True
         last["content"] += (
-            f"\n\n[plan] You are on step {now[0]} of {len(plan.steps)} "
-            f"({now[1].title}). Put `step` on your tool calls so the "
-            "checklist follows your work.")
+            f"\n\n[plan] The checklist still shows step {now[0]} of "
+            f"{len(plan.steps)} ({now[1].title}). If you are past it, put the "
+            "current step's number in `step` on your next tool call.")
 
     def _plan_finish(self) -> None:
         """The turn ended with an answer: tick the last step if it was the

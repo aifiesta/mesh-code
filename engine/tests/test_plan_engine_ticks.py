@@ -105,6 +105,8 @@ def test_the_plan_tool_explains_the_step_argument_once():
     desc = next(t["function"]["description"] for t in tools.TOOLS
                 if t["function"]["name"] == "create_plan")
     assert "`step`" in desc and "no tool for ticking" in desc
+    assert "Step 1 is in progress already" in desc
+    assert "Never make a call only to report progress" in desc
     assert "update_step" not in json.dumps(tools.TOOLS)
     prompt = tools.build_system_prompt({"repo_memory": False}, "/tmp")
     assert "update_step" not in prompt and "create_plan" not in prompt
@@ -171,32 +173,75 @@ def test_a_turn_that_stops_early_does_not_claim_the_rest(gateway, harness, tmp_p
     assert [s["status"] for s in plan["steps"]] == ["in_progress", "pending", "pending"]
 
 
-def test_work_without_a_step_gets_one_reminder_on_the_result(gateway, harness, tmp_path):
+def test_work_that_never_names_a_step_gets_one_reminder_after_three_batches(
+        gateway, harness, tmp_path):
     gateway.script(
         sse_turn(tool_calls=[_call("create_plan", steps=["write", "check"])]),
-        sse_turn(tool_calls=[_call("write_file", path="b.txt", content="x\n")]),
-        sse_turn(tool_calls=[_call("run_bash", command="cat b.txt")]),
+        sse_turn(tool_calls=[_call("write_file", "c1", path="b.txt", content="x\n")]),
+        sse_turn(tool_calls=[_call("run_bash", "c2", command="cat b.txt")]),
+        sse_turn(tool_calls=[_call("run_bash", "c3", command="wc -l b.txt")]),
+        sse_turn(tool_calls=[_call("run_bash", "c4", command="ls")]),
         sse_turn("done"))
     h = harness(mode=Mode.BYPASS)
     h.session.submit("go")
     h.wait_for(Event.TURN_FINISHED)
     results = [m["content"] for m in gateway.requests[-1]["messages"] if m.get("role") == "tool"]
-    nudged = [r for r in results if "[plan] You are on step 1 of 2 (write)" in r]
-    assert len(nudged) == 1, "said once per plan, not on every result"
-    assert "Put `step` on your tool calls" in nudged[0]
+    nudged = [i for i, r in enumerate(results) if "[plan] The checklist still shows step 1 of 2 (write)" in r]
+    assert nudged == [3], "on the third quiet batch (the plan result is index 0), and only once"
+    assert "put the current step's number in `step`" in results[3]
 
 
-def test_no_reminder_without_a_plan_or_when_a_step_was_given(gateway, harness, tmp_path):
+def test_no_reminder_without_a_plan_or_when_steps_are_named(gateway, harness, tmp_path):
     gateway.script(
-        sse_turn(tool_calls=[_call("write_file", path="b.txt", content="x\n")]),
-        sse_turn(tool_calls=[_call("create_plan", "c2", steps=["write", "check"])]),
-        sse_turn(tool_calls=[_call("run_bash", "c3", command="cat b.txt", step=2)]),
+        sse_turn(tool_calls=[_call("write_file", "c0", path="a.txt", content="x\n")]),
+        sse_turn(tool_calls=[_call("run_bash", "c1", command="ls")]),
+        sse_turn(tool_calls=[_call("run_bash", "c2", command="ls")]),
+        sse_turn(tool_calls=[_call("create_plan", "c3", steps=["write", "check"])]),
+        sse_turn(tool_calls=[_call("write_file", "c4", path="b.txt", content="x\n")]),
+        sse_turn(tool_calls=[_call("run_bash", "c5", command="cat b.txt")]),
+        sse_turn(tool_calls=[_call("run_bash", "c6", command="cat b.txt", step=2)]),
+        sse_turn(tool_calls=[_call("run_bash", "c7", command="ls")]),
         sse_turn("done"))
     h = harness(mode=Mode.BYPASS)
     h.session.submit("go")
-    h.wait_for(Event.TURN_FINISHED)
+    done = h.wait_for(Event.TURN_FINISHED)
     results = [m["content"] for m in gateway.requests[-1]["messages"] if m.get("role") == "tool"]
     assert not any("[plan]" in r for r in results)
+    assert done["data"]["plan"]["complete"] is True
+
+
+def test_an_edit_that_changes_nothing_sent_to_announce_a_step_is_not_a_broken_call(
+        gateway, harness, tmp_path):
+    """Seen live: after making a plan the model sent edit_file with identical
+    old and new text and step=1. Counted as malformed, it made the router
+    step up to a model ten times the price."""
+    (tmp_path / "a.py").write_text("def f():\n    return 1\n")
+    gateway.script(
+        sse_turn(tool_calls=[_call("create_plan", steps=["change f", "check"])]),
+        sse_turn(tool_calls=[_call("edit_file", "c1", path="a.py", old_text="def f():",
+                                   new_text="def f():", step=2)]),
+        sse_turn("ok"))
+    h = harness(mode=Mode.BYPASS)
+    h.session.submit("go")
+    h.wait_for(Event.TURN_FINISHED)
+    skipped = h.of(Event.TOOL_SKIPPED)
+    assert [e["data"]["kind"] for e in skipped] == ["noop"]
+    assert h.session.state.get("doom_streak", {}).get("edit_file") is None
+    result = [m["content"] for m in gateway.requests[-1]["messages"] if m.get("role") == "tool"][-1]
+    assert result.startswith("Nothing changed") and "no need to announce a plan step" in result
+    assert [s["status"] for s in h.of(Event.PLAN_UPDATED)[-1]["data"]["steps"]] == ["completed", "completed"]
+    assert (tmp_path / "a.py").read_text() == "def f():\n    return 1\n"
+
+
+def test_the_same_edit_without_a_step_is_still_an_error(gateway, harness, tmp_path):
+    (tmp_path / "a.py").write_text("def f():\n    return 1\n")
+    gateway.script(
+        sse_turn(tool_calls=[_call("edit_file", "c1", path="a.py", old_text="def f():", new_text="def f():")]),
+        sse_turn("ok"))
+    h = harness(mode=Mode.BYPASS)
+    h.session.submit("go")
+    h.wait_for(Event.TURN_FINISHED)
+    assert [e["data"]["kind"] for e in h.of(Event.TOOL_SKIPPED)] == ["invalid"]
 
 
 def test_the_plan_result_does_not_ask_for_a_tick(gateway, harness):
@@ -207,8 +252,7 @@ def test_the_plan_result_does_not_ask_for_a_tick(gateway, harness):
     h.session.submit("plan it")
     h.wait_for(Event.TURN_FINISHED)
     result = [m["content"] for m in gateway.requests[-1]["messages"] if m.get("role") == "tool"][-1]
-    assert "step 1 is in progress" in result
-    assert "update_step" not in result and "nothing to tick" in result
+    assert result == "Plan created with 2 step(s); step 1 is in progress. Start the work now."
 
 
 def test_an_old_chat_that_still_calls_the_tick_tool_is_answered(gateway, harness):
