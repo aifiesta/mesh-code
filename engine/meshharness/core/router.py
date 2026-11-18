@@ -193,6 +193,89 @@ def estimate_difficulty(text: str) -> str:
     return "high" if score >= 3 else "mid"
 
 
+# ---------------------------------------------------------------------------
+# Task level — how much work a coding prompt is asking for
+# ---------------------------------------------------------------------------
+# Software work does not fit "easy / medium / hard", and the words in a prompt
+# say little about how hard it is ("refactor for production" can be a ten-line
+# change). So coding prompts are sorted by the SHAPE of the request — is
+# anything to be changed, how many kinds of action, how many files, how much
+# of the project — onto the five rungs of the ladder:
+#
+#     low    Lookup          explain or answer, nothing changed
+#     mid    Small change    one or two actions in one or two files
+#     high   Standard task   several actions or files, or the whole project
+#     xhigh  Complex task    only by step-up, or the user's own choice
+#     max    Deep work       only by step-up, or the user's own choice
+#
+# Wording never assigns the top two. A wrong guess must stay cheap: the
+# cascade climbs when the model visibly struggles, which is evidence, and a
+# prompt's vocabulary is not.
+
+LEVEL_NAMES = {"low": "Lookup", "mid": "Small change", "high": "Standard task",
+               "xhigh": "Complex task", "max": "Deep work"}
+
+_NO_CHANGE_RE = re.compile(
+    r"\b(?:do not|don'?t|without)\s+(?:chang|modif|edit|touch|alter)\w*\b"
+    r"|\bread[- ]only\b|\bno (?:changes|edits)\b", re.I)
+_QUESTION_RE = re.compile(
+    r"^(?:what|why|how|where|which|who|when|is|are|does|do|did|explain|describe|"
+    r"show|list|summari[sz]e|tell me|walk me through|in \w+ sentences?)\b", re.I)
+_PLEASE_DO_RE = re.compile(r"^(?:(?:can|could|would|will) you|please)\b", re.I)
+# Kinds of action. Each kind counts once however often it appears.
+_ACTION_KINDS = [re.compile(r"\b%s\b" % v, re.I) for v in (
+    "fix", "add", "write", "create", "implement", "update", "change", "remove",
+    "delete", "rename", "refactor", "migrate", "build", "install", "run",
+    "handle", "move", "replace", "convert", "upgrade", "rewrite", "test",
+    "deploy", "optimi[sz]e", "extract", "split", "merge", "generate",
+    "set up", "configure", "document", "clean up", "support", "make")]
+_FILE_RE = re.compile(
+    r"(?<![\w/])@?[\w./-]*\w\.(?:py|js|jsx|ts|tsx|json|md|css|scss|html|yml|yaml|"
+    r"toml|go|rs|java|kt|swift|rb|php|c|cc|cpp|h|sh|sql|txt|cfg|ini|lock)\b", re.I)
+_WIDE_RE = re.compile(
+    r"\b(?:all|every|each|entire|whole)\s+(?:the\s+)?(?:\w+\s+)?(?:files?|modules?|"
+    r"projects?|codebase|repo(?:sitory)?|tests?|endpoints?|components?|services?|"
+    r"pages?)\b|\b(?:everywhere|throughout|across the|project[- ]wide|"
+    r"codebase[- ]wide)\b", re.I)
+_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s+\S", re.M)
+# Open-ended work: nothing to count, but never a small change.
+_OPEN_ENDED_RE = re.compile(
+    r"\b(?:design|architect\w*|plan(?: out)?|investigate|debug|figure out|"
+    r"track down|root cause|intermittent\w*|sometimes|flaky|race condition|"
+    r"deadlock|memory leak)\b", re.I)
+
+
+def task_level(text: str) -> tuple:
+    """(rung, why) for a coding prompt: "low" | "mid" | "high", and the rule
+    that decided it in words a user can read. Deterministic, no I/O."""
+    raw = text or ""
+    t = " ".join(raw.split())
+    if _NO_CHANGE_RE.search(t):
+        return "low", "it says not to change anything"
+    asks = bool(_PLEASE_DO_RE.match(t))
+    if not asks and (_QUESTION_RE.match(t) or t.endswith("?")):
+        return "low", "it is a question, nothing to change"
+    kinds = sum(1 for r in _ACTION_KINDS if r.search(t))
+    files = len({m.group(0).lstrip("@").lower() for m in _FILE_RE.finditer(t)})
+    items = len(_LIST_ITEM_RE.findall(raw))
+    why = []
+    if kinds >= 3:
+        why.append(f"{kinds} kinds of action")
+    if items >= 3:
+        why.append(f"{items} listed items")
+    if files >= 3:
+        why.append(f"{files} files named")
+    if _WIDE_RE.search(t):
+        why.append("it covers the whole project")
+    if len(t) > 600 or "```" in raw or "Traceback" in raw:
+        why.append("a long prompt or pasted code")
+    if _OPEN_ENDED_RE.search(t):
+        why.append("design work or an unknown cause")
+    if why:
+        return "high", ", ".join(why)
+    return "mid", "one or two actions in one or two files"
+
+
 def difficulty_adjust(weights: "dict | None", difficulty: str) -> dict:
     """Tilt the user's weights by predicted difficulty, then renormalize.
 
@@ -374,6 +457,313 @@ def pick(cohort: str, weights: "dict | None", table: "dict | None",
 def _ranked_view(ranked: list, score) -> list:
     return [{"model": t[0], "score": round(score(t), 1), "cap": round(t[1]),
              "cost": round(t[2], 2), "speed": round(t[3])} for t in ranked[:3]]
+
+
+# ---------------------------------------------------------------------------
+# Scored picking — a model AND a thinking level, by expected cost to finish
+# ---------------------------------------------------------------------------
+# For coding work the pick comes from `model_scores.json` (see scores.py):
+# one entry per model and thinking level, each with a measured chance of
+# finishing an everyday task and a hard one, and what an attempt costs in
+# dollars and minutes. The pick is the entry that is cheapest to FINISH with:
+#
+#     expected cost = cost of the attempt
+#                   + minutes of waiting x value of a minute
+#                   + chance it fails x what a rescue costs
+#
+# Everything is in dollars, so nothing arbitrary is added together. The
+# chance of failure uses score minus margin, so thin evidence ranks lower by
+# itself. A rescue is priced as what the cascade really does next: one rung
+# up, where the attempt can fail and climb again (see _step_up_price).
+# Other kinds of prompt (vision, writing, research…) are not covered by these
+# scores and stay on the table above. `choose()` is the one entry point.
+
+SCORED_COHORTS = ("agentic", "coding")
+TIME_VALUE = 0.05        # dollars per minute of waiting, at the default speed weight
+SCORED_FLOOR = 0.6       # never pick under 60% of the best chance available
+STICKY_MARGIN = 0.10     # keep the serving model while it is within 10% of the best
+# The scores carry margins of 5 to 12 points, so two entries whose expected
+# costs are this close cannot be told apart. Between them, take the one that
+# is cheapest to try: that part of the bill is certain.
+TIE_MARGIN = 0.10
+# How much of each rung is everyday work; the rest is judged on the hard score.
+EVERYDAY_SHARE = {"low": 1.0, "mid": 0.75, "high": 0.5, "xhigh": 0.0}
+# The file's cost and minutes come from long benchmark tasks, where thinking
+# dominates. What the app is asked to do is far smaller and is mostly the
+# prompt and the files read, so its cost follows the token price instead — one
+# model can be twenty times cheaper there while costing the same on a
+# benchmark task. The three rungs wording can assign are therefore priced as a
+# typical task of that size at the gateway's live prices: (tokens sent over
+# the whole task, tokens written at a model's cheapest level). These sizes are
+# ours, read off the app's own recorded runs (docs/bench/model_scoring/
+# RESULTS.md); the scores stay third-party. The rungs reached only by step-up
+# keep the benchmark figures: a task that has already beaten a model is no
+# longer a small one.
+TOKEN_PRICED = {"low": (12_000, 300), "mid": (40_000, 1_500), "high": (100_000, 3_000)}
+# Most of what an agent sends is the earlier conversation sent again, and most
+# providers bill that at a much lower cached rate without being asked: in the
+# recorded runs about three quarters of the input was billed that way. List
+# prices alone made two models look tied whose bills were three times apart.
+# Anthropic models cache only when the request asks for it (the Optimize
+# setting), so they are counted at full price until it does.
+CACHED_SHARE = 0.75
+
+
+def _bills_cached(model: str, catalog_row: dict, asks_for_caching: bool) -> bool:
+    """Is re-sent input billed at the cached rate for this model, as the app
+    is set up right now?"""
+    if (catalog_row.get("pricing") or {}).get("cache_read_input_usd_per_1m") is None:
+        return False
+    if (model or "").startswith("anthropic/"):
+        return bool(asks_for_caching)
+    return True
+_LEVEL_ORDER = ("default", "none", "low", "medium", "high", "xhigh", "max")
+_TABLE_RUNG = {"low": "low", "mid": "low", "high": "mid", "xhigh": "high", "max": "max"}
+
+
+def _band(difficulty: str) -> str:
+    d = _EFFORT_ALIAS.get(difficulty, difficulty)
+    return d if d in ESCALATION_LADDER else "mid"
+
+
+def _chance(e: dict, band: str, cautious: bool = True) -> float:
+    """Chance (0-1) this entry finishes a task on this rung: a blend of the
+    everyday score and the hard score, more of the hard one the higher the
+    rung."""
+    def part(k):
+        return (e[k]["score"] - (e[k]["margin"] if cautious else 0)) / 100.0
+    share = EVERYDAY_SHARE.get(band, 0.0)       # "max" is judged on hard work
+    s = share * part("everyday") + (1.0 - share) * part("hard")
+    return max(0.0, min(1.0, s))
+
+
+def _slider_scale(weights: "dict | None") -> dict:
+    """The user's three weights as multipliers on the three terms: 1.0 each at
+    the defaults, so the defaults mean plain dollars."""
+    w = normalize_weights(weights)
+    return {k: w[k] / DEFAULT_WEIGHTS[k] for k in DEFAULT_WEIGHTS}
+
+
+def _expected(e: dict, band: str, k: dict, rescue: float) -> dict:
+    attempt = k["cost"] * e["cost_per_task"]
+    wait = k["speed"] * TIME_VALUE * e["minutes_per_task"]
+    risk = k["cap"] * (1.0 - _chance(e, band)) * rescue
+    return {"total": attempt + wait + risk, "attempt": attempt, "wait": wait, "risk": risk}
+
+
+def _step_up_price(ents: list, band: str, k: dict) -> float:
+    """What a failed attempt on this rung costs: finishing the task one rung
+    up, where that attempt can fail and climb again, all the way to the
+    strongest entry at the top.
+
+    A failure does not jump straight to the strongest model — the cascade
+    climbs one rung at a time — so pricing it as if it did made every point of
+    success chance look worth far more than it is, and a dear model beat a
+    cheap one for a handful of points. `ents` are already priced for the task
+    in hand, which keeps its size as it climbs."""
+    top = max(ents, key=lambda e: (_chance(e, "max"), -e["cost_per_task"]))
+    price = top["cost_per_task"] + TIME_VALUE * top["minutes_per_task"]
+    above = ESCALATION_LADDER[ESCALATION_LADDER.index(band) + 1:-1]
+    for rung in reversed(above):                 # from just under the top, down
+        best = max(_chance(e, rung) for e in ents)
+        able = [e for e in ents if _chance(e, rung) >= SCORED_FLOOR * best] or ents
+        price = min(_expected(e, rung, k, price)["total"] for e in able)
+    return price
+
+
+def _live_entries(doc, catalog, exclude, needs_tools, needs_ctx, level) -> list:
+    """Entries for models the gateway offers right now, priced at today's
+    rates and able to do the job at hand."""
+    from . import scores as _scores
+    cat = {m.get("id"): m for m in catalog or [] if isinstance(m, dict)}
+    out = []
+    for e in _scores.entries(doc, available=set(cat), exclude=exclude or ()):
+        row = cat[e["model"]]
+        if needs_tools and row.get("supports_tools") is False:
+            continue
+        ctx = row.get("context_length") or row.get("context_window") or 0
+        if needs_ctx and ctx and ctx < needs_ctx:
+            continue
+        # The file's cost was measured at the file's token prices; if the
+        # gateway's price has moved since, move the cost with it.
+        filed = (doc.get("models") or {}).get(e["model"]) or {}
+        then = _blend(filed.get("price_in_per_1m"), filed.get("price_out_per_1m"))
+        now = _blend_price(row, "agentic")
+        if then and now:
+            e["cost_per_task"] *= max(0.25, min(4.0, now / then))
+        out.append(e)
+    # each entry's cost against its model's cheapest level: how much more it
+    # writes, which is what a higher thinking level costs on a small task
+    floor: dict = {}
+    for e in out:
+        floor[e["model"]] = min(floor.get(e["model"], e["cost_per_task"]), e["cost_per_task"])
+    for e in out:
+        e["writes"] = e["cost_per_task"] / floor[e["model"]]
+    if level:
+        # The user fixed the thinking level: each model is judged by its entry
+        # at that level, or the nearest level it was tested at, and the user's
+        # level is what gets sent.
+        want = _LEVEL_ORDER.index(level) if level in _LEVEL_ORDER else None
+        best: dict = {}
+        for e in out:
+            d = abs(_LEVEL_ORDER.index(e["level"]) - want) if want is not None else 0
+            if e["model"] not in best or d < best[e["model"]][0]:
+                best[e["model"]] = (d, e)
+        out = [dict(e, effort=level, level=level) for _, e in best.values()]
+    return out
+
+
+def _at_token_prices(ents: list, catalog, band: str,
+                     asks_for_caching: bool = False) -> "list | None":
+    """The same entries priced for a typical task on this rung the way the
+    gateway would bill it, or None when any price is unknown (the caller keeps
+    the benchmark figures for all of them — never a mix of the two scales).
+
+    The wait shrinks with the work, entry by entry: minutes per dollar of
+    uncached work is a property of the model and its thinking level, so a task
+    that is a twentieth of the benchmark one takes about a twentieth of the
+    time. Across six recorded app runs this lands within about a third of the
+    real wait, where one fixed fraction for every model was off by up to ten
+    times. Caching makes a task cheaper, not faster, so the wait is scaled by
+    the list-price cost."""
+    from .pricing import estimate_cost
+    sent, written = TOKEN_PRICED[band]
+    rows = {m.get("id"): m for m in catalog or [] if isinstance(m, dict)}
+    out = []
+    for e in ents:
+        usage = {"prompt_tokens": sent,
+                 "completion_tokens": int(written * e.get("writes", 1.0))}
+        listed = estimate_cost(e["model"], usage, catalog)
+        if not listed or listed <= 0:
+            return None
+        cost = listed
+        if _bills_cached(e["model"], rows.get(e["model"]) or {}, asks_for_caching):
+            cost = estimate_cost(e["model"], dict(usage, prompt_tokens_details={
+                "cached_tokens": int(sent * CACHED_SHARE)}), catalog) or listed
+        out.append(dict(e, cost_per_task=cost,
+                        minutes_per_task=e["minutes_per_task"] * listed / e["cost_per_task"]))
+    return out
+
+
+def _blend(i, o) -> "float | None":
+    try:
+        i, o = float(i or 0), float(o or 0)
+    except (TypeError, ValueError):
+        return None
+    return (0.85 * i + 0.15 * o) or None
+
+
+def pick_scored(difficulty: str, weights: "dict | None", doc: "dict | None",
+                catalog: "list | None", *, needs_tools: bool = False,
+                needs_ctx: int = 0, incumbent: "str | None" = None,
+                exclude: "set | None" = None, incumbent_bonus: float = 0.0,
+                failed: "tuple | None" = None,
+                level: "str | None" = None,
+                asks_for_caching: bool = False) -> "dict | None":
+    """Choose a model and thinking level for coding work, or None when the
+    scores cover nothing the gateway offers (the caller falls back).
+
+    `failed` = (model, level) that was just serving and visibly struggled:
+    only entries clearly stronger than it are considered — their cautious
+    chance must beat its full score. `level` = a thinking level the user
+    fixed. `asks_for_caching` = the app marks its requests for caching, which
+    is what makes Anthropic models bill re-sent input at the cached rate.
+    Pure — no I/O, no mutation of its inputs."""
+    try:
+        band = _band(difficulty)
+        ents = _live_entries(doc, catalog, exclude, needs_tools, needs_ctx, level)
+        if not ents:
+            return None
+        scale = "benchmark task"
+        if band in TOKEN_PRICED:
+            priced = _at_token_prices(ents, catalog, band, asks_for_caching)
+            if priced:
+                ents, scale = priced, "token prices"
+        k = _slider_scale(weights)
+        rescue = _step_up_price(ents, band if band in ESCALATION_LADDER[:-1] else "xhigh", k)
+
+        cands = ents
+        if failed:
+            was = next((e for e in ents if (e["model"], e["level"]) == tuple(failed)), None)
+            cands = [e for e in ents if (e["model"], e["level"]) != tuple(failed)]
+            if was is not None:
+                bar = _chance(was, band, cautious=False)
+                stronger = [e for e in cands if _chance(e, band) > bar]
+                # nothing clearly stronger: the strongest that is left
+                cands, band = (stronger, band) if stronger else (cands, "max")
+            if not cands:
+                return None
+
+        if band == "max":
+            ranked = sorted(cands, key=lambda e: (-_chance(e, "max"), e["cost_per_task"]))
+            chosen, sticky = ranked[0], False
+            costs = {id(e): _expected(e, "max", k, rescue) for e in ranked}
+        else:
+            best = max(_chance(e, band) for e in cands)
+            able = [e for e in cands if _chance(e, band) >= SCORED_FLOOR * best] or cands
+            costs = {id(e): _expected(e, band, k, rescue) for e in able}
+            ranked = sorted(able, key=lambda e: costs[id(e)]["total"])
+            lowest = costs[id(ranked[0])]["total"]
+            # too close to call: the one that is cheapest to try
+            close = [e for e in ranked if costs[id(e)]["total"] <= lowest * (1.0 + TIE_MARGIN)]
+            chosen = min(close, key=lambda e: (e["cost_per_task"], costs[id(e)]["total"]))
+            sticky = False
+            # Switching models throws away the provider's prompt cache and
+            # re-sends the whole history, so the serving model keeps the turn
+            # while its best entry is close to the best there is — closer
+            # still counts the more context is at stake.
+            if incumbent and incumbent != chosen["model"]:
+                mine = next((e for e in ranked if e["model"] == incumbent), None)
+                slack = 1.0 + STICKY_MARGIN + max(0.0, incumbent_bonus) / 100.0
+                if mine and costs[id(mine)]["total"] <= lowest * slack:
+                    chosen, sticky = mine, True
+
+        def view(e):
+            c = costs[id(e)]
+            return {"model": e["model"], "level": e["level"],
+                    "chance": round(_chance(e, band) * 100),
+                    "cost": round(e["cost_per_task"], 4),
+                    "minutes": round(e["minutes_per_task"], 1),
+                    "expected": round(c["total"], 4)}
+        top = [chosen] + [e for e in ranked if e is not chosen]
+        return {"model": chosen["model"], "level": chosen["level"],
+                "effort": chosen["effort"], "scored": True, "sticky": sticky,
+                "cohort": "agentic", "priced_as": scale,
+                "ranked": [view(e) for e in top[:5]]}
+    except Exception:
+        return None  # fail open, always
+
+
+def choose(cohort: str, difficulty: str, weights: "dict | None",
+           table: "dict | None", catalog: "list | None", *,
+           needs_tools: bool = False, needs_ctx: int = 0,
+           incumbent: "str | None" = None, exclude: "set | None" = None,
+           incumbent_bonus: float = 0.0, failed: "tuple | None" = None,
+           level: "str | None" = None, scores_doc: "dict | None" = None,
+           asks_for_caching: bool = False) -> "dict | None":
+    """The router's one entry point. Coding work is picked from the per-level
+    scores; anything they do not cover — another kind of prompt, or an account
+    that offers none of the scored models — falls back to the routing table,
+    which picks a model only."""
+    if cohort in SCORED_COHORTS:
+        if scores_doc is None:
+            from . import scores as _scores
+            scores_doc = _scores.load()
+        got = pick_scored(difficulty, weights, scores_doc, catalog,
+                          needs_tools=needs_tools, needs_ctx=needs_ctx,
+                          incumbent=incumbent, exclude=exclude,
+                          incumbent_bonus=incumbent_bonus, failed=failed, level=level,
+                          asks_for_caching=asks_for_caching)
+        if got:
+            got["cohort"] = cohort
+            return got
+        # No scored model on this account: the table serves the turn. Its
+        # weights were tuned for easy / medium / hard, so the five task rungs
+        # are mapped back onto those.
+        difficulty = _TABLE_RUNG.get(_band(difficulty), difficulty)
+    return pick(cohort, effective_weights(weights, difficulty), table, catalog,
+                needs_tools=needs_tools, needs_ctx=needs_ctx, incumbent=incumbent,
+                exclude=exclude, incumbent_bonus=incumbent_bonus)
 
 
 # ---------------------------------------------------------------------------

@@ -3,9 +3,16 @@
 Four modes, escalating from "ask for everything" → "auto-approve everything":
 
     default       ask for each tool call (safest — no indicator displayed)
-    accept-edits  auto-approve write_file; still ask for shell / start_server
-    auto          auto-approve write_file + run_bash + web_search
+    accept-edits  auto-approve write_file / edit_file, and read_file inside
+                  the project; still ask for shell / start_server
+    auto          accept-edits + run_bash + web_search
     bypass        auto-approve everything (use with care)
+
+read_file in accept-edits and auto is approved by the mode ONLY for paths
+inside the open project that are not environment files — see
+safety.is_path_safe_for_auto_read(workspace_only=True). Reads elsewhere
+still ask. Ranged reads mean more read calls; asking for each one inside
+the project the user opened would be noise, not safety.
 
 web_search rides with run_bash (AUTO+): its only risk is leaking the query
 string off-machine, and run_bash can already `curl` anything anywhere — a
@@ -41,10 +48,11 @@ LABELS = {
 # handle_tool_calls checks `tc.name in AUTO_APPROVE[mode]`.
 AUTO_APPROVE: dict = {
     Mode.DEFAULT:      set(),
-    Mode.ACCEPT_EDITS: {"write_file"},
-    Mode.AUTO:         {"write_file", "run_bash", "web_search"},
-    Mode.BYPASS:       {"write_file", "run_bash", "read_file", "start_server",
+    Mode.ACCEPT_EDITS: {"write_file", "edit_file", "read_file"},
+    Mode.AUTO:         {"write_file", "edit_file", "read_file", "run_bash",
                         "web_search"},
+    Mode.BYPASS:       {"write_file", "edit_file", "run_bash", "read_file",
+                        "start_server", "web_search"},
 }
 
 # Modes that warrant a more aggressive footer hint.

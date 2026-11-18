@@ -2,8 +2,10 @@
 import json
 import os
 import re
+import secrets
 import signal
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -64,13 +66,15 @@ def build_system_prompt(cfg: dict, cwd: "str | Path | None" = None) -> str:
         "treat starting a server as the final step — while any plan step is "
         "still pending or in progress. Either finish every remaining step "
         "first, or clearly tell the user which steps are not done and why.\n\n"
-        "COMPLETENESS — deliver working code, not scaffolding. When you "
-        "create or edit a file, write the FULL implementation: every "
-        "function body filled in with real logic. Never leave placeholder "
-        "comments like 'TODO', 'add game logic here', or 'implementation "
-        "goes here', never leave empty function bodies, and never "
-        "abbreviate a file with markers like '... rest of the code remains "
-        "the same' — always write the whole file. Before telling the user "
+        "COMPLETENESS — deliver working code, not scaffolding. Everything "
+        "you write is the FULL implementation: every function body filled "
+        "in with real logic. Never leave placeholder comments like 'TODO', "
+        "'add game logic here', or 'implementation goes here', never leave "
+        "empty function bodies, and never stand in for code with markers "
+        "like '... rest of the code remains the same'. Write a NEW file "
+        "whole. To change a file that ALREADY EXISTS, replace only the "
+        "lines that need to change — do not send the whole file again "
+        "unless most of it is changing. Before telling the user "
         "something is done, or starting its server, make sure every file "
         "you wrote actually contains its complete implementation — a page "
         "that loads but does nothing is not done. If the full code is too "
@@ -100,10 +104,16 @@ def build_system_prompt(cfg: dict, cwd: "str | Path | None" = None) -> str:
         "you don't reliably know), use the available web search capability "
         "rather than guessing, and cite what you found. If a search fails "
         "or is unsupported, say so instead of inventing results.\n\n"
-        "Create and replace files with the file-writing tool, never with "
-        "shell heredocs, `cat >`, or a scripting language writing the file: "
-        "the user sees a diff card for each write, and a 10KB heredoc in a "
-        "shell command is unreviewable. Use the shell to RUN things. To "
+        "READ ONLY WHAT YOU NEED. To find where something is, search first "
+        "with one short shell command, then read just those lines instead "
+        "of the whole file; if that was not enough, read a wider range. "
+        "Reading a short file whole is fine. Do not read lockfiles, "
+        "minified bundles or build output in full.\n\n"
+        "Create and change files with the file tools, never with shell "
+        "heredocs, `cat >`, `sed -i`, or a scripting language writing the "
+        "file: the user sees a diff card for each change, and a 10KB "
+        "heredoc in a shell command is unreviewable. Use the shell to RUN "
+        "things. To "
         "check a page or script, prefer one short command whose output "
         "answers the question (grep, a node/python one-liner against the "
         "file) over building a test harness.\n\n"
@@ -156,14 +166,30 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read a file from the user's filesystem and return its contents.",
+            "description": (
+                "Read a text file. When you are looking for one function, "
+                "symbol or setting, do NOT read the whole file: find its line "
+                "with a shell search (grep -n) first, then pass offset and "
+                "limit to read only those lines. A ranged result starts each "
+                "line with its number and a tab (not part of the file) and "
+                "ends with a footer saying how to read more. Without a range "
+                "the whole file is returned if it fits."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
                         "description": "Path to the file (absolute, or relative to the cwd)",
-                    }
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "First line to read, counting from 1.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "How many lines to read from offset.",
+                    },
                 },
                 "required": ["path"],
             },
@@ -173,7 +199,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Create or overwrite a file with the given content. Parent directories are created if missing.",
+            "description": (
+                "Create a new file, or replace a file completely, with the "
+                "given content. Parent directories are created if missing. "
+                "To change part of an existing file, use edit_file instead."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -181,6 +211,38 @@ TOOLS = [
                     "content": {"type": "string", "description": "Full file contents"},
                 },
                 "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": (
+                "Change part of an existing file by replacing old_text with "
+                "new_text. Send only the lines that change, not the whole "
+                "file. old_text must be copied exactly from the file (same "
+                "indentation, no line numbers) and must match exactly one "
+                "place — add a neighbouring line if it could match more."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File to change"},
+                    "old_text": {
+                        "type": "string",
+                        "description": "Exact text currently in the file",
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "Text to put in its place (\"\" deletes it)",
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "Replace every match instead of requiring exactly one",
+                    },
+                },
+                "required": ["path", "old_text", "new_text"],
             },
         },
     },
@@ -445,6 +507,43 @@ PLAN_TOOLS = ("create_plan", "update_step")  # meta — auto-approved, no side e
 # in person — gating it behind a y/n approval would be absurd.
 INTERACTIVE_TOOLS = ("ask_user",)
 
+# ---------------------------------------------------------------------------
+# Reads that are almost never worth their tokens. A WHOLE-file read of one of
+# these returns a one-line note with its size; a ranged read (offset/limit)
+# always goes through, so nothing is ever unreadable.
+LOCKFILES = frozenset({
+    "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+    "bun.lock", "Cargo.lock", "poetry.lock", "uv.lock", "Pipfile.lock",
+    "Gemfile.lock", "composer.lock", "go.sum",
+})
+_GENERATED_SUFFIXES = (".min.js", ".min.css", ".js.map", ".css.map",
+                       ".mjs.map", ".cjs.map")
+# Folders that only ever hold installed or generated files.
+_GENERATED_DIRS = frozenset({
+    "node_modules", ".next", ".nuxt", ".turbo", ".cache", "__pycache__",
+})
+# Folders that hold real source in some projects: treated as build output
+# only when git ignores the path.
+_BUILD_DIRS = frozenset({"dist", "build", "target", "out", "vendor", "coverage"})
+# An unranged read returns the file whole only up to this size (~5k tokens,
+# roughly 500 lines of code). Above it the model gets a map of the file and
+# reads the part it needs. Live runs showed why this has to be the engine's
+# rule and not advice: cheap models read a 48k-char file whole to answer a
+# question about one function, whatever the prompt said.
+WHOLE_READ_LIMIT = 20_000
+LONG_FILE_MAP_CHARS = 3_000   # budget for the definitions list / first lines
+LONG_FILE_HEAD_LINES = 40     # first lines shown when there are no definitions
+SKIP_MIN_CHARS = 2_000      # below this a note saves nothing
+LONG_LINE_AVG_CHARS = 1_000  # average line length that marks minified/generated data
+
+
+def _as_int(value) -> int:
+    """Whole number from a model-supplied value: 120, 120.0 and "120" all
+    count; a boolean or free text does not."""
+    if isinstance(value, bool):
+        raise TypeError("boolean is not a line number")
+    return int(float(value))
+
 
 def validate_call(name: str, arguments: dict) -> str | None:
     """Return an error string if the call can't run as issued, else None.
@@ -459,11 +558,33 @@ def validate_call(name: str, arguments: dict) -> str | None:
     if name == "read_file":
         if not arguments.get("path"):
             return "Error: read_file requires a `path` argument."
+        for key in ("offset", "limit"):
+            if arguments.get(key) is None:
+                continue
+            try:
+                _as_int(arguments[key])
+            except (TypeError, ValueError):
+                return (f"Error: read_file `{key}` must be a whole number of "
+                        "lines (line numbers start at 1).")
     elif name == "write_file":
         if not arguments.get("path"):
             return "Error: write_file requires a `path` argument."
         if arguments.get("content") is None:
             return "Error: write_file requires a `content` argument (use \"\" for an empty file)."
+    elif name == "edit_file":
+        if not arguments.get("path"):
+            return "Error: edit_file requires a `path` argument."
+        old, new = arguments.get("old_text"), arguments.get("new_text")
+        if not isinstance(old, str) or not old:
+            return ("Error: edit_file requires a non-empty `old_text` — the "
+                    "exact text to replace, copied from the file. To create "
+                    "a new file, write it whole instead.")
+        if not isinstance(new, str):
+            return ("Error: edit_file requires a `new_text` argument (use "
+                    "\"\" to delete the old text).")
+        if old == new:
+            return ("Error: edit_file `old_text` and `new_text` are identical "
+                    "— nothing would change.")
     elif name in ("run_bash", "start_server"):
         if not arguments.get("command"):
             return f"Error: {name} requires a `command` argument."
@@ -718,6 +839,134 @@ def _truncate(text: str) -> str:
     return f"{text[:OUTPUT_LIMIT]}{tail}"
 
 
+# ---------------------------------------------------------------------------
+# Shell output. Test and build tools print what failed, and the summary, at
+# the END — exactly what a plain "first OUTPUT_LIMIT chars" cut throws away,
+# after which the model re-runs the command with a filter. Long output is
+# instead returned as its head, the lines that look like failures, and its
+# tail, with the full text saved to a log the model can read by line range.
+_ANSI_RE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]"                # CSI: colours, cursor moves
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"    # OSC: titles, hyperlinks
+    r"|\x1b[@-Z\\-_]")                        # two-byte escapes
+_FAILURE_RE = re.compile(
+    r"(?i)\b(?:fail\w*|error\w*|exception|traceback|panic\w*|assert\w*|fatal)\b")
+SHELL_HEAD_CHARS = 1_000
+SHELL_FAILURE_CHARS = 3_000
+SHELL_TAIL_CHARS = 3_000
+SHELL_LINE_CLIP = 300          # one failure line shown in the middle section
+SHELL_LOG_MAX_AGE = 24 * 3600  # seconds a saved log is kept
+
+
+def clean_output(text: str) -> str:
+    """Drop terminal control codes and the overwritten half of progress
+    lines ("10%\\r20%\\r30%" -> "30%") — bytes that cost tokens and say
+    nothing."""
+    text = _ANSI_RE.sub("", text).replace("\r\n", "\n")
+    if "\r" in text:
+        text = "\n".join(line.rsplit("\r", 1)[-1] for line in text.split("\n"))
+    return text
+
+
+def shell_log_dir() -> Path:
+    """Where full command output is saved. The system temp folder, not the
+    config home: ~/.mesh-code is on the credential denylist, so a log there
+    could never be read back without a prompt."""
+    uid = os.getuid() if hasattr(os, "getuid") else "user"
+    return Path(tempfile.gettempdir()) / f"mesh-code-logs-{uid}"
+
+
+def _save_log(text: str) -> "Path | None":
+    """Write `text` to a new owner-only log file; None if that is not
+    possible. Old logs are pruned on the way."""
+    try:
+        folder = shell_log_dir()
+        folder.mkdir(mode=0o700, exist_ok=True)
+        info = os.lstat(folder)
+        import stat as _stat
+        # A shared temp folder is world-writable: refuse a pre-made symlink
+        # or someone else's directory rather than write output into it.
+        if not _stat.S_ISDIR(info.st_mode):
+            return None
+        if hasattr(os, "getuid") and info.st_uid != os.getuid():
+            return None
+        cutoff = time.time() - SHELL_LOG_MAX_AGE
+        for old in folder.iterdir():
+            try:
+                if old.is_file() and old.stat().st_mtime < cutoff:
+                    old.unlink()
+            except OSError:
+                pass
+        name = f"cmd-{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}.log"
+        path = folder / name
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        return path
+    except Exception:
+        return None
+
+
+def condense_output(text: str) -> str:
+    """`text` unchanged when it fits OUTPUT_LIMIT; otherwise head + lines
+    that look like failures + tail, within the same limit, plus where the
+    full output was saved."""
+    if len(text) <= OUTPUT_LIMIT:
+        return text
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    total = len(lines)
+
+    head_end, used = 0, 0
+    while head_end < total and used + len(lines[head_end]) + 1 <= SHELL_HEAD_CHARS:
+        used += len(lines[head_end]) + 1
+        head_end += 1
+    tail_start, used = total, 0
+    while tail_start > head_end and used + len(lines[tail_start - 1]) + 1 <= SHELL_TAIL_CHARS:
+        used += len(lines[tail_start - 1]) + 1
+        tail_start -= 1
+    head = "\n".join(lines[:head_end]) if head_end else lines[0][:SHELL_HEAD_CHARS]
+    tail = ("\n".join(lines[tail_start:]) if tail_start < total
+            else lines[-1][-SHELL_TAIL_CHARS:])
+
+    # Failure-looking lines from the part left out, each with the line
+    # before it and the two after, numbered so a range of the log can be
+    # asked for.
+    wanted = set()
+    for i in range(head_end, tail_start):
+        if _FAILURE_RE.search(lines[i]):
+            wanted.update(range(max(head_end, i - 1), min(tail_start, i + 3)))
+    middle, used, prev = [], 0, None
+    for i in sorted(wanted):
+        row = f"{i + 1}: {lines[i][:SHELL_LINE_CLIP]}"
+        if used + len(row) + 2 > SHELL_FAILURE_CHARS:
+            middle.append("…")
+            break
+        if prev is not None and i != prev + 1:
+            middle.append("…")
+        middle.append(row)
+        used += len(row) + 1
+        prev = i
+
+    log = _save_log(text)
+    saved = (f"Full output saved to {log} — read a line range of that file "
+             "instead of running the command again."
+             if log else "The full output could not be saved; run the "
+             "command again with a filter if you need the rest.")
+    parts = [f"[output trimmed: {total} lines, {len(text)} chars. {saved}]", head]
+    left_out = tail_start - head_end
+    if left_out > 0:
+        parts.append(
+            f"[… lines {head_end + 1}-{tail_start} left out"
+            + ("; the ones that look like failures:]" if middle else ".]"))
+        if middle:
+            parts.append("\n".join(middle))
+        parts.append(f"[last lines, from line {tail_start + 1}:]")
+    parts.append(tail)
+    return "\n".join(parts)
+
+
 def _format_search_results(r) -> str:
     """Format a web-search response defensively — the schema is a formatting
     detail, never a crash. Known shape: {"results": [{title, url, snippet}]}.
@@ -795,6 +1044,401 @@ def _wait_or_cancel(proc, timeout: float, cancel) -> str:
         time.sleep(0.1)
 
 
+def _workspace_root(cwd) -> Path:
+    return Path(cwd).expanduser().resolve() if cwd else Path.cwd()
+
+
+def _resolve_in(root: Path, path_str: str) -> Path:
+    p = Path(path_str).expanduser()
+    return p if p.is_absolute() else (root / p)
+
+
+def _split_lines(content: str) -> list:
+    """Lines without their newline; a trailing newline does not add an empty
+    last line (the same count an editor shows)."""
+    if not content:
+        return []
+    lines = content.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def _git_ignored(path: Path, root: Path) -> bool:
+    """True only when git positively says the path is ignored. No git, no
+    repository, or any error all mean "not ignored" — never hide a file on
+    a guess."""
+    try:
+        done = subprocess.run(
+            ["git", "check-ignore", "-q", str(path)], cwd=str(root),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=5,
+        )
+        return done.returncode == 0
+    except Exception:
+        return False
+
+
+def generated_file_reason(path: Path, content: str, root: Path) -> "str | None":
+    """Why a whole-file read of `path` is not worth its tokens, or None.
+
+    Pure policy over the path and the content already in hand; the one
+    external call (git) runs only for the ambiguous build-folder names.
+    """
+    if len(content) < SKIP_MIN_CHARS:
+        return None
+    name = path.name
+    if name in LOCKFILES:
+        return "a dependency lockfile"
+    if name.lower().endswith(_GENERATED_SUFFIXES):
+        return "a minified or source-map file"
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError):
+        resolved = path
+    try:
+        folders = resolved.relative_to(root).parts[:-1]
+        inside = True
+    except ValueError:
+        folders, inside = resolved.parts[:-1], False
+    for part in folders:
+        if part in _GENERATED_DIRS:
+            return f"inside {part}/ (installed or generated files)"
+    if inside:
+        for part in folders:
+            if part in _BUILD_DIRS and _git_ignored(resolved, root):
+                return f"inside {part}/, which git ignores (build output)"
+    lines = content.count("\n") + 1
+    if len(content) / lines > LONG_LINE_AVG_CHARS:
+        return "very long lines (minified or generated data)"
+    return None
+
+
+def _numbered_range(lines: list, start: int, count: "int | None",
+                    budget: int) -> tuple:
+    """Lines `start`.. as "N<tab>text", stopping at `count` lines or `budget`
+    chars. Returns (text, last_line_shown, note) — `note` is set when one
+    over-long line had to be cut to fit."""
+    out, used, n, note = [], 0, start, ""
+    last = len(lines) if count is None else min(len(lines), start + count - 1)
+    while n <= last:
+        row = f"{n}\t{lines[n - 1]}"
+        if used + len(row) + 1 > budget:
+            if out:
+                break
+            # A single line bigger than the whole budget (minified bundle):
+            # show its head rather than nothing, and say so.
+            note = (f" Line {n} is {len(lines[n - 1])} chars; only its first "
+                    f"{budget} are shown.")
+            out.append(row[:budget])
+            n += 1
+            break
+        out.append(row)
+        used += len(row) + 1
+        n += 1
+    return "\n".join(out), n - 1, note
+
+
+def _definitions(path: Path, lines: list) -> list:
+    """("N: def name") for each definition the repo-memory patterns know,
+    in file order. Empty for languages without patterns."""
+    try:
+        from . import memory
+        patterns = memory._LANG_PATTERNS.get(
+            memory._EXT_TO_LANG.get(path.suffix.lower()) or "")
+    except Exception:
+        patterns = None
+    if not patterns:
+        return []
+    found = []
+    for n, line in enumerate(lines, 1):
+        for rx, fmt in patterns:
+            m = rx.match(line)
+            if m:
+                found.append(f"{n}: {fmt.format(m.group(1))}")
+                break
+    return found
+
+
+def _long_file_map(path: Path, content: str, lines: list) -> str:
+    """What an unranged read of a long file returns instead of the file:
+    its size, where its definitions are (or its first lines when the
+    language has no patterns), and how to read the part that matters."""
+    total = len(lines)
+    head = (f"[{path.name} is long — {total} lines, {len(content)} chars, "
+            f"about {len(content) // 4} tokens — so it is not returned whole.")
+    how = ("[Read the part you need by calling again with offset and limit. "
+           "To find a line, search with a shell command (grep -n). To read "
+           "all of it, call again with offset=1.]")
+    defs = _definitions(path, lines)
+    if defs:
+        shown, used = [], 0
+        for d in defs:
+            if used + len(d) + 1 > LONG_FILE_MAP_CHARS:
+                break
+            shown.append(d)
+            used += len(d) + 1
+        more = (f"\n… and {len(defs) - len(shown)} more definitions"
+                if len(shown) < len(defs) else "")
+        return f"{head} Definitions by line:]\n" + "\n".join(shown) + f"{more}\n{how}"
+    body, end, _ = _numbered_range(lines, 1, LONG_FILE_HEAD_LINES,
+                                   LONG_FILE_MAP_CHARS)
+    return f"{head} Its first {end} lines:]\n{body}\n{how}"
+
+
+def read_file_detail(arguments: dict, cwd: "str | Path | None" = None) -> dict:
+    """Run a read and say what kind of result it is.
+
+    Returns {"text", "whole", "shown", "content"}:
+      text    — what goes back to the model.
+      whole   — True only when `text` IS the file, byte for byte. Callers
+                that track "this file is in the conversation" (the read
+                dedupe) must record nothing else: a range, a first chunk or
+                a generated-file note is not the file.
+      shown   — True when any of the file's content was returned.
+      content — the file's full text when it was read, else None.
+    """
+    def result(text, whole=False, shown=False, content=None):
+        return {"text": text, "whole": whole, "shown": shown, "content": content}
+
+    err = validate_call("read_file", arguments)
+    if err:
+        return result(err)
+    root = _workspace_root(cwd)
+    path = arguments.get("path")
+    # Guard against reading a binary image as text — return a helpful
+    # message so the model asks the user to include the image instead of
+    # looping on a utf-8 decode error. Do NOT mention slash commands here;
+    # the CLI auto-attaches images from the user's prompt, so the model
+    # just needs to ask the user to share the image.
+    if Path(path).suffix.lower() in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
+        return result(
+            f"Error: {Path(path).name} is an image file. read_file only "
+            "handles text. Ask the user to share the image in their next "
+            "message — the CLI will attach it automatically."
+        )
+    target = _resolve_in(root, path)
+    try:
+        content = target.read_text()
+    except Exception as e:
+        return result(f"Error: {e}")
+
+    lines = _split_lines(content)
+    total = len(lines)
+    offset, limit = arguments.get("offset"), arguments.get("limit")
+    ranged = offset is not None or limit is not None
+
+    if not ranged:
+        reason = generated_file_reason(target, content, root)
+        if reason:
+            return result(
+                f"[{target.name} not shown: {reason} — {len(content)} chars, "
+                f"{total} lines, about {len(content) // 4} tokens. To see "
+                "part of it, call again with offset and limit, or search it "
+                "with a shell command.]",
+                content=content,
+            )
+        if len(content) <= min(READ_LIMIT, WHOLE_READ_LIMIT):
+            return result(content, whole=True, shown=True, content=content)
+        if len(content) <= READ_LIMIT:
+            # Fits, but is long enough that returning it whole is the single
+            # most expensive thing a read can do. Return a map instead; one
+            # more call with offset=1 still gets all of it.
+            return result(_long_file_map(target, content, lines), content=content)
+        # Too big for one read — see READ_LIMIT. Return the first chunk, cut
+        # at a line boundary, with the footer that says how to continue.
+        start, count = 1, None
+    else:
+        # Lenient on purpose: offset 0 means "from the top" and limit 0 means
+        # "no limit" — an error here would cost a whole extra round trip.
+        start = max(1, _as_int(offset)) if offset is not None else 1
+        count = _as_int(limit) if limit is not None else None
+        if count is not None and count < 1:
+            count = None
+
+    if total == 0:
+        return result(f"[{target.name} is empty.]", content=content)
+    if start > total:
+        return result(
+            f"[{target.name} has {total} lines; offset {start} is past the "
+            "end. Nothing to show.]", content=content)
+
+    body, end, note = _numbered_range(lines, start, count, READ_LIMIT)
+    if end < total:
+        footer = (f"[lines {start}-{end} of {total}.{note} For more, call "
+                  f"again with offset={end + 1}, or any other range.]")
+    else:
+        footer = f"[lines {start}-{end} of {total} — end of file.{note}]"
+    return result(f"{body}\n{footer}", shown=True, content=content)
+
+
+_LINE_PREFIX_RE = re.compile(r"(?m)^[ \t]*\d+\t")
+EDIT_QUOTE_CHARS = 1_500   # most of the file's real text an error may quote
+
+
+def _line_of(text: str, index: int) -> int:
+    return text.count("\n", 0, index) + 1
+
+
+def _loose_hits(file_lines: list, want: list) -> list:
+    """0-based starts where the file has `want` once leading and trailing
+    whitespace on every line is ignored."""
+    if not want:
+        return []
+    have = [ln.strip() for ln in file_lines]
+    k, first = len(want), want[0]
+    return [i for i in range(len(have) - k + 1)
+            if have[i] == first and have[i:i + k] == want]
+
+
+def _edit_miss(shown: str, text: str, old: str, quote: bool) -> str:
+    """Why `old` is not in `text`, said precisely enough to recover in one
+    step. Never applies anything.
+
+    `quote` allows the message to include the file's real lines. Callers
+    pass True only when the model has already been shown this file in the
+    conversation — otherwise a failed edit would be a way to read a file
+    nobody approved reading.
+    """
+    base = f"Error: old_text was not found in {shown}"
+
+    # 1. Line numbers copied in from a ranged read.
+    stripped = _LINE_PREFIX_RE.sub("", old)
+    if stripped != old and stripped and stripped in text:
+        return (f"{base}: it includes the line-number prefixes from a ranged "
+                "read (\"120<tab>…\"). Those are not part of the file — send "
+                "the same text without them.")
+
+    file_lines = text.split("\n")
+    want = [ln.strip() for ln in old.split("\n")]
+    while want and not want[0]:
+        want.pop(0)
+    while want and not want[-1]:
+        want.pop()
+    k = len(want)
+
+    def excerpt(start: int) -> str:
+        return "\n".join(file_lines[start:start + k])[:EDIT_QUOTE_CHARS]
+
+    # 2. Same text, different indentation or trailing spaces.
+    hits = _loose_hits(file_lines, want)
+    if hits:
+        a = hits[0] + 1
+        b = a + k - 1
+        others = (f" (and {len(hits) - 1} other place"
+                  f"{'s' if len(hits) > 2 else ''})" if len(hits) > 1 else "")
+        msg = (f"{base}: the indentation or spacing differs from the file. "
+               f"Lines {a}-{b}{others} hold the same text")
+        if quote:
+            return (f"{msg}, exactly like this — copy it character for "
+                    f"character:\n{excerpt(hits[0])}")
+        return (f"{msg}. Read lines {a}-{b} and copy them exactly, "
+                "including the indentation.")
+
+    # 3. The first line is there; what follows is not what was sent.
+    anchors = [i for i, ln in enumerate(file_lines) if want and ln.strip() == want[0]]
+    long_hint = (" A shorter old_text — only the lines that change plus one "
+                 "line of context — is easier to match.") if k > 15 else ""
+    if anchors:
+        where = ", ".join(str(i + 1) for i in anchors[:5])
+        more = ", …" if len(anchors) > 5 else ""
+        a = anchors[0] + 1
+        b = min(len(file_lines), a + k - 1)
+        msg = (f"{base}. Its first line is at line {where}{more}, but the "
+               "lines after it are not what you sent.")
+        if quote and len(anchors) == 1:
+            return (f"{msg} Lines {a}-{b} really are:\n{excerpt(anchors[0])}"
+                    f"\nCopy from that exactly.{long_hint}")
+        return (f"{msg} Read lines {a}-{b} and copy the text exactly."
+                f"{long_hint}")
+
+    # 4. Nothing recognisable.
+    return (f"{base} — not even its first line is in the file. The file may "
+            "have changed, or the text is from another file. Search for it "
+            "(grep -n) or read the lines again, then copy them exactly."
+            f"{long_hint}")
+
+
+def plan_edit(target: Path, old: str, new: str, replace_all: bool = False,
+              quote: bool = False, shown: "str | None" = None) -> dict:
+    """Work out an exact-text replacement without touching the disk.
+
+    Returns {"error": message} when it cannot be applied, else
+    {"before", "after", "write", "count", "line", "end_line"}:
+      before/after — the file's text with \n line endings, old and new.
+      write        — what to put on disk (original line endings kept).
+      count        — how many places are replaced.
+      line/end_line — where the first replacement sits in `after`.
+    Exact match only: a near match is reported, never applied.
+    """
+    shown = shown or str(target)
+    try:
+        with open(target, newline="") as f:   # keep \r\n as it is on disk
+            raw = f.read()
+    except FileNotFoundError:
+        return {"error": (f"Error: {shown} does not exist. An edit changes a "
+                          "file that is already there — to create this file, "
+                          "write it whole.")}
+    except IsADirectoryError:
+        return {"error": f"Error: {shown} is a directory, not a file."}
+    except UnicodeDecodeError:
+        return {"error": f"Error: {shown} is not a text file; it cannot be edited as text."}
+    except OSError as e:
+        return {"error": f"Error: {e}"}
+
+    # A file that uses \r\n throughout is matched and edited with \n, then
+    # written back with \r\n — otherwise one small edit would rewrite every
+    # line ending in the file. Mixed files are edited byte for byte.
+    crlf = "\r\n" in raw and "\n" not in raw.replace("\r\n", "")
+    text = raw.replace("\r\n", "\n") if crlf else raw
+    if crlf or "\r\n" not in raw:
+        old, new = old.replace("\r\n", "\n"), new.replace("\r\n", "\n")
+
+    count = text.count(old)
+    if count == 0:
+        return {"error": _edit_miss(shown, text, old, quote)}
+    if count > 1 and not replace_all:
+        starts, at = [], text.find(old)
+        while at != -1 and len(starts) < 10:
+            starts.append(_line_of(text, at))
+            at = text.find(old, at + len(old))
+        more = ", …" if count > len(starts) else ""
+        return {"error": (
+            f"Error: old_text matches {count} places in {shown} (lines "
+            f"{', '.join(map(str, starts))}{more}). Add a neighbouring line "
+            "to old_text so it matches exactly one place, or set "
+            "replace_all to true to change all of them.")}
+
+    first = text.find(old)
+    after = text.replace(old, new) if replace_all else text.replace(old, new, 1)
+    line = _line_of(text, first)
+    return {
+        "before": text, "after": after,
+        "write": after.replace("\n", "\r\n") if crlf else after,
+        "count": count if replace_all else 1,
+        "line": line, "end_line": line + new.count("\n"),
+    }
+
+
+def apply_edit(target: Path, old: str, new: str, replace_all: bool = False,
+               quote: bool = False, shown: "str | None" = None) -> tuple:
+    """Apply an exact-text replacement. Returns (message, plan) — plan is
+    None when nothing was written."""
+    plan = plan_edit(target, old, new, replace_all, quote=quote, shown=shown)
+    if "error" in plan:
+        return plan["error"], None
+    try:
+        with open(target, "w", newline="") as f:
+            f.write(plan["write"])
+    except OSError as e:
+        return f"Error: {e}", None
+    n = plan["count"]
+    where = (f"now lines {plan['line']}-{plan['end_line']}" if n == 1
+             else f"first at line {plan['line']}")
+    return (f"OK — replaced {n} occurrence{'s' if n != 1 else ''} in "
+            f"{target} ({where})"), plan
+
+
 def execute(name: str, arguments: dict, cfg: "dict | None" = None,
             cwd: "str | Path | None" = None,
             cancel: "threading.Event | None" = None) -> str:
@@ -812,11 +1456,10 @@ def execute(name: str, arguments: dict, cfg: "dict | None" = None,
     workspaces concurrently from a single engine, so the root has to travel
     with the call.
     """
-    root = Path(cwd).expanduser().resolve() if cwd else Path.cwd()
+    root = _workspace_root(cwd)
 
     def _resolve(path_str: str) -> Path:
-        p = Path(path_str).expanduser()
-        return p if p.is_absolute() else (root / p)
+        return _resolve_in(root, path_str)
 
     err = validate_call(name, arguments)
     if err:
@@ -844,35 +1487,14 @@ def execute(name: str, arguments: dict, cfg: "dict | None" = None,
         return _format_search_results(r)
 
     if name == "read_file":
-        path = arguments.get("path")
-        # Guard against reading a binary image as text — return a helpful
-        # message so the model asks the user to include the image instead of
-        # looping on a utf-8 decode error. Do NOT mention slash commands here;
-        # the CLI auto-attaches images from the user's prompt, so the model
-        # just needs to ask the user to share the image.
-        suffix = Path(path).suffix.lower()
-        if suffix in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
-            return (
-                f"Error: {Path(path).name} is an image file. read_file only "
-                "handles text. Ask the user to share the image in their next "
-                "message — the CLI will attach it automatically."
-            )
-        try:
-            content = _resolve(path).read_text()
-        except Exception as e:
-            return f"Error: {e}"
-        if len(content) > READ_LIMIT:
-            # Cap huge reads — see READ_LIMIT above. The truncation notice is
-            # prescriptive so the model reaches for a ranged read instead of
-            # retrying the same call. Dedupe stays safe: the recorded stub's
-            # sha never matches the file on disk, so a re-read runs normally.
-            return (
-                content[:READ_LIMIT]
-                + f"\n[truncated — file is {len(content)} chars; this returned "
-                f"the first {READ_LIMIT}. Read specific sections with a ranged "
-                "shell command instead.]"
-            )
-        return content
+        return read_file_detail(arguments, cwd=root)["text"]
+
+    if name == "edit_file":
+        message, _ = apply_edit(
+            _resolve(arguments.get("path")), arguments.get("old_text"),
+            arguments.get("new_text"), bool(arguments.get("replace_all")),
+            shown=arguments.get("path"))
+        return message
 
     if name == "write_file":
         path = arguments.get("path")
@@ -930,8 +1552,8 @@ def execute(name: str, arguments: dict, cfg: "dict | None" = None,
                     "pass a larger `timeout` (max 600s), or break the work into "
                     "smaller commands."
                 )
-            tail = "...[truncated]" if len(out) > OUTPUT_LIMIT else ""
-            return f"{out[:OUTPUT_LIMIT]}{tail}\n[exit {proc.returncode}]"
+            # The "[exit N]" suffix is parsed by compact._describe_action.
+            return f"{condense_output(clean_output(out))}\n[exit {proc.returncode}]"
         except Exception as e:
             return f"Error: {e}"
 
@@ -961,11 +1583,30 @@ def summarize_call(name: str, arguments: dict) -> str:
         more = f" (+{len(qs) - 1} more)" if len(qs) > 1 else ""
         return f"ask_user: {first[:60]}{more}"
     if name == "read_file":
-        return f"read_file: {arguments.get('path') or '(missing path)'}"
+        span = ""
+        try:
+            offset, limit = arguments.get("offset"), arguments.get("limit")
+            if offset is not None or limit is not None:
+                start = max(1, _as_int(offset)) if offset is not None else 1
+                count = _as_int(limit) if limit is not None else 0
+                span = (f" (lines {start}-{start + count - 1})" if count > 0
+                        else f" (from line {start})")
+        except (TypeError, ValueError):
+            span = ""
+        return f"read_file: {arguments.get('path') or '(missing path)'}{span}"
     if name == "write_file":
         path = arguments.get("path") or "(missing path)"
         n = len(arguments.get("content") or "")
         return f"write_file: {path} ({n} chars)"
+    if name == "edit_file":
+        path = arguments.get("path") or "(missing path)"
+        old, new = arguments.get("old_text"), arguments.get("new_text")
+        if not isinstance(old, str) or not isinstance(new, str):
+            return f"edit_file: {path}"
+        n_old = old.count("\n") + 1
+        n_new = new.count("\n") + 1 if new else 0
+        every = ", every match" if arguments.get("replace_all") else ""
+        return f"edit_file: {path} ({n_old} → {n_new} lines{every})"
     if name == "run_bash":
         cmd = _strip_cd_prefix(arguments.get("command") or "(missing command)")
         if len(cmd) > 200:

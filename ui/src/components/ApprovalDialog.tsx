@@ -60,7 +60,12 @@ export function ApprovalDialog({ approval, onDecide, isTop = true }: {
           {p.kind === 'diff' && (
             <>
               <div className="path-line" title={p.path}>{p.path}</div>
-              <Diff oldText={p.old ?? ''} newText={p.new ?? ''} exists={!!p.exists} />
+              <Diff
+                oldText={p.old ?? ''} newText={p.new ?? ''} exists={!!p.exists}
+                startLine={p.start_line ?? 1}
+                note={approval.name === 'edit_file'
+                  ? (p.note || 'changes part of this file') : undefined}
+              />
             </>
           )}
           {p.kind === 'command' && (
@@ -94,6 +99,7 @@ export function ApprovalDialog({ approval, onDecide, isTop = true }: {
 function titleFor(name: string) {
   switch (name) {
     case 'write_file': return 'Write this file?'
+    case 'edit_file': return 'Edit this file?'
     case 'run_bash': return 'Run this command?'
     case 'start_server': return 'Start this server?'
     case 'read_file': return 'Read this file?'

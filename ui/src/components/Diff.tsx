@@ -37,14 +37,21 @@ function diffRows(oldText: string, newText: string): Row[] {
   return rows
 }
 
-export function Diff({ oldText, newText, exists }: {
+export function Diff({ oldText, newText, exists, startLine = 1, note }: {
   oldText: string; newText: string; exists: boolean
+  /** File line number of the first line of oldText/newText. A targeted
+   *  edit sends only a window of the file, so its rows are numbered as
+   *  they are in the file, not from 1. */
+  startLine?: number
+  /** Replaces the default "overwrites an existing file" caption. */
+  note?: string
 }) {
   const rows = useMemo(
     () => (exists ? diffRows(oldText, newText)
                   : newText.split('\n').map((t, i): Row => ({ kind: 'add', n1: null, n2: i + 1, text: t }))),
     [oldText, newText, exists])
 
+  const shift = Math.max(1, startLine) - 1
   const added = rows.filter((r) => r.kind === 'add').length
   const removed = rows.filter((r) => r.kind === 'del').length
 
@@ -53,13 +60,13 @@ export function Diff({ oldText, newText, exists }: {
       <div className="diff-head">
         <span className="diff-stat add">+{added}</span>
         <span className="diff-stat del">−{removed}</span>
-        <span className="diff-note">{exists ? 'overwrites an existing file' : 'new file'}</span>
+        <span className="diff-note">{note ?? (exists ? 'overwrites an existing file' : 'new file')}</span>
       </div>
       <div className="diff-body">
         {rows.map((r, i) => (
           <div key={i} className={`diff-row ${r.kind}`}>
-            <span className="ln">{r.n1 ?? ''}</span>
-            <span className="ln">{r.n2 ?? ''}</span>
+            <span className="ln">{r.n1 == null ? '' : r.n1 + shift}</span>
+            <span className="ln">{r.n2 == null ? '' : r.n2 + shift}</span>
             <span className="sign">{r.kind === 'add' ? '+' : r.kind === 'del' ? '−' : ' '}</span>
             <span className="code">{r.text || ' '}</span>
           </div>

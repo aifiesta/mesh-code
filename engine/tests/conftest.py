@@ -34,6 +34,10 @@ def isolate_config_home(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(cfg, "SESSIONS_DIR", home / "sessions")
     from meshharness.core import journal as jr
     monkeypatch.setattr(jr, "JOURNAL_DIR", home / "journal")
+    # memory.py imports CONFIG_DIR by value, so patching config alone left
+    # every test's repo-memory folder landing in the real ~/.mesh-code/context.
+    from meshharness.core import memory as mem
+    monkeypatch.setattr(mem, "CONFIG_DIR", home)
     yield home
 
 

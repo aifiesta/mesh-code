@@ -247,6 +247,10 @@ export type RouteExplain = {
   mode: string
   cohort: string | null
   difficulty?: string
+  /** Task level by name, and the rule that set it — picks from the per-level scores only. */
+  task?: string | null
+  why?: string | null
+  thinking?: string | null
   weights?: Record<string, number>
   pick?: string
   ranked: any[]

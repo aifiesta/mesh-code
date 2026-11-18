@@ -195,7 +195,7 @@ function Explain({ explain }: { explain: RouteExplain | null }) {
       <p className="pop-note">
         {explain.cohort
           ? <>Reads as a <b>{pretty(explain.cohort)}</b> prompt
-              {explain.difficulty && <> ({explain.difficulty} difficulty)</>}.
+              {explain.task ? <> ({explain.task})</> : explain.difficulty && <> ({explain.difficulty} difficulty)</>}.
               {explain.reason && <> Can’t pick yet — {explain.reason}.</>}</>
           : explain.reason}
       </p>
@@ -207,10 +207,14 @@ function Explain({ explain }: { explain: RouteExplain | null }) {
     <div className="explain">
       <div className="explain-top">
         <span className="explain-cap">For this prompt the router would pick</span>
-        <span className="explain-model">{top}</span>
+        <span className="explain-model">
+          {top}{explain.thinking && explain.thinking !== 'default' && <> · {explain.thinking} thinking</>}
+        </span>
         <span className="explain-cap">
-          Reads as <b>{pretty(explain.cohort)}</b>
-          {explain.difficulty && <> · {explain.difficulty} difficulty</>}
+          {explain.task
+            ? <>Reads as a <b>{explain.task}</b>{explain.why && <>: {explain.why}</>}</>
+            : <>Reads as <b>{pretty(explain.cohort)}</b>
+                {explain.difficulty && <> · {explain.difficulty} difficulty</>}</>}
         </span>
       </div>
       {rest.length > 0 && (

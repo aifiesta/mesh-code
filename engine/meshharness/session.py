@@ -41,7 +41,8 @@ from .bridge import Cancelled, Pending
 from .core import compact, loopguard, memory, router
 from .core import journal, safety
 from .core import tools as tools_mod
-from .core.client import complete_chat, stream_chat
+from .core.client import (complete_chat, nearest_level, reasoning_refusal,
+                          stream_chat)
 from .core.permissions import AUTO_APPROVE, Mode
 from .core.plan import Plan
 from .core.tools import TOOLS, build_system_prompt, find_stub_markers, summarize_call
@@ -109,6 +110,10 @@ class Session:
             "session_id": self.id,
             "plan": None,
             "stub_files": {},
+            # Files whose content the model has been shown in this chat.
+            # A failed edit may quote the file's real lines only for these.
+            "read_paths": set(),
+            "edit_misses": {},
             "session_allow": set(),
             "doom_streak": {},
             "mode": mode,
@@ -251,6 +256,8 @@ class Session:
         self.state["plan"] = None
         self.state["session_reads"] = {}
         self.state["stub_files"] = {}
+        self.state["read_paths"] = set()
+        self.state["edit_misses"] = {}
         self.emit(Event.CHAT_CLEARED)
         self._status()
         self.save_state()
@@ -526,6 +533,11 @@ class Session:
                 aborted = True
                 break
             except httpx.HTTPStatusError as e:
+                # A refused thinking level can arrive as a plain 4xx as well
+                # as in-band; either way the turn should carry on.
+                if (e.response.status_code < 500 and self._level_refused(
+                        reasoning_refusal(_safe_text(e.response)))):
+                    continue
                 self.emit(Event.ERROR, fatal=True, message=(
                     f"gateway returned HTTP {e.response.status_code}"),
                     detail=_safe_text(e.response))
@@ -537,19 +549,13 @@ class Session:
 
             if meta.get("error"):
                 msg = str(meta["error"])
-                # A model that rejects reasoning_effort: record it and retry
-                # without the field, keeping the setting for models that take
-                # it. (Same evidence-based rule as the CLI — never trust the
-                # catalog's supports_thinking flag.)
-                if ("reasoning_effort" in msg
-                        and self.cfg.get("reasoning_effort")
-                        and self._effective_model() not in
-                        (self.state.get("_reasoning_rejected") or set())):
-                    self.state.setdefault("_reasoning_rejected", set()).add(
-                        self._effective_model())
-                    self.emit(Event.NOTICE, level="info", message=(
-                        "this model rejected the reasoning-effort setting — "
-                        "retrying without it"))
+                # A model that refuses this thinking level: remember it and
+                # retry. (Same evidence-based rule as the CLI — never trust
+                # the catalog's supports_thinking flag.)
+                refusal = meta.get("reasoning_rejected")
+                if refusal is None and "reasoning_effort" in msg:
+                    refusal = reasoning_refusal(msg)
+                if self._level_refused(refusal):
                     continue
                 # If a SMART PICK errored, abandon it and retry on the pinned
                 # model — the model answering now beats the table's opinion.
@@ -898,7 +904,9 @@ class Session:
         try:
             self.emit(Event.NOTICE, level="info",
                       message="streaming keeps failing — trying one non-streaming request")
-            return complete_chat(msgs, self.cfg, tools=TOOLS,
+            # The hop's effective cfg, as the streaming attempt used: the
+            # live smart pick, and no thinking level this model has refused.
+            return complete_chat(msgs, self._effective_cfg(), tools=TOOLS,
                                  max_tokens=self.state.get("_max_tokens_shrunk"))
         except Exception:
             return None
@@ -946,10 +954,49 @@ class Session:
         this model has already proven it can't take."""
         cfg = dict(self.cfg)
         cfg["model"] = self._effective_model()
-        rejected = self.state.get("_reasoning_rejected") or set()
-        if cfg.get("reasoning_effort") and cfg["model"] in rejected:
+        # A scored smart pick chooses the thinking level along with the model.
+        # A level the user set themselves always wins.
+        if (self.state.get("_smart_scored") and self.state.get("_smart_pick")
+                and self.cfg.get("route_mode") == "smart"
+                and not self.cfg.get("reasoning_effort")):
+            cfg["reasoning_effort"] = self.state.get("_smart_effort")
+        # A level this model refused is swapped for the one chosen in its
+        # place (which may itself have been refused since, hence the loop).
+        swaps = self.state.get("_reasoning_swaps") or {}
+        level, seen = cfg.get("reasoning_effort"), set()
+        while level and (cfg["model"], level) in swaps and level not in seen:
+            seen.add(level)
+            level = swaps[(cfg["model"], level)]
+        if level:
+            cfg["reasoning_effort"] = level
+        else:
             cfg.pop("reasoning_effort", None)
         return cfg
+
+    def _level_refused(self, refusal: "dict | None") -> bool:
+        """Handle a model refusing the thinking level it was just sent.
+
+        Returns True when the hop should be retried. A model can refuse one
+        level and take the rest (one refuses only "none"), so the memory is
+        per model AND level, and the replacement is the nearest level the
+        refusal says the model accepts — Max on a model that stops at High
+        runs at High. Only when the error names no accepted level is the
+        field dropped altogether.
+        """
+        if refusal is None:
+            return False
+        model = self._effective_model()
+        sent = self._effective_cfg().get("reasoning_effort")
+        if not sent:
+            return False        # no level went out — this error is about something else
+        swaps = self.state.setdefault("_reasoning_swaps", {})
+        refused = {lv for (m, lv) in swaps if m == model} | {sent}
+        instead = nearest_level(sent, refusal.get("accepted"), refused)
+        swaps[(model, sent)] = instead
+        self.emit(Event.NOTICE, level="info", message=(
+            f"this model does not take the '{sent}' reasoning level — "
+            + (f"using '{instead}' instead" if instead else "retrying without it")))
+        return True
 
     def _switch_cost_bonus(self) -> float:
         """Stickiness bonus for the incumbent, scaled by cached context.
@@ -970,7 +1017,23 @@ class Session:
         self.state["_smart_pick"] = info["model"]
         self.state["_smart_last"] = info["model"]
         self.state["_smart_pick_info"] = info
+        # Scored picks carry a thinking level; table picks choose a model only.
+        self.state["_smart_scored"] = bool(info.get("scored"))
+        self.state["_smart_level"] = info.get("level") if info.get("scored") else None
+        self.state["_smart_effort"] = info.get("effort") if info.get("scored") else None
         self.turn_model = info["model"]
+
+    def _asks_for_caching(self) -> bool:
+        """Does this session mark its requests for caching? (The Optimize
+        setting does; without it Anthropic models bill every token in full.)"""
+        try:
+            return float(self.cfg.get("optimize") or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    def _serving(self) -> tuple:
+        """(model, thinking level) of the pick serving right now."""
+        return (self.state.get("_smart_pick"), self.state.get("_smart_level"))
 
     def _route_turn(self, text: str, had_image: bool = False) -> None:
         """Initial per-turn pick. Fail-open: any miss leaves _smart_pick unset
@@ -996,27 +1059,37 @@ class Session:
                 self.state.get("_smart_cohort") and not had_image
                 and (router.is_continuation(text)
                      or (conf <= 0.5 and len(text.strip()) < 25)))
-            forced = self.cfg.get("route_effort", "auto")
-            if forced != "auto":
-                difficulty = forced
-            elif inherit:
-                difficulty = self.state.get("_smart_difficulty") or "mid"
-            else:
-                difficulty = router.estimate_difficulty(text)
             if inherit:
                 cohort = self.state["_smart_cohort"]
+            forced = self.cfg.get("route_effort", "auto")
+            why = None
+            if forced != "auto":
+                difficulty, why = forced, "you set it in Settings"
+            elif inherit:
+                difficulty = self.state.get("_smart_difficulty") or "mid"
+                why = "a follow-up to the task before it"
+            elif cohort in router.SCORED_COHORTS:
+                # Coding work is sorted by the shape of the request, and
+                # wording never assigns the top two rungs.
+                difficulty, why = router.task_level(text)
+            else:
+                difficulty = router.estimate_difficulty(text)
             self.state["_smart_cohort"] = cohort
             self.state["_smart_base_difficulty"] = difficulty   # de-escalation floor
-            weights = router.effective_weights(self.cfg.get("route_weights"), difficulty)
             exclude = set(self.cfg.get("exclude_models") or []) | set(self.state.get("_smart_bad") or set())
-            got = router.pick(cohort, weights, table, self.catalog,
-                              needs_tools=True, needs_ctx=self._needs_ctx(),
-                              incumbent=self.state.get("_smart_last"),
-                              exclude=exclude)
+            got = router.choose(cohort, difficulty, self.cfg.get("route_weights"),
+                                table, self.catalog,
+                                needs_tools=True, needs_ctx=self._needs_ctx(),
+                                incumbent=self.state.get("_smart_last"),
+                                exclude=exclude,
+                                level=self.cfg.get("reasoning_effort"),
+                                asks_for_caching=self._asks_for_caching())
             if got and got.get("model"):
                 self._apply_pick(got, difficulty)
                 self.emit(Event.ROUTED, model=got["model"], cohort=cohort,
                           confidence=conf, difficulty=difficulty,
+                          thinking=got.get("level"),
+                          task=_task_name(got, difficulty), why=why,
                           ranked=(got.get("ranked") or [])[:5])
         except Exception:
             self.state["_smart_pick"] = None  # never let routing break a turn
@@ -1041,24 +1114,29 @@ class Session:
             nxt = router.escalate(cur)
             if nxt == cur:
                 return False  # already at the top
-            weights = router.effective_weights(self.cfg.get("route_weights"), nxt)
-            got = router.pick(cohort, weights, table, self.catalog,
-                              needs_tools=True, needs_ctx=self._needs_ctx(),
-                              incumbent=None,  # escalating: no stickiness
-                              exclude=set(self.state.get("_smart_bad") or set()))
+            prev = self._serving()
+            got = router.choose(cohort, nxt, self.cfg.get("route_weights"),
+                                table, self.catalog,
+                                needs_tools=True, needs_ctx=self._needs_ctx(),
+                                incumbent=None,  # escalating: no stickiness
+                                exclude=set(self.state.get("_smart_bad") or set()),
+                                # only something clearly stronger than what just struggled
+                                failed=prev if self.state.get("_smart_scored") else None,
+                                level=self.cfg.get("reasoning_effort"),
+                                asks_for_caching=self._asks_for_caching())
             if not got or not got.get("model"):
                 return False
-            prev = self.state.get("_smart_pick")
             self.state["_smart_escalations"] = self.state.get("_smart_escalations", 0) + 1
             self.state["_smart_clean_hops"] = 0
             got["escalated"] = True
             self._apply_pick(got, nxt)
-            if got["model"] != prev:
+            if self._serving() != prev:
                 self.emit(Event.ROUTED, model=got["model"], cohort=cohort,
                           difficulty=nxt, escalated=True, reason=reason,
+                          thinking=got.get("level"), task=_task_name(got, nxt),
                           ranked=(got.get("ranked") or [])[:5])
                 self.emit(Event.NOTICE, level="info",
-                          message=f"escalating ({reason}) → {_short_model(got['model'])}")
+                          message=f"escalating ({reason}) → {_pick_label(got)}")
             return True
         except Exception:
             return False
@@ -1083,24 +1161,27 @@ class Session:
             if not table or not self.catalog:
                 return
             cohort = self.state.get("_smart_cohort") or "chat"
-            weights = router.effective_weights(self.cfg.get("route_weights"), nxt)
-            got = router.pick(cohort, weights, table, self.catalog,
-                              needs_tools=True, needs_ctx=self._needs_ctx(),
-                              incumbent=self.state.get("_smart_last"),
-                              exclude=set(self.state.get("_smart_bad") or set()),
-                              incumbent_bonus=self._switch_cost_bonus())
+            got = router.choose(cohort, nxt, self.cfg.get("route_weights"),
+                                table, self.catalog,
+                                needs_tools=True, needs_ctx=self._needs_ctx(),
+                                incumbent=self.state.get("_smart_last"),
+                                exclude=set(self.state.get("_smart_bad") or set()),
+                                incumbent_bonus=self._switch_cost_bonus(),
+                                level=self.cfg.get("reasoning_effort"),
+                                asks_for_caching=self._asks_for_caching())
             if not got or not got.get("model"):
                 return
-            prev = self.state.get("_smart_pick")
+            prev = self._serving()
             self.state["_smart_escalations"] = max(0, self.state.get("_smart_escalations", 1) - 1)
             self.state["_smart_clean_hops"] = 0
             self._apply_pick(got, nxt)
-            if got["model"] != prev:
+            if self._serving() != prev:
                 self.emit(Event.ROUTED, model=got["model"], cohort=cohort,
-                          difficulty=nxt, settled=True,
+                          difficulty=nxt, settled=True, thinking=got.get("level"),
+                          task=_task_name(got, nxt),
                           ranked=(got.get("ranked") or [])[:5])
                 self.emit(Event.NOTICE, level="info",
-                          message=f"settling → {_short_model(got['model'])}")
+                          message=f"settling → {_pick_label(got)}")
         except Exception:
             pass
 
@@ -1136,7 +1217,11 @@ class Session:
             # when the catalog has not arrived and no pick is possible yet.
             cohort, confidence = router.classify(text or "", has_tools=True)
             level = self.cfg.get("route_effort", "auto")
-            difficulty = router.estimate_difficulty(text or "")
+            why = None
+            if cohort in router.SCORED_COHORTS:
+                difficulty, why = router.task_level(text or "")
+            else:
+                difficulty = router.estimate_difficulty(text or "")
             weights = router.effective_weights(
                 self.cfg.get("route_weights"),
                 difficulty if level == "auto" else level)
@@ -1148,12 +1233,18 @@ class Session:
                 out["reason"] = ("the model catalog has not loaded yet"
                                  if table else "no routing table is bundled")
                 return out
-            got = router.pick(cohort, weights, table, self.catalog,
-                              needs_tools=True, incumbent=self.cfg.get("model"),
-                              exclude=set(self.cfg.get("exclude_models") or []))
+            got = router.choose(cohort, difficulty if level == "auto" else level,
+                                self.cfg.get("route_weights"), table, self.catalog,
+                                needs_tools=True, incumbent=self.cfg.get("model"),
+                                exclude=set(self.cfg.get("exclude_models") or []),
+                                level=self.cfg.get("reasoning_effort"),
+                                asks_for_caching=self._asks_for_caching())
             out.update({
                 "available": bool(got),
                 "pick": (got or {}).get("model"),
+                "thinking": (got or {}).get("level"),
+                "task": _task_name(got or {}, difficulty if level == "auto" else level),
+                "why": why if level == "auto" else "you set it in Settings",
                 "ranked": ((got or {}).get("ranked") or [])[:8],
             })
             if not got:
@@ -1276,16 +1367,33 @@ class Session:
 
         self.state.setdefault("doom_streak", {}).pop(name, None)
 
+        # An edit that cannot apply (no match, several matches, no such
+        # file) is answered before anyone is asked: "approve this?" for a
+        # call that can only fail is a wasted click.
+        if name == "edit_file":
+            doomed = self._edit_precheck(args)
+            if doomed is not None:
+                self.emit(Event.TOOL_STARTED, call_id=p["id"], name=name,
+                          summary=summarize_call(name, args),
+                          args=_safe_args(name, args), turn_id=turn_id, hop=hop)
+                self.emit(Event.TOOL_RESULT, call_id=p["id"], name=name,
+                          ok=False, result=doomed)
+                return doomed
+
         # --- gated: mode set, then the safety guards, then the user
         mode = self.mode          # live read, so a mid-batch change applies
         approved = name in AUTO_APPROVE.get(mode, set())
         safety_mode = mode
-        if not approved and name in self.state.get("session_allow", set()):
+        # "Always allow" is the user's own click for this tool, so it is
+        # checked at the looser, pre-existing strictness; a call approved
+        # only by the MODE gets the stricter project-only rule for reads.
+        always = name in self.state.get("session_allow", set())
+        if not approved and always:
             approved, safety_mode = True, Mode.AUTO
 
         reason = ""
         if approved:
-            ok, why = self._safety_check(name, args, safety_mode)
+            ok, why = self._safety_check(name, args, safety_mode, always=always)
             if not ok:
                 approved, reason = False, why or "safety check failed"
                 self.emit(Event.NOTICE, level="warn",
@@ -1321,6 +1429,8 @@ class Session:
             return result
         if name == "write_file":
             return self._write_file(args, p["id"])
+        if name == "edit_file":
+            return self._edit_file(args, p["id"])
         if name == "read_file":
             return self._read_file(args, p["id"])
 
@@ -1332,13 +1442,21 @@ class Session:
             raise KeyboardInterrupt
         return result
 
-    def _safety_check(self, name: str, args: dict, mode: Mode):
-        if name == "write_file":
+    def _safety_check(self, name: str, args: dict, mode: Mode,
+                      always: bool = False):
+        if name in ("write_file", "edit_file"):
             return safety.is_path_safe_for_auto_write(
                 args.get("path"), mode, self.workspace)
         if name == "read_file":
+            # Approved by the mode alone (accept-edits, auto): only inside
+            # the project, never an environment file. Bypass and the user's
+            # own "Always allow" keep the denylist-only rule they had.
+            scoped = not always and mode in (Mode.ACCEPT_EDITS, Mode.AUTO)
+            # The engine's own command logs count as readable alongside the
+            # project: a trimmed command result points the model at one.
             return safety.is_path_safe_for_auto_read(
-                args.get("path"), mode, self.workspace)
+                args.get("path"), mode, self.workspace, workspace_only=scoped,
+                extra_roots=(tools_mod.shell_log_dir(),))
         if name in ("run_bash", "start_server"):
             return safety.is_command_safe_for_auto(
                 args.get("command"), mode, self.workspace)
@@ -1385,11 +1503,17 @@ class Session:
             return {"kind": "diff", "path": str(target), "exists": bool(old),
                     "old": _clip(old, 20000), "new": _clip(content, 20000),
                     "bytes": len(content)}
+        if name == "edit_file":
+            return self._edit_preview(args)
         if name in ("run_bash", "start_server"):
             return {"kind": "command", "command": args.get("command") or "",
                     "cwd": str(self.workspace)}
         if name == "read_file":
-            return {"kind": "path", "path": args.get("path") or ""}
+            path = args.get("path") or ""
+            if args.get("offset") is not None or args.get("limit") is not None:
+                # "read_file: a.py (lines 120-199)" -> "a.py (lines 120-199)"
+                path = summarize_call(name, args).split(": ", 1)[-1]
+            return {"kind": "path", "path": path}
         if name == "web_search":
             return {"kind": "query", "query": args.get("query") or ""}
         return {"kind": "json", "value": _safe_args(name, args)}
@@ -1432,8 +1556,139 @@ class Session:
             except Exception:
                 pass
             self.state.setdefault("_turn_files", []).append(key)
+            self._mark_shown(target)
             self.emit(Event.FILE_CHANGED, path=key, bytes=len(content),
                       action="write")
+        return result
+
+    # -- targeted edits ---------------------------------------------------
+    def _target(self, path: str) -> Path:
+        target = Path(path or "").expanduser()
+        return target if target.is_absolute() else self.workspace / target
+
+    def _mark_shown(self, target: Path) -> None:
+        try:
+            self.state.setdefault("read_paths", set()).add(str(target.resolve()))
+        except (OSError, RuntimeError):
+            pass
+
+    def _was_shown(self, target: Path) -> bool:
+        try:
+            return str(target.resolve()) in self.state.get("read_paths", set())
+        except (OSError, RuntimeError):
+            return False
+
+    def _plan_edit(self, args: dict) -> dict:
+        target = self._target(args.get("path"))
+        return tools_mod.plan_edit(
+            target, args.get("old_text") or "", args.get("new_text") or "",
+            bool(args.get("replace_all")), quote=self._was_shown(target),
+            shown=args.get("path"))
+
+    def _edit_miss_note(self, target: Path, message: str) -> str:
+        """Count consecutive misses on one file; from the second, say to
+        look again instead of guessing a third time."""
+        misses = self.state.setdefault("edit_misses", {})
+        key = str(target)
+        misses[key] = misses.get(key, 0) + 1
+        if misses[key] >= 2:
+            message += ("\nThat is " + str(misses[key]) + " failed edits of this "
+                        "file in a row. Stop guessing: read the lines you "
+                        "want to change again (a small range is enough), "
+                        "then copy old_text from that result.")
+        return message
+
+    def _edit_precheck(self, args: dict) -> "str | None":
+        """The error a doomed edit would produce, or None to carry on.
+
+        Runs only where a read would be approved without asking (inside the
+        project, not an environment or credential file). Anywhere else the
+        call goes to the user first: even "0 matches" tells the model
+        something about a file nobody agreed to open."""
+        ok, _ = safety.is_path_safe_for_auto_read(
+            args.get("path"), Mode.AUTO, self.workspace, workspace_only=True)
+        if not ok:
+            return None
+        plan = self._plan_edit(args)
+        if "error" not in plan:
+            return None
+        return self._edit_miss_note(self._target(args.get("path")), plan["error"])
+
+    def _edit_preview(self, args: dict) -> dict:
+        """The changed lines with a little context, numbered as in the file."""
+        target = self._target(args.get("path"))
+        old, new = args.get("old_text") or "", args.get("new_text") or ""
+        plan = tools_mod.plan_edit(target, old, new, bool(args.get("replace_all")))
+        if "error" in plan:
+            # Outside the pre-check's reach (a path that needs approval just
+            # to look at). Show what was asked for; the result will explain.
+            return {"kind": "diff", "path": str(target), "exists": True,
+                    "old": _clip(old, 20000), "new": _clip(new, 20000),
+                    "bytes": len(new), "start_line": 1, "note": ""}
+        context = 3
+        first = plan["line"]
+        start = max(1, first - context)
+        before, after = plan["before"].split("\n"), plan["after"].split("\n")
+        old_end = first + old.count("\n") + context
+        new_end = first + new.count("\n") + context
+        extra = plan["count"] - 1
+        note = (f"and {extra} more identical replacement"
+                f"{'s' if extra != 1 else ''} elsewhere in the file"
+                if extra > 0 else "")
+        return {"kind": "diff", "path": str(target), "exists": True,
+                "old": _clip("\n".join(before[start - 1:old_end]), 20000),
+                "new": _clip("\n".join(after[start - 1:new_end]), 20000),
+                "bytes": len(plan["after"]), "start_line": start, "note": note}
+
+    def _edit_file(self, args: dict, call_id: str) -> str:
+        target = self._target(args.get("path"))
+        new_text = args.get("new_text") or ""
+        result, plan = tools_mod.apply_edit(
+            target, args.get("old_text") or "", new_text,
+            bool(args.get("replace_all")), quote=self._was_shown(target),
+            shown=args.get("path"))
+        ok = plan is not None
+        if not ok and result.startswith("Error: old_text"):
+            result = self._edit_miss_note(target, result)
+        self.emit(Event.TOOL_RESULT, call_id=call_id, name="edit_file",
+                  ok=ok, result=result)
+        if not ok:
+            return result
+        key = str(target)
+        content = plan["after"]
+        self.state.setdefault("edit_misses", {}).pop(key, None)
+        try:
+            # The quality guard looks at what the model just wrote, placed
+            # at its real line numbers — not at the whole file, or a TODO
+            # that was already there would be blamed on a one-line edit.
+            stubs = self.state.setdefault("stub_files", {})
+            found = find_stub_markers(
+                key, "\n" * (plan["line"] - 1) + new_text)
+            if found:
+                stubs[key] = found
+                self.emit(Event.NOTICE, level="warn", message=(
+                    f"{target.name} looks like scaffolding, not finished code"),
+                    detail=found[:5], path=key)
+            elif key in stubs:
+                # Flagged earlier in this turn: is it clean now?
+                still = find_stub_markers(key, content)
+                if still:
+                    stubs[key] = still
+                else:
+                    stubs.pop(key, None)
+        except Exception:
+            pass
+        try:
+            memory.capture(self.state["memory_root"], key, content)
+            # Only the replaced lines are in the conversation, so nothing
+            # may claim the file's full content is.
+            memory.forget_read(self.state, key)
+        except Exception:
+            pass
+        self.state.setdefault("_turn_files", []).append(key)
+        self._mark_shown(target)
+        self.emit(Event.FILE_CHANGED, path=key, bytes=len(content),
+                  action="edit")
         return result
 
     def _read_file(self, args: dict, call_id: str) -> str:
@@ -1443,21 +1698,32 @@ class Session:
         if not abspath.is_absolute():
             abspath = self.workspace / abspath
         abspath = str(abspath)
+        # A line range is a small, deliberate request for specific lines —
+        # answer it as asked. Only whole-file reads are deduped.
+        ranged = args.get("offset") is not None or args.get("limit") is not None
         stub = None
-        try:
-            stub = memory.dedupe_read(self.state, abspath,
-                                      float(self.cfg.get("optimize") or 0))
-        except Exception:
-            stub = None
+        if not ranged:
+            try:
+                stub = memory.dedupe_read(self.state, abspath,
+                                          float(self.cfg.get("optimize") or 0))
+            except Exception:
+                stub = None
         if stub is not None:
             self.emit(Event.TOOL_RESULT, call_id=call_id, name="read_file",
                       ok=True, result=stub, deduped=True)
             return stub
-        result = tools_mod.execute("read_file", args, self.cfg, cwd=self.workspace)
+        detail = tools_mod.read_file_detail(args, cwd=self.workspace)
+        result = detail["text"]
         ok = not result.startswith("Error:")
         self.emit(Event.TOOL_RESULT, call_id=call_id, name="read_file",
                   ok=ok, result=_clip(result), bytes=len(result))
-        if ok:
+        if ok and detail["shown"]:
+            self._mark_shown(Path(abspath))
+        if ok and detail["whole"]:
+            # ONLY a whole-file result is recorded: the dedupe stub tells the
+            # model "the full content is already in this conversation", which
+            # is false after a line range, a first chunk, or a generated-file
+            # note.
             try:
                 memory.record_read(self.state, abspath, result,
                                    msg_index=len(self.state["messages"]))
@@ -1760,6 +2026,22 @@ def mode_from_str_safe(v) -> Mode:
         return from_str(str(v or "default"))
     except Exception:
         return Mode.DEFAULT
+
+
+def _task_name(got: dict, rung: str) -> "str | None":
+    """The task level as the user reads it — only for picks made from the
+    per-level scores, where the five rungs carry these names."""
+    if not got.get("scored"):
+        return None
+    return router.LEVEL_NAMES.get(router._band(rung))
+
+
+def _pick_label(got: dict) -> str:
+    """A pick as the user reads it: the model, and the thinking level when the
+    router chose one."""
+    level = got.get("level")
+    name = _short_model(got.get("model", ""))
+    return f"{name} · {level}" if level and level != "default" else name
 
 
 def _short_model(m: str) -> str:

@@ -384,6 +384,21 @@ def record_write(state: dict, path: str, content: str, msg_index: int) -> None:
     _record(state, path, content, msg_index, "write")
 
 
+def forget_read(state: dict, path: str) -> None:
+    """Drop the dedupe entry for `path`.
+
+    For a change whose resulting content is NOT in the conversation — a
+    targeted edit sends only the replaced lines. The sha check in
+    dedupe_read would already refuse a changed file; dropping the entry
+    makes it certain, and also covers an edit that happens to restore the
+    earlier bytes after the content-bearing message was compacted away."""
+    try:
+        key = str(Path(path).expanduser().resolve())
+        (state.get("session_reads") or {}).pop(key, None)
+    except Exception:
+        pass
+
+
 def dedupe_read(state: dict, path: str, dial: float) -> "str | None":
     """Stub iff provably safe; None -> normal read. A wrong 'already in
     your context' is worse than a wasted re-read, so every condition
