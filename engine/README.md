@@ -10,7 +10,7 @@ makes Mesh Code installable on a machine with no Python at all.
 
 ```bash
 pip install -e ".[test]"
-python -m pytest          # 26 tests, run against a local SSE gateway
+python -m pytest          # runs against a local fake gateway, no network
 python -m meshharness     # start the engine; prints {ready, port, token}
 ```
 

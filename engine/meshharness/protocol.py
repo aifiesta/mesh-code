@@ -38,12 +38,13 @@ class Event:
     """engine -> frontend."""
 
     # ---- lifecycle
+    ENGINE_READY = "engine.ready"    # first frame on a new socket: sessions, settings, catalog
+    KEY_RESULT = "key.result"        # outcome of save.key / clear.key
     SESSION_STARTED = "session.started"
     HISTORY = "history"              # replay of a session's conversation for the UI
     CHAT_CLEARED = "chat.cleared"    # the session's conversation was reset
     JOURNAL = "journal"              # the project journal markdown
     SESSION_CLOSED = "session.closed"
-    WORKSPACE_CHANGED = "workspace.changed"
 
     # ---- one user prompt and everything it causes
     TURN_STARTED = "turn.started"
@@ -105,7 +106,6 @@ class Request:
     OPEN_WORKSPACE = "open.workspace"
     ADD_FOLDER = "add.folder"        # another browsable root, same window
     REMOVE_FOLDER = "remove.folder"
-    SET_ACTIVE_FOLDER = "set.active.folder"  # which root the AGENT works in
     NEW_SESSION = "new.session"
     NEW_CHAT = "new.chat"            # reset THIS session's conversation (keeps servers)
     GET_HISTORY = "get.history"      # ask for a replayable conversation history

@@ -1,6 +1,7 @@
 """Transport tests: the socket's gates, and a full turn over the wire."""
 import json
 import os
+import sys
 
 import pytest
 from fake_gateway import sse_turn
@@ -428,6 +429,7 @@ def test_browsing_an_unopened_folder_is_refused(app_client, tmp_path):
 
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell / symlink semantics")
 def test_user_terminal_runs_commands_and_keeps_its_cwd(app_client, tmp_path):
     """The user's own shell — no agent, no approval. A persistent process, so
     `cd` survives between commands the way a real terminal does."""

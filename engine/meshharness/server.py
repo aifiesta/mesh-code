@@ -460,7 +460,7 @@ def create_app(engine: Engine, ui_dir: Path | None = None) -> FastAPI:
         await ws.accept()
         engine.clients.add(ws)
         await ws.send_text(json.dumps(event(
-            "engine.ready",
+            Event.ENGINE_READY,
             sessions=[s.describe() for s in engine.sessions.values()],
             has_key=bool(engine.cfg.get("api_key")),
             settings=settings_mod.describe(engine.cfg),
@@ -539,7 +539,7 @@ async def handle_request(engine: Engine, msg: dict) -> None:
                 for sess in engine.sessions.values():
                     sess.cfg["api_key"] = key
                 await engine.catalog()
-            engine.emit(event("key.result", None, ok=ok, detail=detail,
+            engine.emit(event(Event.KEY_RESULT, None, ok=ok, detail=detail,
                               profile=engine.profile()))
             return
 
@@ -552,7 +552,7 @@ async def handle_request(engine: Engine, msg: dict) -> None:
             try:
                 config_mod.CREDENTIALS_FILE.unlink(missing_ok=True)
             except OSError as e:
-                engine.emit(event("key.result", None, ok=False,
+                engine.emit(event(Event.KEY_RESULT, None, ok=False,
                                   detail=f"could not remove the stored key ({e})"))
                 return
             cli_key = config_mod._load_cli_api_key()
@@ -564,7 +564,7 @@ async def handle_request(engine: Engine, msg: dict) -> None:
                              "signed in, so that key is now in use.")
             engine._catalog = None
             engine._catalog_retry_after = 0.0
-            engine.emit(event("key.result", None, ok=bool(cli_key),
+            engine.emit(event(Event.KEY_RESULT, None, ok=bool(cli_key),
                               detail=fell_back or "Signed out.",
                               cleared=True, profile=engine.profile()))
             return
