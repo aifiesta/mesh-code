@@ -57,6 +57,20 @@
  },
  {
   "engine": "before",
+  "run": "before-2-server-run4",
+  "case": "2-server",
+  "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+  "steps": 5,
+  "tokens": 24341,
+  "cost": 0.001297,
+  "seconds": 389.44,
+  "step_1_tokens": 3898,
+  "made_a_plan": false,
+  "tool_calls": 9,
+  "check": "VERDICT case 2: 10 of 10 checks passed"
+ },
+ {
+  "engine": "before",
   "run": "before-3-shell-memory",
   "case": "3-shell-memory",
   "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
@@ -124,6 +138,20 @@
   "made_a_plan": true,
   "tool_calls": 11,
   "check": "VERDICT case 2: 10 of 10 checks passed"
+ },
+ {
+  "engine": "after",
+  "run": "after-2-server-run4",
+  "case": "2-server",
+  "model": null,
+  "steps": null,
+  "tokens": null,
+  "cost": null,
+  "seconds": null,
+  "step_1_tokens": 3593,
+  "made_a_plan": false,
+  "tool_calls": 10,
+  "check": "VERDICT case 2: 8 of 10 checks passed"
  },
  {
   "engine": "after",

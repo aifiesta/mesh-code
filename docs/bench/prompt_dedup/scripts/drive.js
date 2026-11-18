@@ -12,10 +12,14 @@ const { chromium } = require('/Users/asjadahmad/.npm/_npx/e41f203b7505f1fb/node_
 const { makeVideo } = require('./video.js')
 const ROOT = path.resolve(__dirname, '..')
 const [ENGINE, N, FRAMES_ROOT, REP] = process.argv.slice(2)
-if (!['before', 'after'].includes(ENGINE)) throw new Error('first argument: before or after')
+if (!['before', 'after', 'diagnosis'].includes(ENGINE)) throw new Error('first argument: before, after or diagnosis')
+// diagnosis: a third window (debug port 9350) whose engine takes its prompt from files, so one window can
+// run any prompt variant. VARIANT=name picks the folder under diagnosis/variants/.
+const VARIANT = ENGINE === 'diagnosis' ? process.env.VARIANT : null
+if (ENGINE === 'diagnosis' && !VARIANT) throw new Error('diagnosis needs VARIANT=name')
 const task = JSON.parse(fs.readFileSync(path.join(ROOT, 'prompts.json'), 'utf8'))[Number(N) - 1]
-const PORT = ENGINE === 'before' ? 9347 : 9349
-const PNAME = ENGINE + '-' + task.name + (REP ? '-run' + REP : '')      // REPEAT 2, 3...: the same prompt again in a fresh copy of the project
+const PORT = ENGINE === 'before' ? 9347 : ENGINE === 'after' ? 9349 : 9350
+const PNAME = (VARIANT || ENGINE) + '-' + task.name + (REP ? '-run' + REP : '')      // REPEAT 2, 3...: the same prompt again in a fresh copy of the project
 const PROJECT = path.join(ROOT, ENGINE, 'projects', PNAME)
 const OUT = path.join(ROOT, ENGINE, 'runs', PNAME)
 const CAP = 0.10                                   // dollars; the run is stopped above this
@@ -61,6 +65,10 @@ const hide = s => String(s).replace(/token=[^&\s"']+/g, 'token=[hidden]').replac
   })
   await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 70, maxWidth: 1280, maxHeight: 880, everyNthFrame: 1 })
 
+  if (!fs.existsSync(PROJECT)) fs.cpSync(path.join(ROOT, '0-projects-before', task.name), PROJECT, { recursive: true })
+  if (VARIANT) {                       // the engine reads these two files when the chat starts
+    for (const f of ['prompt.txt', 'remember.txt']) fs.copyFileSync(path.join(ROOT, 'diagnosis', 'variants', VARIANT, f), path.join(ROOT, 'diagnosis', 'override', f))
+  }
   // open the project (the same request File > Open Project sends); the window focuses it
   let mark = events.length
   send({ type: 'open.workspace', workspace: PROJECT, mode: 'default' })
@@ -69,7 +77,7 @@ const hide = s => String(s).replace(/token=[^&\s"']+/g, 'token=[hidden]').replac
   const sid = started.session
   await sleep(1500)
 
-  const summary = { engine: ENGINE, n: task.n, name: PNAME, kind: task.kind, prompt: task.prompt, session: sid, project: PROJECT }
+  const summary = { engine: ENGINE, variant: VARIANT, n: task.n, name: PNAME, kind: task.kind, prompt: task.prompt, session: sid, project: PROJECT }
   // the user may be clicking around in the same window, so check where it is before acting in it
   const onThisChat = async () => (await page.getByText('projects/' + PNAME).count()) > 0
   const focusChat = async () => {

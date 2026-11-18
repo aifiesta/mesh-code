@@ -45,30 +45,61 @@ earlier the same day on the same engine (see
    - the reset command had `--yes` on the first try; the 130 s command was given
      a longer limit on the first try (400 s before, 300 s after); nothing timed out;
    - the lasting preference was saved once, as one sentence.
-3. **A side effect: after the change the model plans on small tasks, and before it
-   did not.** 4 of 4 "after" runs of the two edge cases made a plan; 0 of 4 "before"
-   runs did. In the server case that adds 3 to 4 steps, two of which do nothing but
-   plan bookkeeping (a step that only creates the plan, a step that only ticks the
-   last item). Averages for the server case: 6 → 9.3 steps, 29,788 → 46,941 tokens
-   (+58%), $0.001324 → $0.001609 (+22%).
-   - The prompt's plan rule says to plan for anything over about 3 tool calls, so
-     the "after" behaviour is what the prompt asks for; the "before" engine was
-     skipping it. But on a short task it costs more than the trim saves.
-   - Why it happens was not tested. My guess: with less text around it, the plan
-     rule carries more weight, and the sentence that is now last in the prompt is
-     about the plan.
+3. **CORRECTED. The first six runs looked like a side effect: the changed engine made
+   a plan on small tasks and the old one did not (4 of 4 against 0 of 4). That was
+   chance, not the change.** See "Diagnosis" below: over 26 runs of the server case
+   the model planned about half the time whichever prompt it got.
 4. **On the normal task the totals moved the other way** (18 → 14 steps, −21% tokens,
-   −15% cost), but that is one run each and the gap is mostly the step count, not
-   the trim. Both engines planned here.
+   −15% cost), but that is one run each and the gap is the step count, not the trim.
 5. **In dollars the trim alone is tiny on this model**: about 305 tokens × steps at
-   the cached price. The plan side effect is larger than it in both directions.
+   the cached price. Whether the model happens to plan moves the bill far more than
+   the trim does.
+
+## Diagnosis: does the trim make the model plan? No.
+
+A third window was started whose engine takes its prompt from files, so the same
+window could run the old prompt, the new prompt, and the old prompt with only one of
+the three removals. The old and new variants were checked to be byte-identical to
+what the two real engines send. All runs are the server case (case 2).
+
+| Prompt | Runs | Made a plan | Average steps | Average tokens | Average billed |
+|---|---|---|---|---|---|
+| Old (first window 4 runs, variant window 6) | 10 | 4 | 7.0 | 35,663 | $0.001493 |
+| New (second window 4 runs, variant window 6) | 10 | 5 | 8.1 | 39,942 | $0.001484 |
+| Old with only the memory paragraph removed | 2 | 1 | | | |
+| Old with only the shell paragraph removed | 2 | 1 | | | |
+| Old with only the servers paragraph cut | 2 | 1 | | | |
+
+- **Cause: chance.** The model makes a plan for this task about half the time on any
+  of the prompts (12 of 26). The old prompt planned in 4 of 6 runs in the variant
+  window. The first three pairs happened to fall 0 of 3 against 3 of 3.
+- **Nothing in the trim needs fixing**, so the engine change is unchanged (`ed6e5f6`).
+- **What a plan costs on a small task, on either prompt:** 6.2 → 9.4 steps,
+  30,258 → 48,642 tokens, $0.00139 → $0.00161. Two of the added steps do nothing but
+  plan bookkeeping (one that only creates the plan, one that only ticks the last
+  item), which the prompt already tells the model not to do. This existed before the
+  change and belongs to the plan rule, not to this piece.
+- **Not explained:** the first window never planned (0 of 4) although the same prompt
+  planned 4 of 6 times in the variant window. Not chased.
+- **Rules still followed:** all 26 runs started the server with the server tool. One
+  run ran a file check (`grep`) after the server had started: the old prompt with the
+  servers paragraph cut, 1 of its 2 runs. The 10 runs on the new prompt and the 10
+  on the old prompt ran nothing after the start.
+- **The test script hung once.** In the last pair (run 4 in the first two windows)
+  the script stopped answering; one chat waited about 12 minutes on its server
+  dialog until it was approved by hand. Those two runs' times are meaningless; their
+  steps, tokens and cost are real. A fifth pair was not run.
+- Billed for the diagnosis: $0.030. With the first test: $0.046 in total.
+
+Every run: `diagnosis/server-case-all-runs.json`, printed by `scripts/plan_table.py`.
+Variant prompts: `diagnosis/variants/`. Chats: the third test window, projects named
+`old-…`, `new-…`, `only-…`.
 
 ## Not tested
 
 - Other models (Seed 1.6 Flash, GPT-6.1 Sol, Claude). Only the model Smart routing
   picked was run.
 - Cases 1 and 3 were run once per engine.
-- Which of the three removals causes the extra planning.
 
 ## Where things are
 
@@ -82,6 +113,8 @@ earlier the same day on the same engine (see
 - `settings-before-the-test.json`: saved settings before the test; they are
   byte-identical after it.
 - The chats are in Mesh Code: "before-…" projects in the window on the older engine,
-  "after-…" projects in the window started for this test. Both windows are still
-  open. The test servers started in case 2 are still running (ports 5173, 5174,
-  5175, 5176, 8000, 8080 as picked by the runs).
+  "after-…" projects in the window started for this test, the diagnosis projects in
+  a third one. All are still open.
+- Every server-case run left its small test server running (about 27 of them, each a
+  `python3 -m http.server` serving one test project). They stop when stopped in the
+  app or when their window is closed.
