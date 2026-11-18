@@ -708,7 +708,8 @@ def test_new_chat_resets_conversation_but_keeps_the_project(gateway, harness):
     assert before > 1
 
     assert h.session.new_chat() is True
-    assert len(h.session.state["messages"]) == 1, "only the system prompt remains"
+    assert [m["role"] for m in h.session.state["messages"]] == ["system", "system"], \
+        "only the system prompt remains (its stable and per-project messages)"
     assert any(e["type"] == Event.CHAT_CLEARED for e in h.events)
 
     h.session.submit("again")
@@ -737,9 +738,10 @@ def test_journal_records_turns_and_feeds_the_next_session(gateway, harness, tmp_
 
     gateway.script(sse_turn("ok"))
     h = harness(repo_memory=True)   # same tmp_path workspace
-    system = h.session.state["messages"][0]["content"]
-    assert "PROJECT JOURNAL" in system
-    assert "npm run dev" in system, "the next session must open knowing how to run it"
+    stable, project = (m["content"] for m in h.session.state["messages"][:2])
+    assert "PROJECT JOURNAL" in project
+    assert "npm run dev" in project, "the next session must open knowing how to run it"
+    assert "PROJECT JOURNAL" not in stable, "per-project text never goes in the cached opening"
 
 
 def test_session_cost_and_tokens_survive_the_full_persistence_chain(gateway, harness):

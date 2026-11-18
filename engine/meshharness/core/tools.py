@@ -14,23 +14,35 @@ import httpx
 BASH_TIMEOUT = 120  # seconds — matches Claude Code's default
 
 
-def build_system_prompt(cfg: dict, cwd: "str | Path | None" = None) -> str:
-    """Append working-dir + tool guidance to the user's base system prompt.
+# The system prompt is sent as TWO system messages, and the order matters for
+# money. Providers that cache by themselves (DeepSeek does) bill a request's
+# opening at a few percent of the normal price when an earlier request began
+# with the same text. The first step of a chat has no earlier request of its
+# own, so it can only match another chat's — and with the working directory
+# on line two of the prompt, no two projects ever began alike: that step was
+# billed in full, 44% of a small task's bill. So:
+#
+#   message 1  stable_system_prompt   identical for every chat and project
+#              (the tool definitions follow it in the provider's own layout)
+#   message 2  project_system_prompt  the working directory, repo memory, the
+#              journal, the output style — everything that differs
+#
+# Measured live: another project's first step went from 0 to 3,200 of 3,389
+# input tokens cached, $0.00048 to $0.00004. Nothing that varies by project,
+# chat or day may be added to message 1.
+
+
+def stable_system_prompt(cfg: dict) -> str:
+    """The part of the system prompt that is the same for every chat: the
+    user's base prompt and the engine's standing rules.
 
     Naming tools in prose (read_file/write_file/run_bash) makes Anthropic
     models drop into XML tool-use mode and emit `<function_calls>` as
     text — keep this section deliberately tool-name-free.
     """
     base = cfg.get("system") or ""
-    cwd = str(Path(cwd).expanduser().resolve()) if cwd else str(Path.cwd())
-    prompt = (
+    return (
         f"{base}\n\n"
-        f"Working directory: {cwd}\n"
-        "Resolve any relative path the user gives against this working "
-        "directory. When you create or edit files without an explicit "
-        "absolute path, place them inside this working directory. Use "
-        "the available tools to inspect and modify the filesystem and "
-        "run shell commands — do not ask the user to run commands.\n\n"
         "ASK WHEN GENUINELY FORKED. If a request has two or more "
         "defensible interpretations that would lead to materially different "
         "work — which stack, which of several designs, how big a scope — "
@@ -112,6 +124,22 @@ def build_system_prompt(cfg: dict, cwd: "str | Path | None" = None) -> str:
         "`timeout` doesn't exist on macOS and backgrounding via shell loses "
         "output capture."
     )
+
+
+def project_system_prompt(cfg: dict, cwd: "str | Path | None" = None,
+                          extra: str = "") -> str:
+    """The part of the system prompt that belongs to ONE project and chat:
+    where the work happens, what earlier sessions left behind (`extra` is the
+    project journal), and how the user wants replies written."""
+    cwd = str(Path(cwd).expanduser().resolve()) if cwd else str(Path.cwd())
+    prompt = (
+        f"Working directory: {cwd}\n"
+        "Resolve any relative path the user gives against this working "
+        "directory. When you create or edit files without an explicit "
+        "absolute path, place them inside this working directory. Use "
+        "the available tools to inspect and modify the filesystem and "
+        "run shell commands — do not ask the user to run commands."
+    )
     # Warm start: REPO MEMORY block from previous sessions in this cwd
     # (best-effort — a memory bug must never break session start).
     try:
@@ -122,6 +150,7 @@ def build_system_prompt(cfg: dict, cwd: "str | Path | None" = None) -> str:
     except Exception:
         block = ""
     prompt = prompt + (("\n\n" + block) if block else "")
+    prompt = prompt + (("\n\n" + extra) if extra else "")
     # Output style LAST: it is an instruction about prose, and recency wins
     # on cheap models (the same reason the stub-guard nudge rides last).
     try:
@@ -130,6 +159,22 @@ def build_system_prompt(cfg: dict, cwd: "str | Path | None" = None) -> str:
     except Exception:
         style = ""
     return prompt + (("\n\n" + style) if style else "")
+
+
+def build_system_messages(cfg: dict, cwd: "str | Path | None" = None,
+                          extra: str = "") -> list:
+    """The two system messages a chat starts with: stable first."""
+    return [
+        {"role": "system", "content": stable_system_prompt(cfg)},
+        {"role": "system", "content": project_system_prompt(cfg, cwd, extra)},
+    ]
+
+
+def build_system_prompt(cfg: dict, cwd: "str | Path | None" = None) -> str:
+    """Both parts as one text, stable part first. For callers that want to
+    read the whole prompt; the engine sends build_system_messages."""
+    return stable_system_prompt(cfg) + "\n\n" + project_system_prompt(cfg, cwd)
+
 
 # OpenAI-compatible tool spec — Mesh API forwards these to the underlying provider.
 TOOLS = [

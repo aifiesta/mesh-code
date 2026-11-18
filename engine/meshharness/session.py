@@ -46,7 +46,7 @@ from .core.client import (complete_chat, nearest_level, reasoning_refusal,
                           stream_chat)
 from .core.permissions import AUTO_APPROVE, Mode
 from .core.plan import Plan
-from .core.tools import TOOLS, build_system_prompt, find_stub_markers, summarize_call
+from .core.tools import TOOLS, build_system_messages, find_stub_markers, summarize_call
 from .terminal import Terminal
 from .protocol import Decision, Event, event
 
@@ -198,23 +198,20 @@ class Session:
     # ------------------------------------------------------------------
     # public API — called from the transport thread
     # ------------------------------------------------------------------
-    def _system_prompt(self) -> str:
-        prompt = build_system_prompt(self.cfg, cwd=self.workspace)
+    def _system_messages(self) -> list:
+        """What a chat starts with: the stable system message, then this
+        project's (see core.tools for why there are two)."""
         # The project journal rides in the system prompt so even a fresh
         # session (or a small model) opens knowing how this project runs
         # and what is already built — instead of rediscovering it by
         # re-doing it. Gated by the same privacy toggle as repo memory.
+        block = ""
         if self.cfg.get("repo_memory", True):
-            block = journal.prompt_block(self.workspace)
-            if block:
-                prompt += "\n\n" + block
-        return prompt
+            block = journal.prompt_block(self.workspace) or ""
+        return build_system_messages(self.cfg, cwd=self.workspace, extra=block)
 
     def start(self) -> None:
-        self.state["messages"] = [{
-            "role": "system",
-            "content": self._system_prompt(),
-        }]
+        self.state["messages"] = self._system_messages()
         self.emit(
             Event.SESSION_STARTED,
             workspace=str(self.workspace),
@@ -262,7 +259,7 @@ class Session:
                 append_transcript(self.id, old)
         except Exception:
             pass
-        self.state["messages"] = [{"role": "system", "content": self._system_prompt()}]
+        self.state["messages"] = self._system_messages()
         self.chat_label = ""
         self.state["plan"] = None
         self.state["session_reads"] = {}
@@ -323,7 +320,7 @@ class Session:
         if msgs:
             s.state["messages"] = msgs
         else:
-            s.state["messages"] = [{"role": "system", "content": s._system_prompt()}]
+            s.state["messages"] = s._system_messages()
         try:
             if data.get("plan"):
                 s.state["plan"] = Plan.from_dict(data["plan"])
