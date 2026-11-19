@@ -12,8 +12,8 @@ Next session in the same directory starts warm: build_system_prompt appends
 a token-capped REPO MEMORY block (notes + file map). The `remember` tool
 lets the model persist durable decisions. dedupe_read() answers repeat
 reads of unchanged files with a short stub instead of re-sending the body —
-correct by construction against optimize.py's pruning lever (see
-optimize.survives_pruning; a wrong "already in your context" would gaslight
+correct by construction against anything in optimize.py that shortens a
+message (nothing does today; see optimize.survives_pruning; a wrong "already in your context" would gaslight
 the model, so every check fails toward a normal read).
 
 Everything here is best-effort: a memory bug must never break a write, a
@@ -417,8 +417,9 @@ def dedupe_read(state: dict, path: str, dial: float) -> "str | None":
         # the belt-and-braces bound check).
         if entry["msg_index"] >= len(state.get("messages") or ()):
             return None
-        # Optimize-pruning contract: writes ride in assistant messages
-        # (never pruned); reads must survive the lever at the CURRENT dial.
+        # Optimize contract: a read must still be whole on the wire at the
+        # CURRENT dial. Nothing shortens tool results today, so this always
+        # holds; it is asked anyway so a future lever cannot make the stub lie.
         if entry["source"] != "write" and not survives_pruning(entry["chars"], dial):
             return None
         # Ground truth: the file on disk is byte-identical right now.

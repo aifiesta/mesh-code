@@ -9,7 +9,17 @@ implementation (https://github.com/raushan-aifiesta/mesh-optimize):
 
   dial 0+    cache_control breakpoint injection on stable prefixes,
              max_tokens defaults per task class
-  dial 0.2+  pruning of tool results the model already consumed
+
+Every value above 0 does the same thing. The reference implementation also
+cut old tool results to 400 characters on every request from dial 0.2 up.
+That lever was removed on 19 November 2026 (docs/bench/caching_pruning):
+
+  - It changed text the provider had already cached, on every step, so the
+    cache was not read. Bills went UP: 8 to 9% on DeepSeek with 23% fewer
+    tokens sent, 65% on Claude Haiku 5.5.
+  - It kept only the last 4 messages whole, so when a model read five or
+    more files in one step the first ones were cut before the model had
+    seen them, and it read them all again.
 
 Hard rules carried over from the reference implementation:
   - deterministic: same input always produces the same output
@@ -18,7 +28,6 @@ Hard rules carried over from the reference implementation:
   - the original message list is never mutated
 """
 import copy
-import hashlib
 import json
 import re
 
@@ -32,25 +41,21 @@ _CACHE_MINIMUMS = [
 ]
 _DEFAULT_CACHE_MINIMUM = 2048
 
-_KEEP_RECENT_MESSAGES = 4
-_TRUNCATE_TO_CHARS = 400
-
 
 def survives_pruning(content_chars: int, dial: float) -> bool:
-    """True if a `role=="tool"` result of this size is NEVER truncated by
-    the tool_result_pruning lever in prepare() at this dial.
+    """True if a `role=="tool"` result of this size is NEVER shortened by
+    prepare() at this dial. Always true now: prepare() no longer shortens
+    anything (see the module note).
 
     LOAD-BEARING for memory.dedupe_read: the read-dedupe stub claims "the
-    content is already in your context", which is only honest if pruning
-    can't have removed it from the wire. This helper lives HERE, next to
-    the lever's constants, so a future change to _TRUNCATE_TO_CHARS /
-    _KEEP_RECENT_MESSAGES / the role filter forces revisiting it — see the
-    drift-guard unit test and the CLAUDE.md invariant note. The recency
-    window (_KEEP_RECENT_MESSAGES) deliberately provides no safety: a
-    fresh hop appends messages immediately, pushing any old read out of
-    the window within the same turn.
+    content is already in your context", which is only honest if nothing
+    removed it from the wire. This helper stays HERE, next to prepare(), so
+    that anyone who adds a lever that shortens or drops messages has to
+    come back and make it say so — see the guard test in
+    tests/test_no_per_step_cut.py.
     """
-    return dial < 0.2 or content_chars <= 2 * _TRUNCATE_TO_CHARS
+    return True
+
 
 _CODE_RE = re.compile(r"```|(?:\bfunction\b|\bclass\b|\bimport\b|\bdef\b)\s")
 _COMPLEX_RE = re.compile(
@@ -136,40 +141,8 @@ def prepare(messages: list, model: str, dial: float, has_tools: bool) -> tuple:
     out = copy.deepcopy(messages)
     plan["classification"] = _classify(out, has_tools)
 
-    # lever: tool result pruning (dial 0.2+). Old tool outputs were already
-    # consumed by the model in the turn they answered; the full payload is
-    # dead weight on every later request.
-    if dial >= 0.2:
-        cutoff = len(out) - _KEEP_RECENT_MESSAGES
-        chars_removed = 0
-        for i in range(max(cutoff, 0)):
-            message = out[i]
-            content = message.get("content")
-            if (
-                message.get("role") == "tool"
-                and isinstance(content, str)
-                and len(content) > _TRUNCATE_TO_CHARS * 2
-            ):
-                digest = hashlib.sha256(content.encode()).hexdigest()
-                truncated = (
-                    content[:_TRUNCATE_TO_CHARS]
-                    + f"\n[mesh: pruned {len(content) - _TRUNCATE_TO_CHARS} chars "
-                    "of consumed tool output]"
-                )
-                message["content"] = truncated
-                chars_removed += len(content) - len(truncated)
-                plan["audit"].append({
-                    "lever": "tool_result_pruning",
-                    "action": f"truncated tool result at message {i}",
-                    "content_sha256": digest,
-                })
-        if chars_removed:
-            plan["tokens_pruned_est"] = -(-chars_removed // 4)
-            plan["levers_applied"].append("tool_result_pruning")
-
     # lever: cache_control injection (dial 0+). Skips entirely when the
-    # client placed its own breakpoints. Runs after pruning so breakpoints
-    # land on the final bytes.
+    # client placed its own breakpoints.
     if not _has_client_breakpoints(out):
         minimum = _cache_minimum(model)
         applied = False

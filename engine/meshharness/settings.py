@@ -143,8 +143,8 @@ SCHEMA: list[dict] = [
         "default": 0.0,
         "min": 0.0, "max": 0.95, "step": 0.05,
         "beta": True,
-        "help": "How aggressively to trim what gets re-sent each turn.",
-        "why": "Cuts spend on long sessions. Higher values prune more context, so raise it gradually and watch quality.",
+        "help": "Above 0, limits how long one reply can be. It no longer trims the conversation.",
+        "why": "Every value above 0 does the same. Trimming old tool results on every step was removed: it stopped providers reusing their cache, so bills went up, and it could hide a file the model had not read yet.",
     },
     {
         "key": "system",
