@@ -1,0 +1,18 @@
+[
+ {
+  "name": "small",
+  "project": "/Users/asjadahmad/Desktop/mesh-code-prompt-dedup/piece-5-cache-first-step/0-projects-before/small",
+  "prompt": "The tests in tests/test_price.py are failing. Find what is wrong in shop/price.py, fix it, and run the tests to confirm they pass.",
+  "expect_model": "deepseek-v4.1-flash-1017",
+  "cap": 0.08,
+  "max_minutes": 6
+ },
+ {
+  "name": "standard",
+  "project": "/Users/asjadahmad/Desktop/mesh-code-prompt-dedup/piece-5-cache-first-step/0-projects-before/standard",
+  "prompt": "Add coupon codes to the shop. Add apply_coupon(amount, code) to shop/price.py: SAVE10 takes 10% off, FLAT5 takes 5.00 off but never below zero, and any other code raises ValueError. Update place_order in shop/orders.py to take an optional coupon keyword argument, applied to the subtotal before tax. Write tests for both and run the full test suite.",
+  "expect_model": "deepseek-v4.1-flash-1017",
+  "cap": 0.12,
+  "max_minutes": 8
+ }
+]

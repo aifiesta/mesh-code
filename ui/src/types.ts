@@ -121,7 +121,7 @@ export type Msg =
   | { kind: 'assistant'; id: string; text: string; streaming?: boolean; model?: string }
   | { kind: 'tool'; id: string; card: ToolCard }
   | { kind: 'notice'; id: string; level: string; text: string; detail?: any }
-  | { kind: 'turn'; id: string; cost: number; tokens: number; elapsed: number; model: string; hops: number; estimated?: boolean }
+  | { kind: 'turn'; id: string; cost: number; tokens: number; elapsed: number; model: string; hops: number; estimated?: boolean; bill?: Bill | null }
   | { kind: 'server'; id: string; url: string; pid: number; port: number; cmd: string; stopped?: boolean }
   | { kind: 'plan'; id: string; plan: Plan }
   | { kind: 'ask'; id: string; ask: Ask; answered?: string[] }
@@ -148,8 +148,44 @@ export type Status = {
   turn_cost?: number
   turn_tokens?: number
   turn_estimated?: boolean
+  /** Where the turn in flight, and the session so far, spent tokens and money. */
+  turn_bill?: Bill | null
+  session_bill?: Bill | null
   servers: { pid: number; port: number; url: string; cmd: string }[]
 }
+
+/** Where a bill went. Cached and cache-written input are billed apart from
+ *  fresh input; thinking is a share of output, never added on top of it.
+ *  `estimated` means the split was worked out from catalog prices because
+ *  the gateway sent no breakdown. */
+export type Bill = {
+  fresh_tokens: number; cached_tokens: number; cache_write_tokens: number
+  output_tokens: number; thinking_tokens: number
+  fresh_usd: number; cached_usd: number; cache_write_usd: number
+  output_usd: number; thinking_usd: number; other_usd: number
+  estimated: boolean
+}
+
+const BILL_NUMBERS = ['fresh_tokens', 'cached_tokens', 'cache_write_tokens', 'output_tokens',
+  'thinking_tokens', 'fresh_usd', 'cached_usd', 'cache_write_usd', 'output_usd',
+  'thinking_usd', 'other_usd'] as const
+
+export function addBills(a?: Bill | null, b?: Bill | null): Bill | null {
+  if (!a) return b ?? null
+  if (!b) return a
+  const out = { ...a, estimated: a.estimated || b.estimated }
+  for (const k of BILL_NUMBERS) out[k] = (a[k] ?? 0) + (b[k] ?? 0)
+  return out
+}
+
+/** Dollars in a bill. Thinking is inside output, so it is not added. */
+export const billTotal = (b: Bill) =>
+  (b.fresh_usd ?? 0) + (b.cached_usd ?? 0) + (b.cache_write_usd ?? 0) + (b.output_usd ?? 0) + (b.other_usd ?? 0)
+
+/** Parts of a bill are often fractions of a cent: keep enough digits to see them. */
+export const fmtSmallUsd = (n: number) =>
+  !n ? '$0' : n >= 1 ? '$' + n.toFixed(2) : n >= 0.01 ? '$' + n.toFixed(3)
+    : n >= 0.0001 ? '$' + n.toFixed(4) : '$' + n.toFixed(6)
 
 /** "75,512 tok" is wider than the pill; "75.5k" is not. */
 export function fmtTokens(n: number): string {

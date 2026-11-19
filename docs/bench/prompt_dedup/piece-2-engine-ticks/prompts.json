@@ -1,0 +1,25 @@
+[
+ {
+  "name": "server",
+  "project": "/Users/asjadahmad/Desktop/mesh-code-prompt-dedup/piece-2-engine-ticks/0-projects-before/server",
+  "prompt": "Add an about.html page with a short paragraph about the club, and link it in the nav on every page. Then start a local server so I can look at the site.",
+  "cap": 0.05,
+  "max_minutes": 6
+ },
+ {
+  "name": "standard",
+  "project": "/Users/asjadahmad/Desktop/mesh-code-prompt-dedup/piece-2-engine-ticks/0-projects-before/standard",
+  "prompt": "Add coupon codes to the shop. Add apply_coupon(amount, code) to shop/price.py: SAVE10 takes 10% off, FLAT5 takes 5.00 off but never below zero, and any other code raises ValueError. Update place_order in shop/orders.py to take an optional coupon keyword argument, applied to the subtotal before tax. Write tests for both and run the full test suite.",
+  "cap": 0.1,
+  "max_minutes": 8
+ },
+ {
+  "name": "complex",
+  "project": "/Users/asjadahmad/Desktop/mesh-code-prompt-dedup/piece-2-engine-ticks/0-projects-before/complex",
+  "prompt": "Two things are wrong in this shop and nobody knows why. After some cancelled orders the stock of an item ends up lower than it should be. And on days with cancellations the revenue in the daily report is higher than the placed orders add up to. The existing tests all pass. Investigate, find the root causes, fix them, add regression tests that would have caught them, and run the full test suite.",
+  "effort": "xhigh",
+  "expect_model": "gpt-6.1-sol",
+  "cap": 0.6,
+  "max_minutes": 10
+ }
+]

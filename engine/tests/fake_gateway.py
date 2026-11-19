@@ -56,6 +56,9 @@ class FakeGateway:
         # care get a 404 and the engine falls through to the SSE `cost`
         # tail / catalog estimate, exactly as it does when offline.
         self.request_costs: dict[str, float] = {}
+        # The whole billing record for a request id, when a test wants the
+        # gateway's per-line breakdown too (takes precedence over the above).
+        self.request_events: dict[str, dict] = {}
         self._lock = threading.Lock()
         outer = self
 
@@ -71,12 +74,14 @@ class FakeGateway:
                     rid = self.path.rsplit("/", 1)[-1]
                     with outer._lock:
                         cost = outer.request_costs.get(rid)
-                    if cost is None:
+                        event = outer.request_events.get(rid)
+                    if cost is None and event is None:
                         self.send_error(404)
                         return
                     body = json.dumps({
                         "request_id": rid, "outcome": "success",
-                        "event": {"request_id": rid,
+                        "event": dict(event, request_id=rid) if event else
+                                 {"request_id": rid,
                                   "cost_usd": f"{cost:.8f}"}}).encode()
                     self.send_response(200)
                     self.send_header("content-type", "application/json")

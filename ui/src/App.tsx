@@ -6,6 +6,7 @@ import { MODES, Req, shortPath, type Mode, type Profile } from './types'
 import { ApprovalDialog } from './components/ApprovalDialog'
 import { CommandPalette, type Action } from './components/CommandPalette'
 import { ControlBar } from './components/ControlBar'
+import { BillLine } from './components/BillSplit'
 import { SettingsSheet } from './components/SettingsSheet'
 import { Wordmark } from './components/Logo'
 import { PlanCard } from './components/PlanCard'
@@ -735,6 +736,7 @@ function SessionView({ s, controls, profile, railOpen, onRailResize, railResizin
                   <div className="turn-foot" key={m.id} id={`m-${m.id}`}>
                     {m.model} · {m.hops} hop{m.hops === 1 ? '' : 's'} · {m.tokens.toLocaleString()} tok ·
                     {' '}{m.estimated ? '~' : ''}${m.cost.toFixed(6)} · {m.elapsed.toFixed(1)}s
+                    <BillLine bill={m.bill} />
                   </div>
                 )
             }

@@ -437,7 +437,7 @@ export function reduce(state: AppState, action: Action): AppState {
         // visible in the flow of the conversation the way it was in the
         // CLI. A REVISED plan (different step titles) gets its own card;
         // a status change patches the card already there, rather than
-        // spamming a new checklist on every update_step.
+        // spamming a new checklist on every tick.
         const plan = d as Plan
         const titles = plan.steps.map((x) => x.title).join('\u0000')
         const idx = lastIndex(s.messages, (m) => m.kind === 'plan')
@@ -587,18 +587,22 @@ export function reduce(state: AppState, action: Action): AppState {
           // Carry the estimate flag onto the permanent record so a computed
           // cost is shown as ~ here too, not just in the live bar.
           estimated: !!d.cost_estimated,
+          bill: d.bill ?? null,
         }]
-        // The plan is the model's OWN bookkeeping, kept by calling
-        // update_step. It can finish the work and simply stop ticking the
-        // steps — which leaves the panel reading "2/8" next to a run that
-        // actually did all eight, with nothing on screen explaining the gap.
+        // The engine ticks the plan from the step number the model puts on
+        // its tool calls. A model can do the work and never say which step
+        // it was on — which leaves the panel reading "2/8" next to a run
+        // that actually did all eight, with nothing on screen explaining
+        // the gap.
         if (plan && !plan.complete && (plan.total ?? 0) > 0) {
           messages.push({
             kind: 'notice', id: nid(), level: 'warn',
             text: `Turn ended with the plan still at ${plan.done}/${plan.total}.`,
-            detail: 'The model stopped calling update_step, so the remaining '
-              + 'steps may well be done — the counter just was not updated. '
-              + 'Check the files, or ask it to finish the plan.',
+            detail: 'The checklist follows the step the model says it is '
+              + 'working on. It stopped before the last step, or did the '
+              + 'work without saying which step it was — so the remaining '
+              + 'steps may well be done. Check the files, or ask it to '
+              + 'finish the plan.',
           })
         }
         return { ...base, busy: false, stopping: false, progress: null, plan, messages }

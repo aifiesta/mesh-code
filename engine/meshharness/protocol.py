@@ -50,6 +50,7 @@ class Event:
     TURN_FINISHED = "turn.finished"
     TURN_ABORTED = "turn.aborted"
     HOP_STARTED = "hop.started"          # one model round trip within a turn
+    HOP_USAGE = "hop.usage"              # what that round trip used and cost, split by part
 
     # ---- assistant output
     ASSISTANT_DELTA = "assistant.delta"      # streamed token(s)
