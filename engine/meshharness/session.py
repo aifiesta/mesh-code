@@ -1065,8 +1065,13 @@ class Session:
         self.turn_model = info["model"]
 
     def _asks_for_caching(self) -> bool:
-        """Does this session mark its requests for caching? (The Optimize
-        setting does; without it Anthropic models bill every token in full.)"""
+        """Does the router price Anthropic models as cached? Only with the
+        Optimize setting on, as before, although caching.py now asks for
+        caching on every request to them. Pricing them as cached moves small
+        tasks from DeepSeek to Claude Haiku, and the measured bills do not
+        support that: the estimate leaves out the cache write price and
+        Claude's larger token counts (docs/bench/caching_pruning). Left as it
+        was until that is decided."""
         try:
             return float(self.cfg.get("optimize") or 0) > 0
         except (TypeError, ValueError):
