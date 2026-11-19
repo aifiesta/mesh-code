@@ -6,6 +6,7 @@ from typing import Iterable, Optional
 
 import httpx
 
+from . import caching
 from .optimize import prepare
 
 
@@ -267,11 +268,12 @@ def stream_chat(
       - `tool_calls` arrive as deltas indexed by position; we accumulate them
         and surface as the meta dict's `tool_calls` field.
 
-    When the `optimize` dial is set (BETA), the request is rewritten by the
-    phase 1 lever stack in optimize.py before sending, and the plan rides on
-    the final meta dict as `optimize_plan`. If the gateway rejects the
-    optimized request, we retry the raw request once, so the beta can never
-    be the reason a turn fails.
+    A model that only caches when asked gets the two cache marks (see
+    caching.py). When the `optimize` dial is set (BETA), the request is also
+    rewritten by the phase 1 lever stack in optimize.py before sending, and
+    the plan rides on the final meta dict as `optimize_plan`. If the gateway
+    rejects a request changed in either way, we retry the raw request once,
+    so neither can be the reason a turn fails.
     """
     url = f"{cfg['base_url']}/chat/completions"
     headers = {
@@ -285,16 +287,25 @@ def stream_chat(
 
     plan: dict = {}
     attempts = [payload]
+    # Cache marks, on a copy: the raw payload and the stored history never
+    # carry one. Not when the gateway picks the model ("auto"): which model
+    # will answer is not known here.
+    marked = messages
+    if caching.asked_for() and caching.needs_marks(payload["model"]):
+        marked = caching.mark(messages)
     dial = float(cfg.get("optimize") or 0)
     if dial > 0:
         # Pass the model string actually being sent ("auto" falls back to
-        # optimize's default cache-minimum heuristic — harmless).
+        # optimize's default cache-minimum heuristic — harmless). Marks set
+        # above count as the client's own, so prepare() adds none.
         opt_messages, extra, plan = prepare(
-            messages, payload["model"], dial, has_tools=bool(tools)
+            marked, payload["model"], dial, has_tools=bool(tools)
         )
         if plan.get("levers_applied"):
             optimized = {**payload, **extra, "messages": opt_messages}
             attempts = [optimized, payload]  # raw payload is the fallback
+    elif marked is not messages:
+        attempts = [{**payload, "messages": marked}, payload]
 
     # A caller-forced output budget wins over every other lever — it exists
     # because the gateway already rejected this request for asking too much
@@ -462,6 +473,8 @@ def complete_chat(messages: list, cfg: dict, tools: "Optional[list]" = None,
         "Authorization": f"Bearer {cfg['api_key']}",
         "Content-Type": "application/json",
     }
+    # Sent without cache marks on purpose: this is the last resort after
+    # streaming kept failing, and it has no second attempt to fall back to.
     payload = build_payload(_drop_empty_assistant(messages), cfg, tools)
     payload["stream"] = False
     if max_tokens:
