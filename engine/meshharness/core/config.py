@@ -77,9 +77,6 @@ DEFAULT_CONFIG = {
     # Mesh Optimize dial (BETA). 0 = off. 0 to 0.95: how aggressively to
     # cut token spend. See /optimize in the REPL and README for details.
     "optimize": 0.0,
-    # Ask for prompt caching on models that only cache when asked (Anthropic).
-    # Separate from the dial above; false switches it off (see caching.py).
-    "prompt_caching": True,
     # Agentic loop controls. max_hops 0 = unlimited (stall detection still
     # stops runaway loops); auto_compact keeps long turns under the model's
     # context limit; stall_policy "pause" ends the turn at the prompt after

@@ -43,10 +43,14 @@ def test_only_models_that_cache_when_asked_get_marks():
         assert not caching.needs_marks(model), model
 
 
-def test_it_is_on_unless_the_config_file_switches_it_off():
-    assert caching.asked_for({})
-    assert caching.asked_for({"prompt_caching": True})
-    assert not caching.asked_for({"prompt_caching": False})
+def test_it_is_on_unless_the_app_was_started_with_it_off(monkeypatch):
+    monkeypatch.delenv(caching.OFF_SWITCH, raising=False)
+    assert caching.asked_for()
+    for value in ("0", "false", "off"):
+        monkeypatch.setenv(caching.OFF_SWITCH, value)
+        assert not caching.asked_for(), value
+    monkeypatch.setenv(caching.OFF_SWITCH, "1")
+    assert caching.asked_for()
 
 
 # -- where the marks go --------------------------------------------------------
@@ -142,9 +146,10 @@ def test_the_gateways_own_pick_is_sent_without_marks(gateway):
     assert _marked(gateway.requests[0]["messages"]) == []
 
 
-def test_switched_off_in_the_config_file_sends_no_marks(gateway):
+def test_started_with_it_off_sends_no_marks(gateway, monkeypatch):
+    monkeypatch.setenv(caching.OFF_SWITCH, "0")
     gateway.script(sse_turn("ok", model=CLAUDE))
-    _send(gateway, _chat(), prompt_caching=False)
+    _send(gateway, _chat())
     assert _marked(gateway.requests[0]["messages"]) == []
 
 

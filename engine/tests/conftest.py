@@ -38,6 +38,8 @@ def isolate_config_home(tmp_path_factory, monkeypatch):
     # every test's repo-memory folder landing in the real ~/.mesh-code/context.
     from meshharness.core import memory as mem
     monkeypatch.setattr(mem, "CONFIG_DIR", home)
+    # A developer's shell may carry the caching off switch.
+    monkeypatch.delenv("MESH_CODE_PROMPT_CACHING", raising=False)
     yield home
 
 

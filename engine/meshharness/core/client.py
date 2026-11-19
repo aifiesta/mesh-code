@@ -291,7 +291,7 @@ def stream_chat(
     # carry one. Not when the gateway picks the model ("auto"): which model
     # will answer is not known here.
     marked = messages
-    if caching.asked_for(cfg) and caching.needs_marks(payload["model"]):
+    if caching.asked_for() and caching.needs_marks(payload["model"]):
         marked = caching.mark(messages)
     dial = float(cfg.get("optimize") or 0)
     if dial > 0:

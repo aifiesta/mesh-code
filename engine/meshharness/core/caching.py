@@ -24,7 +24,10 @@ This does not depend on the "Token savings" setting, and it never changes
 what the model is sent: only the two marks are added, on copies.
 """
 
+import os
+
 MARK = {"type": "ephemeral"}
+OFF_SWITCH = "MESH_CODE_PROMPT_CACHING"
 
 
 def needs_marks(model: str) -> bool:
@@ -32,10 +35,13 @@ def needs_marks(model: str) -> bool:
     return (model or "").lower().startswith("anthropic/")
 
 
-def asked_for(cfg: dict) -> bool:
-    """Is caching asked for in this session? On unless `prompt_caching` is
-    set to false in the config file (there is no switch for it in the app)."""
-    return cfg.get("prompt_caching", True) is not False
+def asked_for() -> bool:
+    """Is caching asked for? Always, unless the app was started with
+    MESH_CODE_PROMPT_CACHING=0. That is an escape hatch and the "before"
+    side of a live test, not a setting: there is no switch for it in the
+    app, and the config file is not used because a settings save rewrites
+    it with only the keys the app knows."""
+    return os.environ.get(OFF_SWITCH, "").strip().lower() not in ("0", "false", "off", "no")
 
 
 def _has_content(message: dict) -> bool:
