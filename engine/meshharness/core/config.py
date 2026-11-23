@@ -87,7 +87,9 @@ DEFAULT_CONFIG = {
     # Smart routing (local table-driven picker). route_mode: "off" (pin),
     # "auto" (gateway picks — mirrors auto_route), "smart" (local pick).
     # Weights steer smart picks along each cohort's efficiency frontier.
-    "route_mode": "off",
+    # On by default since 23 Nov 2026: the local model is a choice inside
+    # Smart routing, so with routing pinned nobody would ever reach it.
+    "route_mode": "smart",
     "route_weights": {"cost": 0.5, "cap": 0.3, "speed": 0.2},
     # Effort: "auto" detects prompt difficulty (low/mid/high) and tilts the
     # weights; low|medium|high|xhigh|max forces the tilt for every prompt.

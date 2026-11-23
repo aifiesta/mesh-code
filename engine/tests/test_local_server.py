@@ -206,3 +206,31 @@ def test_child_env_restores_the_original_loader_path(monkeypatch):
     assert "LD_LIBRARY_PATH" not in srv_mod._clean_env()   # frozen with no ORIG: drop it
     monkeypatch.setattr(sys, "frozen", False, raising=False)
     assert srv_mod._clean_env()["LD_LIBRARY_PATH"] == "/pyinstaller/_internal"   # dev: leave it
+
+
+def test_closing_while_a_load_is_starting_leaves_no_runner_behind(local_dir, fake_bin, monkeypatch):
+    """Quit during a load used to leave a llama-server running, holding the
+    model's memory until the next app start."""
+    monkeypatch.setenv("FAKE_LLAMA_LOAD_S", "3")
+    s = srv_mod.LocalServer(local_dir)
+    errors = []
+    t = threading.Thread(target=lambda: _try(lambda: _ensure(s, fake_bin), errors))
+    t.start()
+    deadline = time.time() + 5
+    while s._proc is None and time.time() < deadline:
+        time.sleep(0.02)
+    proc = s._proc
+    s.close()
+    t.join(10)
+    assert proc is not None and proc.poll() is not None, "the loading process was stopped"
+    assert errors and "closing" in str(errors[0])
+    with pytest.raises(srv_mod.LocalServerError, match="closing"):
+        _ensure(s, fake_bin)                         # a load that comes after the close starts nothing
+    assert s._proc is None and not local_dir.joinpath("llama-server.pid").exists()
+
+
+def _try(fn, errors):
+    try:
+        fn()
+    except Exception as e:
+        errors.append(e)

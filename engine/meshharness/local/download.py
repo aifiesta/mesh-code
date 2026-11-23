@@ -100,10 +100,17 @@ def _fetch(client, url, part, size, on_progress, cancel) -> None:
         if mode == "wb":
             have = 0
         last_emit, last_bytes = 0.0, have
+        over = False
         with open(part, mode) as f:
             for chunk in r.iter_bytes(CHUNK):
                 if cancel.is_set():
                     raise Cancelled()
+                if have + len(chunk) > size:
+                    # More than the file can be: a wrong or hostile server
+                    # would otherwise fill the disk before the size and
+                    # fingerprint are checked at the end.
+                    over = True
+                    break
                 f.write(chunk)
                 have += len(chunk)
                 now = time.monotonic()
@@ -112,6 +119,9 @@ def _fetch(client, url, part, size, on_progress, cancel) -> None:
                     eta = (size - have) / rate if rate > 0 else None
                     _emit(on_progress, Progress("downloading", have, size, rate, eta))
                     last_emit, last_bytes = now, have
+    if over:
+        part.unlink(missing_ok=True)
+        raise ChecksumMismatch(f"{part.name}: the server sent more than the expected {size} bytes")
     if have < size:
         raise httpx.TransportError("connection closed before the file was complete")
 

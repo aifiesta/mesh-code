@@ -68,7 +68,7 @@ SCHEMA: list[dict] = [
         "category": "routing",
         "type": "enum",
         "label": "Routing",
-        "default": "off",
+        "default": "smart",
         "options": [
             _opt("off", "Pinned", "Always use the model above."),
             _opt("smart", "Smart (local)", "A bundled table picks per prompt. No extra tokens, no extra network hop."),
