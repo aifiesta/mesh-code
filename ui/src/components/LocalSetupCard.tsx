@@ -1,15 +1,22 @@
 import type { LocalJob, LocalStatus } from '../types'
 import { fmtBytes } from '../types'
 
-/** First-run story of the local layer, later the banner for a download in
- *  flight. Lives under the key gate because the download starts before a key. */
-export function LocalSetupCard({ local, compact, onInstall, onCancel, onDecline, onOpenSettings }: {
+/** First-run question of the local layer ("download this model?"), later
+ *  the banner for a download in flight or a stopped / failed server. Nothing
+ *  is downloaded until the user says yes here or in Settings. */
+export function LocalSetupCard({ local, compact, note, onInstall, onCancel, onDecline, onNotNow, onStart, onOpenSettings }: {
   local: LocalStatus
   /** Banner form: one line of status, the actions, no explanation. */
   compact?: boolean
+  /** The layer's last word outside any chat (a failed download). */
+  note?: { level: string; text: string } | null
   onInstall: (model: string) => void
   onCancel: (job: string) => void
+  /** "No thanks": never ask again (still installable from Settings). */
   onDecline: () => void
+  /** "Not now": hide until the app is opened again. */
+  onNotNow?: () => void
+  onStart?: () => void
   /** Absent on the key gate, which has no settings sheet to open. */
   onOpenSettings?: () => void
 }) {
@@ -34,8 +41,28 @@ export function LocalSetupCard({ local, compact, onInstall, onCancel, onDecline,
     body = <Line head="Starting the local model…" sub="The first load takes a moment while the weights page in." />
   } else if (local.server.error && local.server.state === 'failed') {
     body = <Line head="The local model failed to start" sub={local.server.error} tone="warn" />
+  } else if (installed && local.server.held) {
+    body = (
+      <>
+        <Line head="The local model is stopped" sub={local.server.error ?? 'Smart routing uses the cloud until you start it again.'} />
+        {onStart && <div className="local-actions"><button className="btn subtle" onClick={onStart}>Start</button></div>}
+      </>
+    )
   } else if (installed) {
-    body = <Line head={`${label(local, local.default_model)} is ready`} sub="Coding runs on this machine for free. Cloud models stay one click away." tone="ok" />
+    body = <Line head={`${label(local, local.default_model)} is ready`} sub="With Smart routing on, lookups and small changes start on this machine for free; harder work and anything it struggles with goes to the cloud." tone="ok" />
+  } else if (local.offer) {
+    const o = local.offer
+    body = (
+      <>
+        <Line head={`Run small tasks on this machine? ${o.label}, ${fmtBytes(o.bytes)}`}
+              sub={`${local.recommended?.reason ?? ''} With Smart routing on, lookups and small changes start on it for free and step up to the cloud when it struggles. Cloud models work while it downloads.`} />
+        <div className="local-actions">
+          <button className="btn primary" onClick={() => onInstall(o.model)}>Download {fmtBytes(o.bytes)}</button>
+          {onNotNow && <button className="btn subtle" onClick={onNotNow}>Not now</button>}
+          <button className="btn ghost" onClick={onDecline}>No thanks</button>
+        </div>
+      </>
+    )
   } else if (local.needs_confirm && rec) {
     const why = local.needs_confirm.reason === 'slow'
       ? `This machine has no GPU the model can use, so ${rec.model.replace('local/', '')} would be slow.`
@@ -48,7 +75,7 @@ export function LocalSetupCard({ local, compact, onInstall, onCancel, onDecline,
           {local.needs_confirm.reason !== 'slow' &&
             <button className="btn primary" onClick={() => onInstall(rec.model)}>Download {fmtBytes(local.needs_confirm.bytes)}</button>}
           {onOpenSettings && <button className="btn subtle" onClick={onOpenSettings}>Choose another</button>}
-          <button className="btn ghost" onClick={onDecline}>Not now</button>
+          <button className="btn ghost" onClick={onNotNow ?? onDecline}>Not now</button>
         </div>
       </>
     )
@@ -58,7 +85,7 @@ export function LocalSetupCard({ local, compact, onInstall, onCancel, onDecline,
         <Line head={`Recommended: ${label(local, rec.model)}`} sub={rec.reason} />
         <div className="local-actions">
           <button className="btn primary" onClick={() => onInstall(rec.model)}>Download</button>
-          <button className="btn ghost" onClick={onDecline}>Not now</button>
+          <button className="btn ghost" onClick={onNotNow ?? onDecline}>Not now</button>
         </div>
       </>
     )
@@ -76,6 +103,7 @@ export function LocalSetupCard({ local, compact, onInstall, onCancel, onDecline,
         {onOpenSettings && <button className="link" onClick={onOpenSettings}>Manage</button>}
       </div>
       {body}
+      {note && <div className={`local-line ${note.level === 'warn' ? 'warn' : ''}`}><span>{note.text}</span></div>}
     </section>
   )
 }

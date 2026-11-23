@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import { useDismissable } from '../useDismissable'
-import type { RouteExplain, SettingSpec, SettingsDoc, Status } from '../types'
+import type { LocalStatus, RouteExplain, SettingSpec, SettingsDoc, Status } from '../types'
 import { fmtTokens, fmtUsd, pricePerM, type CatalogModel } from '../types'
 import { Field } from './Field'
 import { BillTable } from './BillSplit'
@@ -17,14 +17,19 @@ import { converting, fxNote, useMoney } from '../money'
  * Every popover ends with the same escape hatch to the full settings, so the
  * bar teaches that more exists without having to show it.
  */
-export function ControlBar({ status, settings, catalog, routeExplain, onSet, onOpenSettings, onExplain }: {
+export function ControlBar({ status, settings, catalog, routeExplain, local, onSet, onOpenSettings, onExplain, onEscalate, onBackToLocal }: {
   status: Status | null
   settings: SettingsDoc | null
   catalog: CatalogModel[]
   routeExplain: RouteExplain | null
+  local?: LocalStatus | null
   onSet: (key: string, value: any) => void
   onOpenSettings: (tab?: string) => void
   onExplain: () => void
+  /** Off the local model to Smart routing's pick; `harder`: one step beyond it. */
+  onEscalate?: (harder: boolean) => void
+  /** Back to the local model (the engine refuses, with a reason, for a long chat). */
+  onBackToLocal?: () => void
 }) {
   const [open, setOpen] = useState<string | null>(null)
   const { fx, money, price } = useMoney()
@@ -61,6 +66,12 @@ export function ControlBar({ status, settings, catalog, routeExplain, onSet, onO
   const cost = (status?.session_cost ?? 0) + (live ? (status?.turn_cost ?? 0) : 0)
   const estimated = !!status?.turn_estimated
 
+  // The local model inside Smart routing: which buttons make sense now.
+  const onLocal = !!status?.turn_local
+  const localReady = !!local?.enabled && local.server.state === 'ready'
+  const showEscalate = live && onLocal && routeMode === 'smart'
+  const showBack = live && !onLocal && localReady && routeMode === 'smart'
+
   const toggle = (id: string) => setOpen((o) => (o === id ? null : id))
   const usd6 = (n: number) => '$' + n.toFixed(6)
   // Converted, the dollar bill is one hover away.
@@ -83,7 +94,9 @@ export function ControlBar({ status, settings, catalog, routeExplain, onSet, onO
           <span className="ctl-value">
             {pending ? (routeMode === 'auto' ? 'Auto routing' : 'Smart routing') : shortModel(shownModel)}
           </span>
-          {routedAway && <span className="ctl-flag" title="chosen by the router">routed</span>}
+          {onLocal
+            ? <span className="ctl-flag local" title="running on this machine, free">local</span>
+            : routedAway && <span className="ctl-flag" title="chosen by the router">routed</span>}
         </button>
         {open === 'model' && (
           <Pop title="Model" onSettings={() => { setOpen(null); onOpenSettings(routing ? 'routing' : 'model') }}>
@@ -121,6 +134,29 @@ export function ControlBar({ status, settings, catalog, routeExplain, onSet, onO
           </Pop>
         )}
       </div>
+
+      {(showEscalate || showBack) && (
+        <div className="ctl ctl-local">
+          {showEscalate && onEscalate && (
+            <>
+              <button className="ctl-btn" onClick={() => onEscalate(false)}
+                      title="Hand this task to Smart routing's cloud pick for its level">
+                <span className="ctl-value">Escalate</span>
+              </button>
+              <button className="ctl-btn" onClick={() => onEscalate(true)}
+                      title="Hand it to the model Smart routing would step up to from that pick">
+                <span className="ctl-value">Harder</span>
+              </button>
+            </>
+          )}
+          {showBack && onBackToLocal && (
+            <button className="ctl-btn" onClick={onBackToLocal}
+                    title="Continue this task on the local model (refused for a chat over half its window)">
+              <span className="ctl-value">Back to local</span>
+            </button>
+          )}
+        </div>
+      )}
 
       {/* ---- tokens ---- */}
       <div className="ctl ctl-tok">

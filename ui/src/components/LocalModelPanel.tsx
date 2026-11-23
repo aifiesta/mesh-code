@@ -9,7 +9,7 @@ export function LocalModelPanel({ local, onInstall, onCancel, onDelete, onSetDef
   onCancel: (job: string) => void
   onDelete: (model: string) => void
   onSetDefault: (model: string) => void
-  onServer: (action: 'stop' | 'restart') => void
+  onServer: (action: 'stop' | 'start' | 'restart') => void
   onRefresh: () => void
 }) {
   const hw = local.hardware
@@ -77,12 +77,14 @@ export function LocalModelPanel({ local, onInstall, onCancel, onDelete, onSetDef
       </div>
 
       <div className="profile-head">Server</div>
-      <Row label="State" value={srv.state + (local.restart_needed ? ' · restart to apply new settings' : '')} />
+      <Row label="State" value={srv.state + (srv.held ? ' · stays stopped until you press Start' : '') + (local.restart_needed ? ' · restart to apply new settings' : '')} />
       {srv.model && <Row label="Running" value={`${srv.model.replace('local/', '')} · ${fmtCtx(srv.ctx ?? undefined)} context`} mono />}
       {srv.error && <p className="field-dep">{srv.error}</p>}
       <div className="local-actions">
         <button className="btn subtle" disabled={!running} onClick={() => onServer('stop')}>Stop</button>
-        <button className="btn subtle" disabled={!local.default_model} onClick={() => onServer('restart')}>Restart</button>
+        {running
+          ? <button className="btn subtle" disabled={!local.default_model} onClick={() => onServer('restart')}>Restart</button>
+          : <button className="btn subtle" disabled={!local.default_model || !local.models.some((m) => m.id === local.default_model && m.installed)} onClick={() => onServer('start')}>Start</button>}
       </div>
     </div>
   )
