@@ -250,3 +250,9 @@ as input for the escalation chain. Thinking levels go to Mesh as
 xhigh; local hops send no level, as before. A refused level falls back to
 the nearest one the model accepts. #14 is not merged: its ladder-relevant
 parts are the 2026-11-14 port.
+
+## 2026-11-23 — macOS CI and release builds pin macos-15
+GitHub retired the macos-14 arm64 image, so the macOS jobs were cancelled
+before they started. They pin `macos-15` rather than `macos-latest`, which
+GitHub moves to a new OS on its own schedule; a release build should change
+OS only in a commit.
