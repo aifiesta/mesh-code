@@ -156,7 +156,7 @@ export function ControlBar({ status, settings, catalog, routeExplain, onSet, onO
           </span>
         </button>
         {open === 'cost' && (
-          <Pop title="Spend" onSettings={() => { setOpen(null); onOpenSettings('behaviour') }}>
+          <Pop title="Spend" onSettings={() => { setOpen(null); onOpenSettings('routing') }}>
             <dl className="pop-stats">
               <div><dt>This turn</dt><dd title={usdTitle(status?.turn_cost)}>{money(status?.turn_cost ?? 0, usd6)}</dd></div>
               <div><dt>Session</dt><dd title={usdTitle(status?.session_cost)}>{money(status?.session_cost ?? 0, usd6)}</dd></div>
@@ -175,7 +175,6 @@ export function ControlBar({ status, settings, catalog, routeExplain, onSet, onO
             </p>
             {fxNote(fx) && <p className="pop-note">{fxNote(fx)}</p>}
             {spec('currency') && <Field spec={spec('currency')!} onChange={onSet} compact />}
-            {spec('optimize') && <Field spec={spec('optimize')!} onChange={onSet} compact />}
           </Pop>
         )}
       </div>

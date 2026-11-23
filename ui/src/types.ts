@@ -203,7 +203,7 @@ export type SettingOption = { value: any; label: string; blurb?: string }
 export type SettingSpec = {
   key: string
   category: string
-  /** enum | bool | int | dial | weights | text | model | model_list */
+  /** enum | bool | int | weights | text | model | model_list */
   type: string
   label: string
   help?: string
@@ -213,8 +213,6 @@ export type SettingSpec = {
   value?: any
   min?: number
   max?: number
-  step?: number
-  beta?: boolean
   multiline?: boolean
   zero_label?: string
   depends_on?: Record<string, any>

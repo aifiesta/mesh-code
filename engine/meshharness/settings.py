@@ -151,17 +151,6 @@ SCHEMA: list[dict] = [
         "why": "The rate comes from Frankfurter, or fawazahmed0's currency API if that fails, at most once a day. Saved chats and totals stay in dollars.",
     },
     {
-        "key": "optimize",
-        "category": "behaviour",
-        "type": "dial",
-        "label": "Token savings",
-        "default": 0.0,
-        "min": 0.0, "max": 0.95, "step": 0.05,
-        "beta": True,
-        "help": "Above 0, limits how long one reply can be. It no longer trims the conversation.",
-        "why": "Every value above 0 does the same. Trimming old tool results on every step was removed: it stopped providers reusing their cache, so bills went up, and it could hide a file the model had not read yet.",
-    },
-    {
         "key": "system",
         "category": "behaviour",
         "type": "text",
@@ -254,16 +243,6 @@ def coerce(key: str, value: Any) -> Any:
         if not lo <= n <= hi:
             raise InvalidSetting(f"{key} must be between {lo} and {hi}")
         return n
-
-    if kind == "dial":
-        try:
-            f = float(value)
-        except (TypeError, ValueError):
-            raise InvalidSetting(f"{key} must be a number")
-        lo, hi = spec.get("min", 0.0), spec.get("max", 1.0)
-        if not lo <= f <= hi:
-            raise InvalidSetting(f"{key} must be between {lo} and {hi}")
-        return round(f, 4)
 
     if kind == "weights":
         if not isinstance(value, dict):

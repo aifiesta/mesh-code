@@ -83,7 +83,7 @@ true, that is a bug — file it against this document.
 
 - ⌘K palette: every setting expanded to one runnable action per option,
   grouped with sticky headers, matched against the engine's own help text
-  (typing "cheap" finds token savings), fuzzy abbreviations (`rtsm` →
+  (typing "spend" finds smart routing), fuzzy abbreviations (`rtsm` →
   Routing: Smart).
 - "/" in an empty composer opens the palette; ⏎ sends, ⇧⏎ newline; typing
   while the agent works queues the message for the next turn.

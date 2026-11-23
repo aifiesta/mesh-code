@@ -74,9 +74,6 @@ DEFAULT_CONFIG = {
     # model failed live); the harness lets the user state it up front.
     "exclude_models": [],
     "reasoning_effort": None,   # max|xhigh|high|medium|low|none, or None = not sent
-    # Mesh Optimize dial (BETA). 0 = off. 0 to 0.95: how aggressively to
-    # cut token spend. See /optimize in the REPL and README for details.
-    "optimize": 0.0,
     # Agentic loop controls. max_hops 0 = unlimited (stall detection still
     # stops runaway loops); auto_compact keeps long turns under the model's
     # context limit; stall_policy "pause" ends the turn at the prompt after
@@ -251,6 +248,10 @@ def load_config() -> dict:
     # replaced by auto_route in 0.5.0 — drop the stale key from old configs
     # (it disappears from disk on the next save_config).
     cfg.pop("route", None)
+    # The "Token savings" dial (`optimize`) was removed: prompt caching no
+    # longer depends on it and its cut of old tool results raised bills.
+    # Drop it from old configs the same way.
+    cfg.pop("optimize", None)
     # Resolution order: env > credentials file > legacy hand-edited
     # config.json. MESH_API_KEY kept as fallback for one release.
     file_key = (cfg.get("api_key") or "").strip()

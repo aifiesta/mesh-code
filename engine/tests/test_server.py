@@ -142,7 +142,7 @@ def test_a_valid_setting_applies_and_echoes_the_new_schema(app_client, tmp_path)
         # the schema ships with the greeting, so a UI can render controls
         # for settings it was never coded against
         keys = [s["key"] for s in hello["data"]["settings"]["settings"]]
-        assert "route_mode" in keys and "optimize" in keys
+        assert "route_mode" in keys and "max_hops" in keys
 
         ws.send_text(json.dumps({"type": Request.OPEN_WORKSPACE,
                                  "workspace": str(tmp_path)}))
@@ -162,11 +162,27 @@ def test_an_invalid_setting_is_refused_with_a_reason(app_client, tmp_path):
                                  "workspace": str(tmp_path)}))
         sid = _drain(ws, Event.SESSION_STARTED)["session"]
         ws.send_text(json.dumps({"type": Request.SET_CONFIG, "session": sid,
-                                 "key": "optimize", "value": 9000}))
+                                 "key": "max_hops", "value": 9000}))
         err = _drain(ws, Event.CONFIG_ERROR)
     assert "between" in err["data"]["message"]
-    assert engine.sessions[sid].cfg["optimize"] == 0.0, "must not be applied"
+    assert engine.sessions[sid].cfg["max_hops"] == 0, "must not be applied"
 
+
+
+def test_a_config_saved_with_the_removed_token_savings_setting_still_loads():
+    """Older versions saved `optimize` (the "Token savings" dial, removed).
+    A config that has it turned up must load, and the key must not come
+    back: it is dropped on load and gone from disk after the next save."""
+    from meshharness.core import config as cfg_mod
+
+    cfg_mod.CONFIG_FILE.write_text(json.dumps({"optimize": 0.5, "max_hops": 7}))
+    cfg = cfg_mod.load_config()
+    assert "optimize" not in cfg
+    assert cfg["max_hops"] == 7, "the other settings in the file still apply"
+    cfg_mod.save_config(cfg)
+    assert "optimize" not in json.loads(cfg_mod.CONFIG_FILE.read_text())
+    assert "optimize" not in {s["key"] for s in __import__(
+        "meshharness.settings", fromlist=["SCHEMA"]).SCHEMA}
 
 def test_route_preview_explains_a_pick_before_spending_anything(app_client, tmp_path):
     client, engine = app_client
