@@ -45,6 +45,9 @@ export const Ev = {
   CHAT_CLEARED: 'chat.cleared',
   JOURNAL: 'journal',
   KEY_RESULT: 'key.result',
+  LOCAL_STATUS: 'local.status',
+  LOCAL_PROGRESS: 'local.progress',
+  LOCAL_READY: 'local.ready',
 } as const
 
 export const Req = {
@@ -55,6 +58,15 @@ export const Req = {
   SET_MODE: 'set.mode',
   SET_MODEL: 'set.model',
   SET_ROUTE: 'set.route',
+  ESCALATE: 'escalate',
+  DEESCALATE: 'deescalate',
+  LOCAL_STATUS: 'local.status',
+  LOCAL_INSTALL: 'local.install',
+  LOCAL_CANCEL: 'local.cancel',
+  LOCAL_DELETE: 'local.delete',
+  LOCAL_SERVER: 'local.server',
+  LOCAL_REFRESH: 'local.refresh',
+  LOCAL_DECLINE: 'local.decline',
   SET_STYLE: 'set.style',
   OPEN_WORKSPACE: 'open.workspace',
   ADD_FOLDER: 'add.folder',
@@ -122,7 +134,9 @@ export type Msg =
   | { kind: 'assistant'; id: string; text: string; streaming?: boolean; model?: string }
   | { kind: 'tool'; id: string; card: ToolCard }
   | { kind: 'notice'; id: string; level: string; text: string; detail?: any }
-  | { kind: 'turn'; id: string; cost: number; tokens: number; elapsed: number; model: string; hops: number; estimated?: boolean; bill?: Bill | null }
+  | { kind: 'turn'; id: string; cost: number; tokens: number; elapsed: number; model: string; hops: number; estimated?: boolean; bill?: Bill | null
+      /** Steps that ran on the local model, and whether the turn stepped up from it. */
+      localSteps?: number; steppedUp?: boolean }
   | { kind: 'server'; id: string; url: string; pid: number; port: number; cmd: string; stopped?: boolean }
   | { kind: 'plan'; id: string; plan: Plan }
   | { kind: 'ask'; id: string; ask: Ask; answered?: string[] }
@@ -149,6 +163,8 @@ export type Status = {
   turn_cost?: number
   turn_tokens?: number
   turn_estimated?: boolean
+  /** The last hop of the turn in flight ran on the local model. */
+  turn_local?: boolean
   /** Where the turn in flight, and the session so far, spent tokens and money. */
   turn_bill?: Bill | null
   session_bill?: Bill | null
@@ -313,6 +329,48 @@ export function pricePerM(m: CatalogModel, kind: 'prompt' | 'completion'): numbe
 export const fmtUsd = (n: number | null) =>
   n === null ? '—' : n === 0 ? 'free'
     : n < 1 ? `$${n.toFixed(3)}` : `$${n.toFixed(2)}`
+
+export type LocalJob = {
+  id: string; kind: 'model' | 'runtime'; target: string
+  phase: 'queued' | 'downloading' | 'verifying' | 'done' | 'error' | 'cancelled'
+  bytes: number; total: number; rate_bps: number; eta_s: number | null; error: string | null
+}
+
+export type LocalModelRow = {
+  id: string; label: string; bytes: number; ctx_max: number; ctx: number | null
+  installed: boolean; fits: boolean; slow: boolean; tight?: boolean; recommended: boolean
+  family?: string; license?: string; job: LocalJob | null
+}
+
+/** The engine's local model layer (local/manager.py status()). */
+export type LocalStatus = {
+  enabled: boolean
+  booted: boolean
+  hardware: {
+    os: string; arch: string; ram_gb: number; avail_gb: number; cores: number
+    gpu: { kind: string; name: string; vram_gb: number; driver: string }
+    disk_free_gb: number; probe_failed: boolean
+  } | null
+  probe_failed: boolean
+  recommended: { model: string; ctx: number; reason: string; slow: boolean } | null
+  /** The setup card's question: a model that fits, not yet downloaded or declined. */
+  offer: { model: string; bytes: number; label: string; ctx: number } | null
+  runtime: { tag: string | null; variant: string | null; source: string; path?: string | null; error?: string | null }
+  models: LocalModelRow[]
+  default_model: string | null
+  server: { state: string; model: string | null; port: number | null; ctx: number | null
+            pid: number | null; held: boolean; error: string | null; started_at: number | null }
+  jobs: LocalJob[]
+  needs_confirm: { model: string; bytes: number; reason: 'size' | 'slow' } | null
+  declined: boolean
+  restart_needed: boolean
+  boot_error: string | null
+}
+
+export const fmtBytes = (n: number) =>
+  n >= 1e9 ? `${(n / 1e9).toFixed(n >= 1e10 ? 0 : 1)} GB`
+    : n >= 1e6 ? `${Math.round(n / 1e6)} MB`
+      : n >= 1e3 ? `${Math.round(n / 1e3)} KB` : `${n} B`
 
 export const fmtCtx = (n?: number) =>
   !n ? '—' : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n)

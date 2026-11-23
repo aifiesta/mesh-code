@@ -19,6 +19,7 @@ import { Thinking } from './components/Thinking'
 import { AskInline } from './components/AskInline'
 import { Composer } from './components/Composer'
 import { KeyGate } from './components/KeyGate'
+import { LocalSetupCard } from './components/LocalSetupCard'
 import { Markdown } from './components/Markdown'
 import { Chevron } from './components/Chevron'
 import { FileBadge } from './components/FileBadge'
@@ -318,6 +319,35 @@ export default function App() {
 
   if (!state.ready) return <Splash connection={state.connection} />
 
+  // The local model layer: the setup card while it has a question or news
+  // (an offer, a download, a stopped or failed server); quiet otherwise.
+  const localActions = {
+    install: (m: string) => client?.localInstall(m),
+    cancel: (j: string) => client?.localCancel(j),
+    remove: (m: string) => client?.localDelete(m),
+    setDefault: (m: string) => setConfig('local_model', m),
+    server: (a: 'stop' | 'start' | 'restart') => client?.localServer(a),
+    refresh: () => client?.localRefresh(),
+  }
+  const loc = state.local
+  const localShown = !!loc && loc.enabled && (
+    (!!loc.offer && !state.localNotNow) || loc.jobs.length > 0
+    || ['failed', 'crashed'].includes(loc.server.state)
+    || state.localNote?.level === 'warn')
+  const localBanner = localShown && loc ? (
+    <LocalSetupCard
+      local={loc}
+      compact
+      note={state.localNote}
+      onInstall={localActions.install}
+      onCancel={localActions.cancel}
+      onDecline={() => client?.localDecline()}
+      onNotNow={() => dispatch({ t: 'localNotNow' })}
+      onStart={() => localActions.server('start')}
+      onOpenSettings={() => setSheet('local')}
+    />
+  ) : null
+
   if (!state.hasKey) {
     return (
       <KeyGate
@@ -523,6 +553,9 @@ export default function App() {
         <SettingsSheet
           settings={state.settings}
           catalog={state.catalog}
+          local={state.local}
+          localActions={localActions}
+          initialTab={sheet}
           error={state.configError}
           onSet={setConfig}
           onClose={() => { setSheet(null); dispatch({ t: 'dismissConfigError' }) }}
@@ -540,6 +573,9 @@ export default function App() {
               settings={state.settings}
               catalog={state.catalog}
               routeExplain={state.routeExplain}
+              local={state.local}
+              onEscalate={(harder) => client?.escalate(session.id, harder)}
+              onBackToLocal={() => client?.deescalate(session.id)}
               onSet={setConfig}
               onExplain={() => client?.send(Req.ROUTE_PREVIEW, { session: session.id, text: '' })}
               onOpenSettings={(tab) => tab === '__palette' ? setPalette(true) : setSheet(tab ?? 'model')}
@@ -582,6 +618,7 @@ export default function App() {
           onShowRail={() => setRailOpen(true)}
           onCloseFile={() => dispatch({ t: 'closeFile', id: session.id })}
           onMention={mentionPath}
+          banner={localBanner}
           approvalIsTop={!palette && !sheet && !keyDialog && !tour && !confirmDelete && !confirmSwitch}
         />
       ) : (
@@ -591,6 +628,7 @@ export default function App() {
             <h2>No project open</h2>
             <p>Open a folder to start. The agent reads, writes and runs commands inside it — nowhere else, unless you say so.</p>
             <button className="btn primary" onClick={openFolder}>Open project…</button>
+            {localBanner}
           </div>
         </main>
       )}
@@ -599,9 +637,11 @@ export default function App() {
   )
 }
 
-function SessionView({ s, controls, profile, railOpen, onRailResize, railResizing, onSend, onInterrupt, onMode, onCommands, onLoadJournal, onDecide, approvalIsTop, onAnswer, onDismissAsk, onStopServer, onManageKey, onHideRail, onShowRail, onTermRun, onTermInterrupt, onTermClear, onCloseFile, onMention, onNeedFiles, onOpenRef, fileUrl }: {
+function SessionView({ s, controls, banner, profile, railOpen, onRailResize, railResizing, onSend, onInterrupt, onMode, onCommands, onLoadJournal, onDecide, approvalIsTop, onAnswer, onDismissAsk, onStopServer, onManageKey, onHideRail, onShowRail, onTermRun, onTermInterrupt, onTermClear, onCloseFile, onMention, onNeedFiles, onOpenRef, fileUrl }: {
   s: SessionState
   controls: React.ReactNode
+  /** The local model's setup card / download banner, when it has something to say. */
+  banner?: React.ReactNode
   profile: Profile | null
   onSend: (t: string, a: { name: string; data_url: string }[], refs: string[]) => void
   onNeedFiles: () => void
@@ -661,6 +701,7 @@ function SessionView({ s, controls, profile, railOpen, onRailResize, railResizin
             {s.busy && <span className="pill live">working</span>}
           </div>
         </header>
+        {banner}
 
         <div
           className="transcript"
@@ -738,7 +779,9 @@ function SessionView({ s, controls, profile, railOpen, onRailResize, railResizin
               case 'turn':
                 return (
                   <div className="turn-foot" key={m.id} id={`m-${m.id}`}>
-                    {m.model} · {m.hops} hop{m.hops === 1 ? '' : 's'} · {m.tokens.toLocaleString()} tok ·
+                    {m.model} · {m.hops} hop{m.hops === 1 ? '' : 's'}
+                    {m.localSteps ? ` (${m.localSteps} on the local model${m.steppedUp ? ', then stepped up' : ''})` : ''}
+                    {' · '}{m.tokens.toLocaleString()} tok ·
                     {' '}{money(m.cost, (n) => '$' + n.toFixed(6), m.estimated)} · {m.elapsed.toFixed(1)}s
                     <BillLine bill={m.bill} />
                   </div>

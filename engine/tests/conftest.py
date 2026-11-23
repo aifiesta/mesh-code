@@ -32,6 +32,12 @@ def isolate_config_home(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(cfg, "USAGE_FILE", home / "usage.json")
     monkeypatch.setattr(cfg, "LEGACY_CONFIG_DIR", home / "no-legacy")
     monkeypatch.setattr(cfg, "SESSIONS_DIR", home / "sessions")
+    monkeypatch.setattr(cfg, "LOCAL_DIR", home / "local")
+    # Engines built in tests must never fetch real weights or the remote manifest.
+    monkeypatch.setitem(cfg.DEFAULT_CONFIG, "local_auto_setup", False)
+    from meshharness.local import manager as _manager
+    monkeypatch.setattr(_manager.LocalModels, "_refresh_manifest", lambda self: None)
+    monkeypatch.delenv("MESH_LLAMA_SERVER", raising=False)
     from meshharness.core import journal as jr
     monkeypatch.setattr(jr, "JOURNAL_DIR", home / "journal")
     # memory.py imports CONFIG_DIR by value, so patching config alone left
@@ -80,7 +86,7 @@ class Harness:
 def harness(gateway, tmp_path):
     made = []
 
-    def _make(mode=Mode.DEFAULT, **cfg_over):
+    def _make(mode=Mode.DEFAULT, local=None, **cfg_over):
         events, lock = [], threading.Lock()
 
         def emit(ev):
@@ -98,7 +104,7 @@ def harness(gateway, tmp_path):
             "output_style": "default",
         }
         cfg.update(cfg_over)
-        s = Session("t1", tmp_path, cfg, emit, mode=mode)
+        s = Session("t1", tmp_path, cfg, emit, mode=mode, local=local)
         s.start()
         made.append(s)
         return Harness(s, events, lock)

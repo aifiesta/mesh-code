@@ -51,6 +51,7 @@ class FakeGateway:
     def __init__(self):
         self._turns: list[list[str]] = []
         self.requests: list[dict] = []
+        self.headers: list[dict] = []     # request headers, lower-cased keys, same order as requests
         # Billed cost the gateway would report for a request id via
         # GET /usage/requests/{id}. Empty by default so tests that do not
         # care get a 404 and the engine falls through to the SSE `cost`
@@ -114,7 +115,18 @@ class FakeGateway:
                     payload = {}
                 with outer._lock:
                     outer.requests.append(payload)
+                    outer.headers.append({k.lower(): v for k, v in self.headers.items()})
                     lines = outer._turns.pop(0) if outer._turns else sse_turn("(no script)")
+                if lines and lines[0] == "__drop__":
+                    # The server dies mid-stream: headers, a fragment, then the socket closes.
+                    self.send_response(200)
+                    self.send_header("content-type", "text/event-stream")
+                    self.send_header("content-length", "100000")   # promised, never delivered
+                    self.end_headers()
+                    self.wfile.write(b"data: {\"choices\":[{\"delta\":{\"content\":\"par\"}}]}\n\n")
+                    self.wfile.flush()
+                    self.connection.close()
+                    return
                 if self.path.endswith("/web/search"):
                     self.send_response(200)
                     self.send_header("content-type", "application/json")

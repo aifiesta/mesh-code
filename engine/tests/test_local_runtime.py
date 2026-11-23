@@ -1,0 +1,130 @@
+import io
+import sys
+import tarfile
+import zipfile
+
+import pytest
+
+from meshharness.local import runtime
+
+
+def _tar(path, members, links=()):
+    with tarfile.open(path, "w:gz") as t:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            t.addfile(info, io.BytesIO(data))
+        for name, target in links:
+            info = tarfile.TarInfo(name)
+            info.type = tarfile.SYMTYPE
+            info.linkname = target
+            t.addfile(info)
+
+
+def test_tar_extract_keeps_only_the_server_and_libraries_and_refuses_escapes(tmp_path):
+    archive = tmp_path / "llama.tar.gz"
+    _tar(archive, {
+        "llama-b1/llama-server": b"#!/bin/sh\necho server\n",
+        "llama-b1/libggml.0.dylib": b"lib", "llama-b1/libllama.so.0.7.0": b"lib",
+        "llama-b1/LICENSE": b"MIT", "llama-b1/llama-cli": b"not wanted",
+        "../escape.dylib": b"evil", "/abs/llama-server": b"evil",
+    })
+    into = tmp_path / "rt"
+    server = runtime.install_from_archive(archive, into)
+    names = sorted(p.name for p in into.iterdir() if p.name != runtime.COMPLETE)
+    assert server.name == runtime.SERVER
+    assert names == sorted(["LICENSE", "libggml.0.dylib", "libllama.so.0.7.0", runtime.SERVER]) or \
+        sys.platform == "win32"
+    assert not (tmp_path / "escape.dylib").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="tarballs are the mac/linux format")
+def test_tar_extract_recreates_the_loader_symlinks_but_never_links_outside(tmp_path):
+    archive = tmp_path / "llama.tar.gz"
+    _tar(archive, {"llama-b1/llama-server": b"bin", "llama-b1/libllama.0.7.0.dylib": b"lib"},
+         links=[("llama-b1/libllama.dylib", "libllama.0.dylib"),       # a chain, listed first
+                ("llama-b1/libllama.0.dylib", "libllama.0.7.0.dylib"),
+                ("llama-b1/evil.dylib", "../../outside.dylib"),
+                ("llama-b1/abs.dylib", "/etc/hosts"),
+                ("llama-b1/dangling.dylib", "missing.dylib"),
+                ("llama-b1/up.dylib", ".."),
+                ("llama-b1/libllama.0.7.0.dylib", "libllama.0.7.0.dylib")])
+    into = tmp_path / "rt"
+    runtime.install_from_archive(archive, into)
+    assert (into / "libllama.0.dylib").is_symlink() and (into / "libllama.0.dylib").read_bytes() == b"lib"
+    assert (into / "libllama.dylib").is_symlink() and (into / "libllama.dylib").read_bytes() == b"lib"
+    assert not (into / "evil.dylib").exists() and not (into / "abs.dylib").exists()
+    assert not (into / "dangling.dylib").is_symlink()
+    assert not (into / "up.dylib").is_symlink()
+    assert not (into / "libllama.0.7.0.dylib").is_symlink()   # a self-link never replaces the file
+
+
+def test_zip_extract_works_the_same_way(tmp_path):
+    archive = tmp_path / "llama.zip"
+    with zipfile.ZipFile(archive, "w") as z:
+        z.writestr("llama-server.exe" if sys.platform == "win32" else "llama-server", "bin")
+        z.writestr("ggml.dll", "lib")
+        z.writestr("llama-cli.exe", "no")
+        z.writestr("../../evil.dll", "no")
+    into = tmp_path / "rt"
+    runtime.install_from_archive(archive, into)
+    assert (into / runtime.SERVER).exists() and (into / "ggml.dll").exists()
+    assert not (into / "llama-cli.exe").exists() and not (tmp_path / "evil.dll").exists()
+
+
+def test_archive_without_a_server_is_an_error(tmp_path):
+    archive = tmp_path / "x.tar.gz"
+    _tar(archive, {"llama-b1/libggml.dylib": b"lib"})
+    with pytest.raises(FileNotFoundError):
+        runtime.install_from_archive(archive, tmp_path / "rt")
+
+
+def test_locate_prefers_env_then_a_downloaded_variant_then_a_matching_bundle(tmp_path, monkeypatch):
+    rt = tmp_path / "runtime"
+    downloaded = rt / "b1" / "darwin-arm64-metal" / runtime.SERVER
+    downloaded.parent.mkdir(parents=True)
+    downloaded.write_text("x")
+    (downloaded.parent / runtime.COMPLETE).write_text("ok")
+    monkeypatch.delenv("MESH_LLAMA_SERVER", raising=False)
+    monkeypatch.delenv("MESH_LLAMA_DIR", raising=False)
+    monkeypatch.delenv("MESH_LLAMA_VARIANT", raising=False)
+    monkeypatch.delenv("MESH_LLAMA_TAG", raising=False)
+    assert runtime.locate(rt, "b1", "darwin-arm64-metal") == downloaded
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / runtime.SERVER).write_text("x")
+    monkeypatch.setenv("MESH_LLAMA_DIR", str(bundle))
+    monkeypatch.setenv("MESH_LLAMA_VARIANT", "linux-x64-cpu")
+    monkeypatch.setenv("MESH_LLAMA_TAG", "b1")
+    assert runtime.locate(rt, "b1", "linux-x64-cpu") == bundle / runtime.SERVER
+    assert runtime.locate(rt, "b2", "linux-x64-cpu") is None           # a re-pinned tag must download
+    assert runtime.locate(rt, "b1", "linux-x64-vulkan") is None      # a CPU bundle never serves a GPU plan
+    assert runtime.locate(rt, "b1", "darwin-arm64-metal") == downloaded   # downloaded beats bundled
+
+    override = tmp_path / "custom-server"
+    override.write_text("x")
+    monkeypatch.setenv("MESH_LLAMA_SERVER", str(override))
+    assert runtime.locate(rt, "b1", "darwin-arm64-metal") == override
+
+    monkeypatch.setenv("MESH_LLAMA_SERVER", str(tmp_path / "missing"))
+    monkeypatch.delenv("MESH_LLAMA_DIR")
+    assert runtime.locate(rt, "b1", "linux-x64-cpu") is None
+
+
+def test_a_half_extracted_build_is_not_installed(tmp_path, monkeypatch):
+    """An extraction cut short (app quit, disk full) left a server binary
+    with missing libraries that counted as installed forever."""
+    for var in ("MESH_LLAMA_SERVER", "MESH_LLAMA_DIR", "MESH_LLAMA_VARIANT", "MESH_LLAMA_TAG"):
+        monkeypatch.delenv(var, raising=False)
+    rt = tmp_path / "runtime"
+    half = rt / "b1" / "darwin-arm64-metal"
+    half.mkdir(parents=True)
+    (half / runtime.SERVER).write_text("x")             # no marker: extraction never finished
+    assert runtime.locate(rt, "b1", "darwin-arm64-metal") is None
+
+    archive = tmp_path / "llama.tar.gz"
+    _tar(archive, {"llama-b1/llama-server": b"bin", "llama-b1/libggml.dylib": b"lib"})
+    runtime.install_from_archive(archive, half)
+    assert runtime.locate(rt, "b1", "darwin-arm64-metal") == half / runtime.SERVER
+    assert not half.with_name(half.name + ".partial").exists()
