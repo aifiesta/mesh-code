@@ -54,6 +54,8 @@ TOOLCALL_FAILURES_FILE = CONFIG_DIR / "toolcall_failures.jsonl"
 # read back exact code/errors it no longer has. (Claude Code does the same —
 # its compact summary points at the session transcript.)
 TRANSCRIPTS_DIR = CONFIG_DIR / "transcripts"
+# The local model layer: downloaded weights, runtime builds, server state.
+LOCAL_DIR = CONFIG_DIR / "local"
 FAILURE_LOG_MAX_BYTES = 1_000_000
 _RAW_ARGS_LOG_CAP = 32_768  # bound one pathological record
 
@@ -64,19 +66,13 @@ class InsecureBaseURL(ValueError):
 DEFAULT_CONFIG = {
     "base_url": "https://api.meshapi.ai/v1",
     "api_key": "",
-    "model": "anthropic/claude-sonnet-4.5",
+    "model": "local/auto",       # the tier's local model; cloud until it is downloaded
     "system": "You are a helpful coding assistant. Be concise.",
     "auto_route": False,        # model:"auto" — gateway Auto Router picks per prompt
     "repo_memory": True,        # warm-start repo map + remember notes (/memory off)
     "fallback_models": [],      # ordered `models` fallback list sent in the payload
-    # Models the smart router must never pick, whatever the table says.
-    # The CLI only ever built this implicitly (a session blacklist after a
-    # model failed live); the harness lets the user state it up front.
-    "exclude_models": [],
+    "exclude_models": [],      # gateway auto routing never picks these
     "reasoning_effort": None,   # max|xhigh|high|medium|low|none, or None = not sent
-    # Mesh Optimize dial (BETA). 0 = off. 0 to 0.95: how aggressively to
-    # cut token spend. See /optimize in the REPL and README for details.
-    "optimize": 0.0,
     # Agentic loop controls. max_hops 0 = unlimited (stall detection still
     # stops runaway loops); auto_compact keeps long turns under the model's
     # context limit; stall_policy "pause" ends the turn at the prompt after
@@ -85,14 +81,17 @@ DEFAULT_CONFIG = {
     "max_hops": 0,
     "auto_compact": True,
     "stall_policy": "pause",
-    # Smart routing (local table-driven picker). route_mode: "off" (pin),
-    # "auto" (gateway picks — mirrors auto_route), "smart" (local pick).
-    # Weights steer smart picks along each cohort's efficiency frontier.
-    "route_mode": "off",
-    "route_weights": {"cost": 0.5, "cap": 0.3, "speed": 0.2},
-    # Effort: "auto" detects prompt difficulty (low/mid/high) and tilts the
-    # weights; low|medium|high|xhigh|max forces the tilt for every prompt.
-    "route_effort": "auto",
+    # Who writes: the local model with cloud escalation, Mesh's
+    # auto router, or the pinned `model`.
+    "policy": "local-first",
+    "escalation_model": "",        # empty = the shipped chain's first
+    "escalation_fallbacks": [],
+    "escalation_effort": "high",
+    "auto_escalate": True,
+    "escalation_sticky": "turn",
+    "weight_profile": "balanced",  # cloud-auto only
+    # What the cloud may spend; local work never counts.
+    "monthly_budget_usd": 10.0,
     # How the assistant writes (prose only — never tool access or scope).
     "output_style": "default",
     # Last version whose "what's new" line was shown (see whatsnew.py).
@@ -100,6 +99,17 @@ DEFAULT_CONFIG = {
     # Models observed rejecting reasoning_effort (with tools) — skipped
     # without a doomed retry in future sessions. Evidence-based cache.
     "reasoning_rejected_models": [],
+    # Local model layer (see local/manager.py). The fallback is the cloud
+    # model used while the local one downloads or cannot start.
+    "local_enabled": True,
+    "local_auto_setup": True,
+    "local_model": "",
+    "local_fallback_model": "anthropic/claude-sonnet-4.5",
+    "local_context": "auto",
+    "local_gpu": "auto",
+    "local_keep_free_gb": 4,
+    "local_idle_unload_min": 20,
+    "local_use_when_slow": False,
 }
 
 _DIR_MODE = stat.S_IRWXU                       # 0700
@@ -188,9 +198,6 @@ def save_api_key(key: str) -> None:
     secure_file(CREDENTIALS_FILE)  # tighten a pre-existing looser file
 
 
-_OLD_ROUTE_WEIGHTS = {"cost": 0.5, "cap": 0.3, "speed": 0.2}
-
-
 def _migrate_home() -> None:
     """Move a pre-rename ~/.mesh-harness to ~/.mesh-code, once.
 
@@ -222,11 +229,13 @@ def load_config() -> dict:
     # A corrupt/non-object config.json must NEVER brick launch (a truncated
     # write, a bad hand-edit). Every other loader here already degrades to a
     # default — load_config used to be the exception and would crash the CLI.
+    corrupt = False
     try:
         loaded = json.loads(CONFIG_FILE.read_text())
         if not isinstance(loaded, dict):
             raise ValueError("config.json is not a JSON object")
     except (json.JSONDecodeError, ValueError, OSError) as e:
+        corrupt = True
         print(
             f"mesh-code: ~/.mesh-code/config.json is unreadable ({e}); using "
             "defaults. Fix or delete it to silence this.",
@@ -234,21 +243,15 @@ def load_config() -> dict:
         )
         loaded = {}
     cfg = {**DEFAULT_CONFIG, **loaded}
-    # 0.5.9-dev migration: two short-lived route_weights shapes (cap="auto",
-    # difficulty sensitivity key) collapsed back to numeric cost/cap/speed +
-    # route_effort. Reset any non-numeric shape to the default.
-    rw = cfg.get("route_weights") or {}
-    if rw.get("cap") == "auto" or "difficulty" in rw:
-        cfg["route_weights"] = dict(DEFAULT_CONFIG["route_weights"])
+    # Keys outside the schema leave the file on save.
+    for gone in ("route_weights", "route_effort", "optimize"):
+        cfg.pop(gone, None)
     # A hand-edited or stale output_style must degrade to default rather
     # than silently injecting nothing while the UI claims a style is on.
     from . import styles as _styles
     cfg["output_style"] = (_styles.normalize(cfg.get("output_style"))
                            or _styles.DEFAULT)
-    # `route` (cheapest/fastest/balanced) never existed gateway-side and was
-    # replaced by auto_route in 0.5.0 — drop the stale key from old configs
-    # (it disappears from disk on the next save_config).
-    cfg.pop("route", None)
+    cfg.pop("route", None)   # a pre-0.5.0 key with no gateway meaning
     # Resolution order: env > credentials file > legacy hand-edited
     # config.json. MESH_API_KEY kept as fallback for one release.
     file_key = (cfg.get("api_key") or "").strip()
@@ -269,7 +272,49 @@ def load_config() -> dict:
     cfg["base_url"] = _validate_base_url(
         os.getenv("MESHAPI_BASE_URL", cfg["base_url"])
     )
+    # Last, so the persist never writes over a file we could not parse and
+    # never drops a hand-edited key before it reached the credentials file.
+    migrated = None if corrupt else _migrate_to_local(cfg, loaded)
+    if migrated:
+        cfg["_migrated_to_local"] = migrated   # runtime-only: the one-time notice
+    if not corrupt:
+        _migrate_policy(cfg, loaded)
     return cfg
+
+
+def _migrate_policy(cfg: dict, loaded: dict) -> None:
+    """route_mode becomes policy: gateway auto stays auto, a local pin is
+    local-first, a cloud pin is pinned."""
+    route_mode = cfg.pop("route_mode", None)
+    if "policy" in loaded:
+        return
+    model = str(cfg.get("model") or "")
+    cfg["policy"] = ("cloud-auto" if route_mode == "auto"
+                     else "local-first" if model.startswith("local/") else "pinned")
+    # local-first always asks for local/auto: a hand-picked local model becomes the pick.
+    if model.startswith("local/") and model != "local/auto" and not cfg.get("local_model"):
+        cfg["local_model"] = model
+    if loaded:
+        try:
+            save_config(cfg)
+        except OSError:
+            pass
+
+
+def _migrate_to_local(cfg: dict, loaded: dict) -> "str | None":
+    """A cloud `model` with no `local_fallback_model` becomes local-first with
+    that model as the fallback."""
+    if "local_fallback_model" in loaded or str(loaded.get("model", "")).startswith("local/"):
+        return None
+    old = loaded.get("model") or ""
+    if old:
+        cfg["local_fallback_model"] = old
+    cfg["model"] = "local/auto"
+    try:
+        save_config(cfg)
+    except OSError:
+        pass
+    return old or None
 
 
 # Keys that are RESOLVED AT RUNTIME (from the environment, or a credentials

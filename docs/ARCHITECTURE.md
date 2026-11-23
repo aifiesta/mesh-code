@@ -4,7 +4,7 @@
 
 The `meshapi` CLI is ~10k lines. About 6k of that is an agent engine worth
 keeping: a streaming client that repairs malformed tool-call deltas from
-misbehaving providers, a local routing table, repo memory, context
+misbehaving providers, repo memory, context
 compaction, safety gates. The other ~4k is a terminal — `prompt_toolkit`
 key bindings, `rich` live regions, a REPL.
 
@@ -34,9 +34,36 @@ So the conversion is a **separation**, not a port. Same engine, new edges.
 │ engine/server.py    transport + static assets             │
 │ engine/session.py   the agent loop, one thread/session    │
 │ engine/protocol.py  the contract                          │
-│ engine/core/        vendored CLI engine (unchanged)       │
-└──────────────────────────────────────────────────────────┘
+│ engine/core/        vendored CLI engine, plus policy.py   │
+│                     (who writes) and budget.py (spend)    │
+│ engine/local/       hardware probe, tiers, downloads and  │
+│                     the llama-server it supervises        │
+└────────────────────────┬─────────────────────────────────┘
+                         │ OpenAI-compatible HTTP, per hop
+              ┌──────────┴───────────┐
+              ▼                      ▼
+   llama-server on 127.0.0.1     Mesh gateway
+   (the local model, free)       (1,000+ cloud models)
 ```
+
+## Who writes each hop
+
+Every hop resolves a `Target` (endpoint, key, model, timeouts) before it is
+sent, so one turn can move between machines:
+
+- `local/` probes RAM and GPU, picks a tier from `manifest.json` (bundled,
+  optionally re-pinned by a validated remote copy)
+  that leaves memory for everything else, downloads and sha256-checks the
+  weights, and runs `llama-server` with a per-launch key. A server that dies
+  is restarted; one that cannot start makes the hop fall back to the cloud.
+- `core/policy.py` decides the tier per hop: local, cloud fallback, gateway
+  auto, pinned, or escalated. Escalation follows the ordered chain in
+  `policy.json` (sent to the gateway as `models` so it fails over server
+  side), is triggered by the user or by evidence of a stuck turn, and hands
+  back to the local model after a hop or token cap.
+- `core/budget.py` keeps the cloud spend ledger. Before each cloud hop it
+  checks today's share of the monthly limit; a hold pauses the cloud while
+  local work continues. Local hops cost nothing and are never recorded.
 
 ## The contract
 
@@ -100,14 +127,18 @@ Kept deliberately small, so fixes can still flow between the CLI and here:
 
 | Module | Change | Why |
 |---|---|---|
-| `safety.py` | gates and path resolution take a `root` | The CLI could ask `os.getcwd()` because one process served one directory. The harness serves many workspaces from one engine, so "relative to what?" has a per-session answer. |
-| `tools.py` | `execute()` / `build_system_prompt()` take `cwd` | Same reason. Also: prompt text that described a terminal now describes a window. |
+| `safety.py` | gates and path resolution take a `root`; a read approved by the mode alone must be inside the project and not an `.env` file | The CLI could ask `os.getcwd()` because one process served one directory. The harness serves many workspaces from one engine, so "relative to what?" has a per-session answer. |
+| `tools.py` | `execute()` / `build_system_prompt()` take `cwd`; `edit_file`, line-range reads with an outline for long files, a note in place of generated files, shell output that keeps failures and the end (full log on disk) | Same reason. Also: prompt text that described a terminal now describes a window. The file tools cut what a task sends to the model (see DECISIONS 2026-11-23). |
 | `config.py` | own config home; reads the CLI's credentials; raises instead of `sys.exit()` | This process serves every open window and must not die over one bad setting. |
 | `plan.py` | `to_dict()` replaces `render()` | The plan used to draw itself with `rich` markup — precisely the coupling that made a second frontend impossible. |
+| `client.py` | one request per hop, a per-hop `Target`, `exclude_models` with `model: "auto"`; thinking level as `reasoning.effort` | The CLI's optimized-attempt retry went with its optimize levers; local hops need their own endpoint and timeouts. Mesh's flat field stops at high. |
+| `memory.py` | `dedupe_read(state, path)`; `forget_read` after an edit | The pruning lever it guarded against is gone. An edit sends only the changed lines, so the earlier read no longer matches the file. |
 
-Everything else — `client.py`, `router.py`, `memory.py`, `compact.py`,
-`optimize.py`, `loopguard.py`, `pricing.py`, `styles.py` — is byte-for-byte
-the CLI's.
+`loopguard.py` and `styles.py` are the CLI's byte-for-byte. `compact.py` and
+`pricing.py` carry fixes made here (the compaction transcript pointer,
+billed-cost lookup) that have not flowed back to the CLI yet. The CLI's local
+routing table and optimize levers were dropped in favour of Mesh's own auto
+routing and prompt caching.
 
 ## What was rebuilt rather than ported
 
@@ -136,11 +167,12 @@ a settings screen drifts away from what the engine actually does. So instead
 
 ```python
 {
-  "key": "route_mode", "type": "enum", "label": "Routing",
+  "key": "policy", "type": "enum", "label": "Who writes",
   "options": [...],
-  "help": "Who chooses the model for each prompt.",
-  "why":  "Smart routing spends less on easy prompts and reaches for a "
-          "stronger model on hard ones, deciding locally in microseconds.",
+  "help": "Local first is free for most of the work; the cloud is called "
+          "only when it earns its keep.",
+  "why":  "A local model handles edits and runs; a strong model is worth "
+          "paying for when the local one is stuck.",
 }
 ```
 
@@ -158,18 +190,15 @@ Two details that matter more than they look:
 - **`why` is not filler.** Most of these dials are only worth touching if you
   know what they cost you. That sentence is the difference between a
   discoverable feature and a mystery toggle.
-- **Unmet dependencies are dimmed, not hidden.** The routing weights only
-  apply in smart mode, but hiding them makes the feature invisible again —
-  which is the problem the whole screen exists to solve.
-
-`route.preview` answers "which model would you pick, and why?" *before* the
-turn runs. The CLI could only answer that after the fact with `/route why`.
+- **Unmet dependencies are dimmed, not hidden.** A setting that only
+  applies under another setting's value stays visible, greyed, with the
+  condition spelled out — hiding it makes the feature invisible again.
 
 ## Why the engine is a frozen binary
 
 Mesh Code must install on a machine with no Python, no Node and no `meshapi`
 CLI. Electron brings its own Node; `packaging/engine.spec` freezes the engine
-— interpreter, dependencies and the routing table — into one ~28 MB directory
+— interpreter, dependencies and the local-model manifest — into one ~28 MB directory
 that the app bundle carries in `Resources/engine`.
 
 Two things about that freeze are easy to get wrong and were both caught by
@@ -180,10 +209,9 @@ running it rather than reading it:
   "attempted relative import with no known parent package" — the engine dies
   before printing its handshake and the shell reports only that it never
   became ready.
-- **The routing table is DATA.** Import analysis cannot see a `.json`, so it
-  has to be listed in `datas` explicitly. Without it smart routing degrades
-  silently to the pinned model, because routing is designed to fail open —
-  nothing would ever surface the loss.
+- **The local-model manifest is DATA.** Import analysis cannot see a
+  `.json`, so it has to be listed in `datas` explicitly; `verify-dist.sh`
+  checks it was frozen in.
 
 In development `main.js` spawns `python3 -m meshharness.server` instead, so a
 contributor does not re-freeze on every change.

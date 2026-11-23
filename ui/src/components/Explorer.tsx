@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { DirEntry, Root } from '../types'
 import { Caret } from './Chevron'
 
@@ -239,7 +240,9 @@ export function Explorer({ roots, activeRoot, listing, activePath,
         })}
       </div>
 
-      {menu && (
+      {/* Portalled: the sidebar's backdrop-filter would make it the menu's
+          containing block and its overflow:hidden would clip it. */}
+      {menu && createPortal(
         <div className="tree-menu" style={{ left: menu.x, top: menu.y }}
              onPointerDown={(e) => e.stopPropagation()}>
           {(() => {
@@ -300,7 +303,8 @@ export function Explorer({ roots, activeRoot, listing, activePath,
               </>
             )
           })()}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   )

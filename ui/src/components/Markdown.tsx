@@ -1,24 +1,19 @@
 import { useMemo, useState } from 'react'
 import { highlightLines, langForTag, Line } from '../highlight'
 
-/**
- * Small markdown renderer — headings, lists, code, emphasis, links.
- *
- * Hand-rolled rather than pulled from npm for one reason that matters: this
- * renders text an LLM produced, which may itself contain text a web page or
- * a file fed to the model. It never builds HTML from that string — every
- * node here is a React element with text set as a child, so there is no
- * dangerouslySetInnerHTML and therefore no injection surface at all.
- */
+/** Hand-rolled markdown (headings, lists, tables, code, emphasis, links):
+ *  model output is rendered as React elements with text children only, never
+ *  as HTML, so there is no injection surface. */
 type Block =
   | { t: 'code'; lang: string; body: string }
   | { t: 'h'; level: number; body: string }
   | { t: 'ul'; items: string[] }
   | { t: 'ol'; items: string[] }
   | { t: 'quote'; body: string }
+  | { t: 'table'; head: string[]; align: ('left' | 'right' | 'center' | null)[]; rows: string[][] }
   | { t: 'p'; body: string }
 
-function parse(src: string): Block[] {
+export function parse(src: string): Block[] {
   const lines = src.split('\n')
   const out: Block[] = []
   let i = 0
@@ -59,14 +54,37 @@ function parse(src: string): Block[] {
       out.push({ t: 'quote', body: body.join('\n') }); continue
     }
 
+    // A pipe row followed by a delimiter row (|---|:--:|) opens a table.
+    if (isRow(line) && i + 1 < lines.length && isDelimiter(lines[i + 1])) {
+      const head = cells(line)
+      const align = cells(lines[i + 1]).map((c) =>
+        c.startsWith(':') && c.endsWith(':') ? 'center' : c.endsWith(':') ? 'right' : c.startsWith(':') ? 'left' : null)
+      const rows: string[][] = []
+      i += 2
+      while (i < lines.length && isRow(lines[i])) rows.push(cells(lines[i++]))
+      out.push({ t: 'table', head, align, rows }); continue
+    }
+
     if (!line.trim()) { i++; continue }
 
     const body: string[] = []
-    while (i < lines.length && lines[i].trim() && !/^(```|#{1,4}\s|>\s?|\s*[-*]\s|\s*\d+\.\s)/.test(lines[i]))
+    while (i < lines.length && lines[i].trim() && !/^(```|#{1,4}\s|>\s?|\s*[-*]\s|\s*\d+\.\s)/.test(lines[i])
+           && !(isRow(lines[i]) && i + 1 < lines.length && isDelimiter(lines[i + 1])))
       body.push(lines[i++])
+    // Every pass must consume a line, or a block the openers above reject spins forever.
+    if (!body.length) body.push(lines[i++])
     out.push(...splitDump(body.join('\n')))
   }
   return out
+}
+
+const isRow = (line: string) => /^\s*\|.*\|\s*$/.test(line)
+const isDelimiter = (line: string) => /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(line)
+
+/** Cells of a pipe row; `\|` inside a cell is a literal pipe. */
+function cells(line: string): string[] {
+  const inner = line.trim().replace(/^\|/, '').replace(/\|$/, '')
+  return inner.split(/(?<!\\)\|/).map((c) => c.replace(/\\\|/g, '|').trim())
 }
 
 /**
@@ -154,6 +172,18 @@ export function Markdown({ text }: { text: string }) {
           case 'ul': return <ul key={i}>{b.items.map((it, j) => <li key={j}><Inline text={it} /></li>)}</ul>
           case 'ol': return <ol key={i}>{b.items.map((it, j) => <li key={j}><Inline text={it} /></li>)}</ol>
           case 'quote': return <blockquote key={i}><Inline text={b.body} /></blockquote>
+          case 'table': return (
+            <div className="md-table" key={i}>
+              <table>
+                <thead><tr>{b.head.map((c, j) => <th key={j} style={b.align[j] ? { textAlign: b.align[j]! } : undefined}><Inline text={c} /></th>)}</tr></thead>
+                <tbody>
+                  {b.rows.map((r, k) => (
+                    <tr key={k}>{b.head.map((_, j) => <td key={j} style={b.align[j] ? { textAlign: b.align[j]! } : undefined}><Inline text={r[j] ?? ''} /></td>)}</tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )
           default: return <p key={i}><Inline text={b.body} /></p>
         }
       })}

@@ -9,11 +9,17 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to build and attach to (e.g. v0.2.4)"
+        description: "Release tag to build and attach to (e.g. v0.3.0)"
         required: true
 
 permissions:
   contents: write
+
+# One run per release tag: two dispatches for the same tag queue, never race
+# each other's uploads.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 env:
   # Where releases live. Set RELEASE_TOKEN (contents: write on that repo)
@@ -21,12 +27,18 @@ env:
   RELEASE_REPO: ${{ vars.RELEASE_REPO || github.repository }}
 
 jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+    with:
+      ref: ${{ inputs.tag || github.ref }}
+
   build:
+    needs: test
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             target: mac
           - os: ubuntu-22.04
             target: linux
@@ -35,12 +47,19 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      # The pinned llama-server archive: re-downloaded only when the manifest changes.
+      - uses: actions/cache@v4
+        with:
+          path: packaging/llama-cache
+          key: llama-${{ matrix.target }}-${{ hashFiles('engine/meshharness/local/manifest.json') }}
       - name: Build (${{ matrix.target }})
         shell: bash
         run: ./packaging/build.sh ${{ matrix.target }}

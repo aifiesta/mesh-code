@@ -74,6 +74,8 @@ def estimate_cost(model_id: str, usage: dict,
     row = find_model(model_id, models)
     if not row:
         return None
+    if row.get("local"):
+        return 0.0
     pricing = row.get("pricing") or {}
     prompt_rate = _dec(pricing.get("prompt_usd_per_1m"))
     completion_rate = _dec(pricing.get("completion_usd_per_1m"))
@@ -127,8 +129,7 @@ def fetch_request_cost(cfg: dict, request_ids: list,
                        timeout: float = 3.0) -> "float | None":
     """Billed USD for one hop from GET /usage/requests/{id}, summed over ids.
 
-    A hop can carry several ids (optimized attempt degraded to raw); every
-    accepted attempt was billed. None only when no id could be settled.
+    Summed over the ids given. None only when no id could be settled.
     """
     if not request_ids:
         return None

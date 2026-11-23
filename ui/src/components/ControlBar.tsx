@@ -1,8 +1,9 @@
 import { useRef, useState } from 'react'
 import { useDismissable } from '../useDismissable'
-import type { RouteExplain, SettingSpec, SettingsDoc, Status } from '../types'
+import type { BudgetSnapshot, LocalStatus, SettingSpec, SettingsDoc, Status } from '../types'
 import { fmtTokens, fmtUsd, pricePerM, type CatalogModel } from '../types'
 import { Field } from './Field'
+import { canAllowMoreToday, ringTone } from '../budget'
 
 /**
  * The dials you touch often, where you are already looking.
@@ -15,14 +16,17 @@ import { Field } from './Field'
  * Every popover ends with the same escape hatch to the full settings, so the
  * bar teaches that more exists without having to show it.
  */
-export function ControlBar({ status, settings, catalog, routeExplain, onSet, onOpenSettings, onExplain }: {
+export function ControlBar({ status, settings, catalog, local, budget, onSet, onOpenSettings, onEscalate, onDeescalate, onBudgetOverride }: {
   status: Status | null
   settings: SettingsDoc | null
   catalog: CatalogModel[]
-  routeExplain: RouteExplain | null
+  local: LocalStatus | null
+  budget: BudgetSnapshot | null
   onSet: (key: string, value: any) => void
   onOpenSettings: (tab?: string) => void
-  onExplain: () => void
+  onEscalate: (harder: boolean) => void
+  onDeescalate: () => void
+  onBudgetOverride: (clearKeyCap: boolean) => void
 }) {
   const [open, setOpen] = useState<string | null>(null)
   const ref = useRef<HTMLDivElement>(null)
@@ -32,26 +36,36 @@ export function ControlBar({ status, settings, catalog, routeExplain, onSet, onO
   const spec = (key: string): SettingSpec | undefined =>
     settings?.settings.find((s) => s.key === key)
 
-  const routeMode = String(spec('route_mode')?.value ?? 'off')
-  const routeLabel = spec('route_mode')?.options?.find((o) => o.value === routeMode)?.label ?? 'Pinned'
+  const policy = status?.policy ?? null
+  const mode = policy?.policy ?? String(spec('policy')?.value ?? 'local-first')
   const model = String(spec('model')?.value ?? status?.model ?? '—')
   const row = catalog.find((m) => String(m.id) === model)
   const inPrice = row ? pricePerM(row, 'prompt') : null
 
-  // What is running RIGHT NOW versus what is configured. With routing on
-  // these differ constantly, and the bar used to show only the configured
-  // one — so it read "claude-sonnet-4.5" through an entire turn that in fact
-  // ran on something else.
+  // What runs right now versus what is configured: under gateway routing or
+  // an escalation they differ for a whole turn.
   const live = !!status?.busy
   const turnModel = status?.turn_model || null
-  const routing = routeMode !== 'off'
-  const routedAway = !!turnModel && turnModel !== model
-  // With routing on and nothing run yet, naming the pinned model is simply
-  // wrong — the router has not chosen, and it usually will not choose that
-  // one. Name what DECIDES until there is a real answer to show.
-  const pending = routing && !turnModel
-  const shownModel = turnModel
-    ?? (routing ? (routeMode === 'auto' ? 'Gateway picks' : 'Router picks') : model)
+  const localId = local?.default_model ?? 'local/auto'
+  const localJob = local?.jobs.find((j) => j.kind === 'model' && j.target === localId) ?? null
+  const localInstalled = !!local?.models.find((m) => m.id === localId)?.installed
+  const localName = local?.models.find((m) => m.id === localId)?.label ?? shortModel(localId)
+  const escalated = policy?.escalated ?? null
+  const tier = policy?.tier ?? (mode === 'cloud-auto' ? 'cloud_auto' : mode === 'pinned' ? 'pinned' : 'local')
+  const writesLocally = tier === 'local' && mode === 'local-first' && localInstalled
+  const pending = mode === 'cloud-auto' && !turnModel
+  const lit = tier === 'escalated' || mode === 'cloud-auto'
+  const value = tier === 'escalated' && escalated ? `Escalated · ${shortModel(escalated)}`
+    : mode === 'cloud-auto' ? (turnModel ? shortModel(turnModel) : 'Gateway picks')
+    : mode === 'pinned' ? shortModel(turnModel ?? model)
+    : localJob ? `Local (${Math.round((100 * localJob.bytes) / Math.max(localJob.total, 1))}%)`
+    : !localInstalled && local ? 'Local (download needed)'
+    : `Local · ${shortModel(localId)}`
+  const writerLine = mode === 'local-first'
+    ? (localInstalled ? `${localName} on this machine · free` : 'Local model not ready · cloud fallback answers')
+    : mode === 'cloud-auto' ? 'Mesh’s Auto Router picks per prompt'
+    : row ? `${shortModel(model)} · ${fmtUsd(inPrice)} in · ${fmtUsd(pricePerM(row, 'completion'))} out, per 1M`
+          : shortModel(model)
   // Session totals only advance when a turn ENDS, so the in-flight turn has
   // to be added in or the numbers sit frozen for the whole run.
   const tokens = (status?.session_tokens ?? 0) + (live ? (status?.turn_tokens ?? 0) : 0)
@@ -62,59 +76,85 @@ export function ControlBar({ status, settings, catalog, routeExplain, onSet, onO
 
   return (
     <div className="controlbar" ref={ref}>
-      {/* ---- model + routing, one pill ----
-          These were two pills that said the same thing twice ("Router picks"
-          next to "Smart (local)"). Now one pill names what decides the model
-          — the pinned model, or the router — and its popover holds the
-          routing switch, the effort dial and the router's pick together. */}
+      {/* One pill names who writes right now; its popover holds the policy
+          switch, the ladder and the Escalate controls. */}
       <div className="ctl ctl-model">
-        <button className={`ctl-btn ${open === 'model' ? 'on' : ''} ${pending ? 'pending' : ''} ${routing ? 'lit' : ''}`}
-                onClick={() => { toggle('model'); if (routing) onExplain() }}
-                title={pending
-                  ? `${routeLabel} routing — the model is chosen per prompt (fallback: ${model})`
-                  : routedAway ? `Routed to ${turnModel} (pinned: ${model})` : shownModel}>
-          <span className="ctl-label">Model</span>
-          <span className="ctl-value">
-            {pending ? (routeMode === 'auto' ? 'Auto routing' : 'Smart routing') : shortModel(shownModel)}
-          </span>
-          {routedAway && <span className="ctl-flag" title="chosen by the router">routed</span>}
+        <button className={`ctl-btn ${open === 'model' ? 'on' : ''} ${pending ? 'pending' : ''} ${lit ? 'lit' : ''}`}
+                onClick={() => toggle('model')}
+                title={policy?.escalated_reason ? `Escalated: ${policy.escalated_reason}` : writerLine}>
+          <span className="ctl-label">{tier === 'escalated' ? 'Cloud' : mode === 'local-first' ? 'Writer' : 'Model'}</span>
+          <span className="ctl-value">{value}</span>
+          {status?.turn_local && <span className="tag local" title="Runs on this machine, free">local</span>}
+          {policy?.escalation_pending && tier !== 'escalated' && <span className="ctl-flag" title="the next turn runs on the strong model">next</span>}
         </button>
         {open === 'model' && (
-          <Pop title="Model" onSettings={() => { setOpen(null); onOpenSettings(routing ? 'routing' : 'model') }}>
-            {spec('route_mode') && <Field spec={spec('route_mode')!} onChange={onSet} compact label="Who picks" />}
+          <Pop title="Policy" onSettings={() => { setOpen(null); onOpenSettings('routing') }}>
+            {spec('policy') && <Field spec={spec('policy')!} onChange={onSet} compact label="Who writes" />}
 
-            {!routing && (
-              <div className="pinned-model">
-                <span className="pinned-name" title={model}>{shortModel(model)}</span>
-                <span className="pinned-price">
-                  {row ? <>{fmtUsd(inPrice)} in · {fmtUsd(pricePerM(row, 'completion'))} out, per 1M</>
-                       : 'Pricing loads with the catalog.'}
-                </span>
-                <button className="btn subtle" onClick={() => { setOpen(null); onOpenSettings('model') }}>
-                  Change model
-                </button>
+            <div className="ladder">
+              <div className="ladder-row"><span>Writes</span><b>{writerLine}</b></div>
+              {mode === 'local-first' && (
+                <>
+                  <div className="ladder-row"><span>Escalates to</span><b>{policy?.escalation_model ? shortModel(policy.escalation_model) : '—'}</b></div>
+                </>
+              )}
+            </div>
+
+            {mode === 'local-first' && (
+              <div className="ladder-actions">
+                {tier === 'escalated' || policy?.escalation_pending
+                  ? <button className="btn subtle" onClick={() => { setOpen(null); onDeescalate() }}>Back to local</button>
+                  : <>
+                      <button className="btn primary" onClick={() => { setOpen(null); onEscalate(false) }}>
+                        {live ? 'Escalate now' : 'Escalate next turn'}
+                      </button>
+                      <button className="btn subtle" onClick={() => { setOpen(null); onEscalate(true) }} title="One reasoning level higher, for this escalation">Harder</button>
+                    </>}
               </div>
             )}
-
-            {routeMode === 'smart' && spec('route_effort') &&
-              <Field spec={spec('route_effort')!} onChange={onSet} compact label="Effort" />}
-            {routeMode === 'smart' && <Explain explain={routeExplain} />}
-            {routeMode === 'auto' && (
-              <p className="pop-note">Mesh’s Auto Router picks upstream, so the model is known once the first hop answers.</p>
+            {mode === 'pinned' && (
+              <button className="btn subtle" onClick={() => { setOpen(null); onOpenSettings('model') }}>Change model</button>
             )}
-
-            {routing && (
-              <p className="pop-fallback">
-                {routedAway
-                  ? <>This turn ran on <b>{shortModel(turnModel!)}</b>. </>
-                  : null}
-                Fallback when the router can’t pick: <b>{shortModel(model)}</b>
-                <button className="link" onClick={() => { setOpen(null); onOpenSettings('model') }}>change</button>
-              </p>
+            {mode === 'cloud-auto' && (
+              <p className="pop-note">Mesh’s Auto Router picks upstream, so the model is known once the first hop answers.</p>
             )}
           </Pop>
         )}
       </div>
+
+      {/* ---- usage ring: today's share of the cloud budget ---- */}
+      {budget && (
+        <div className="ctl ctl-usage">
+          <button className={`ctl-btn ring-btn ${open === 'usage' ? 'on' : ''}`} onClick={() => toggle('usage')}
+                  title={budget.key_cap ? 'Mesh key spend cap reached' : `Today ${budget.day.pct}% · this month ${budget.month.pct}%`}
+                  aria-label="Usage">
+            <Ring pct={budget.key_cap ? 100 : budget.day.pct} tone={ringTone(budget)} />
+          </button>
+          {open === 'usage' && (
+            <Pop title="Usage" onSettings={() => { setOpen(null); onOpenSettings('budget') }}>
+              <UsageBar label="Today" w={budget.day} limited={budget.month.limit > 0} resets={`Resets at midnight${budget.day.override ? ' · extra allowed today' : ''}`} />
+              <UsageBar label="This month" w={budget.month} limited={budget.month.limit > 0} resets={`Resets ${new Date(budget.month.resets * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`} />
+              {Object.keys(budget.month.by_kind).length > 0 && (
+                <dl className="pop-stats">
+                  {Object.entries(budget.month.by_kind).sort((a, b) => b[1] - a[1]).map(([k, v]) => (
+                    <div key={k}><dt>{KIND_LABEL[k] ?? k}</dt><dd>${v.toFixed(4)}</dd></div>
+                  ))}
+                </dl>
+              )}
+              <p className="pop-note">
+                {budget.key_cap
+                  ? 'Your Mesh key’s own spend cap was reached. Raise it at app.meshapi.ai, then clear the hold.'
+                  : 'Today’s share is what is left this month divided by the days left. Work on this machine is never counted.'}
+              </p>
+              {budget.key_cap
+                ? <button className="btn subtle" onClick={() => { setOpen(null); onBudgetOverride(true) }}>I raised the cap</button>
+                : canAllowMoreToday(budget)
+                  ? <button className="btn primary" onClick={() => { setOpen(null); onBudgetOverride(false) }}>Allow more today</button>
+                  : null}
+            </Pop>
+          )}
+        </div>
+      )}
 
       {/* ---- tokens ---- */}
       <div className="ctl ctl-tok">
@@ -155,10 +195,12 @@ export function ControlBar({ status, settings, catalog, routeExplain, onSet, onO
               <div><dt>This turn</dt><dd>${(status?.turn_cost ?? 0).toFixed(6)}</dd></div>
               <div><dt>Session</dt><dd>${(status?.session_cost ?? 0).toFixed(6)}</dd></div>
               <div><dt>Tokens</dt><dd>{tokens.toLocaleString()}</dd></div>
-              <div><dt>Rate</dt><dd>{fmtUsd(inPrice)} / 1M in</dd></div>
+              <div><dt>Rate</dt><dd>{writesLocally ? 'free here' : `${fmtUsd(inPrice)} / 1M in`}</dd></div>
             </dl>
             <p className="pop-note">
-              {estimated
+              {(status?.turn_local || writesLocally) && cost <= 0
+                ? 'Work on this machine is free; nothing was billed. Cloud spend shows here and in the usage ring.'
+                : estimated
                 ? 'Marked ~ because this model reported no cost, so this is '
                   + 'computed from the catalog’s own per-token rates.'
                 : cost <= 0 && tokens > 0
@@ -166,11 +208,41 @@ export function ControlBar({ status, settings, catalog, routeExplain, onSet, onO
                     + 'be priced from the catalog, so this is not what you were billed.'
                   : 'What the gateway actually billed, not an estimate.'}
             </p>
-            {spec('optimize') && <Field spec={spec('optimize')!} onChange={onSet} compact />}
           </Pop>
         )}
       </div>
 
+    </div>
+  )
+}
+
+const KIND_LABEL: Record<string, string> = {
+  escalate: 'Escalations', audit: 'Audits', auto: 'Gateway auto', pinned: 'Pinned model', fallback: 'Cloud fallback', other: 'Other',
+}
+
+/** A 16px ring filled clockwise to `pct`, like a battery for the day's budget. */
+function Ring({ pct, tone }: { pct: number; tone: string }) {
+  const r = 6, c = 2 * Math.PI * r
+  const fill = Math.max(0, Math.min(100, pct)) / 100
+  return (
+    <svg className={`ring ${tone}`} viewBox="0 0 16 16" width="16" height="16" aria-hidden>
+      <circle cx="8" cy="8" r={r} className="ring-track" />
+      {fill > 0 && <circle cx="8" cy="8" r={r} className="ring-fill" strokeDasharray={`${Math.max(c * fill, 1.5)} ${c}`} transform="rotate(-90 8 8)" />}
+    </svg>
+  )
+}
+
+function UsageBar({ label, w, limited, resets }: {
+  label: string; w: BudgetSnapshot['day']; limited: boolean; resets: string
+}) {
+  const over = limited && w.pct >= 100
+  return (
+    <div className="usage">
+      <div className="usage-head"><strong>{label}</strong><span>{limited ? `${w.pct}% used` : `$${w.spent.toFixed(2)} · no limit`}</span></div>
+      <div className="usage-bar" role="progressbar" aria-label={label} aria-valuenow={Math.min(100, w.pct)} aria-valuemin={0} aria-valuemax={100}>
+        <span className={over ? 'over' : w.pct >= 80 ? 'warn' : ''} style={{ width: `${Math.min(100, w.pct)}%` }} />
+      </div>
+      <div className="usage-foot"><span>{resets}</span><span>${w.spent.toFixed(2)}{limited ? ` of $${w.limit.toFixed(2)}` : ''}</span></div>
     </div>
   )
 }
@@ -187,48 +259,5 @@ function Pop({ title, children, onSettings }: {
   )
 }
 
-/** Why the router would pick what it picks — before you spend anything. */
-function Explain({ explain }: { explain: RouteExplain | null }) {
-  if (!explain) return null
-  if (!explain.available) {
-    return (
-      <p className="pop-note">
-        {explain.cohort
-          ? <>Reads as a <b>{pretty(explain.cohort)}</b> prompt
-              {explain.task ? <> ({explain.task})</> : explain.difficulty && <> ({explain.difficulty} difficulty)</>}.
-              {explain.reason && <> Can’t pick yet — {explain.reason}.</>}</>
-          : explain.reason}
-      </p>
-    )
-  }
-  const ranked = explain.ranked.map((r: any) => shortModel(String(r.model ?? r.id ?? r)))
-  const [top, ...rest] = ranked
-  return (
-    <div className="explain">
-      <div className="explain-top">
-        <span className="explain-cap">For this prompt the router would pick</span>
-        <span className="explain-model">
-          {top}{explain.thinking && explain.thinking !== 'default' && <> · {explain.thinking} thinking</>}
-        </span>
-        <span className="explain-cap">
-          {explain.task
-            ? <>Reads as a <b>{explain.task}</b>{explain.why && <>: {explain.why}</>}</>
-            : <>Reads as <b>{pretty(explain.cohort)}</b>
-                {explain.difficulty && <> · {explain.difficulty} difficulty</>}</>}
-        </span>
-      </div>
-      {rest.length > 0 && (
-        <p className="explain-rest">
-          Then {rest.slice(0, 3).join(', ')}
-        </p>
-      )}
-    </div>
-  )
-}
-
 const shortModel = (m: string) => (m.includes('/') ? m.split('/').slice(1).join('/') : m)
 
-/** Engine data is rendered as-is, so never assume a field's runtime type —
- *  a stray non-string here previously threw and blanked the whole window. */
-const pretty = (v: unknown) =>
-  typeof v === 'string' ? v.replace(/[-_]/g, ' ') : String(v ?? '')

@@ -46,10 +46,16 @@ info "bundled payload"
 for f in "Contents/Resources/engine/mesh-code-engine" "Contents/Resources/ui/index.html"; do
   [ -e "$MOUNTED/$APP_NAME.app/$f" ] && ok "$f" || bad "missing $f"
 done
-TABLE=$(find "$MOUNTED/$APP_NAME.app/Contents/Resources/engine" -name routing_table.json | wc -l | tr -d ' ')
-[ "$TABLE" = "1" ] && ok "routing_table.json bundled" || bad "routing table missing (smart routing degrades silently)"
-SCORES=$(find "$MOUNTED/$APP_NAME.app/Contents/Resources/engine" -name model_scores.json | wc -l | tr -d ' ')
-[ "$SCORES" = "1" ] && ok "model_scores.json bundled" || bad "model scores missing"
+MANIFEST=$(find "$MOUNTED/$APP_NAME.app/Contents/Resources/engine" -path '*meshharness/local/manifest.json' | wc -l | tr -d ' ')
+[ "$MANIFEST" = "1" ] && ok "local manifest.json bundled" || bad "local manifest missing (no local model can be chosen)"
+POLICY=$(find "$MOUNTED/$APP_NAME.app/Contents/Resources/engine" -path '*meshharness/core/policy.json' | wc -l | tr -d ' ')
+[ "$POLICY" = "1" ] && ok "policy.json bundled" || bad "policy.json missing (every session would fail to start)"
+LLAMA="$MOUNTED/$APP_NAME.app/Contents/Resources/llama/llama-server"
+if [ -x "$LLAMA" ] && "$LLAMA" --version >/dev/null 2>&1; then
+  ok "llama-server runs ($("$LLAMA" --version 2>&1 | head -1)) · $(cat "$(dirname "$LLAMA")/variant" "$(dirname "$LLAMA")/tag" 2>/dev/null | tr '\n' ' ')"
+else
+  bad "llama-server missing or not runnable under Resources/llama"
+fi
 
 info "simulating a real transfer (quarantine, as a browser/AirDrop sets it)"
 cp -R "$MOUNTED/$APP_NAME.app" "$STAGE/"

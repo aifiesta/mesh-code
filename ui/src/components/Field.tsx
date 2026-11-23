@@ -2,15 +2,9 @@ import { IconX } from './Chevron'
 import { useEffect, useState } from 'react'
 import type { SettingSpec } from '../types'
 
-/**
- * Renders ONE setting from the engine's schema.
- *
- * Nothing here knows what "route_mode" or "optimize" mean — it dispatches on
- * `type` and shows the label, help and rationale the engine supplied. That
- * is what keeps three separate surfaces (control bar, palette, settings
- * sheet) consistent, and what lets a new engine setting appear in the UI
- * without a matching frontend change.
- */
+/** Renders ONE setting from the engine's schema by `type` alone, so the
+ *  control bar, palette and sheet agree and a new engine setting needs no
+ *  frontend change. */
 export function Field({ spec, onChange, compact, label }: {
   spec: SettingSpec
   onChange: (key: string, value: any) => void
@@ -85,27 +79,11 @@ function control(spec: SettingSpec, set: (v: any) => void) {
         </button>
       )
 
-    case 'dial':
-      return (
-        <div className="dial">
-          <input
-            id={`f-${spec.key}`}
-            type="range"
-            min={spec.min ?? 0} max={spec.max ?? 1} step={spec.step ?? 0.05}
-            value={Number(v) || 0}
-            onChange={(e) => set(Number(e.target.value))}
-          />
-          <span className="dial-value">
-            {Number(v) > 0 ? `${Math.round(Number(v) * 100)}%` : 'Off'}
-          </span>
-        </div>
-      )
-
     case 'int':
       return <IntField spec={spec} value={Number(v) || 0} onCommit={set} />
 
-    case 'weights':
-      return <Weights value={v ?? {}} onChange={set} />
+    case 'money':
+      return <IntField spec={spec} value={Number(v) || 0} onCommit={set} money />
 
     case 'text':
       return spec.multiline ? (
@@ -122,38 +100,6 @@ function control(spec: SettingSpec, set: (v: any) => void) {
     default:
       return null
   }
-}
-
-/**
- * The routing balance. Shown as three sliders that always sum to 100%, since
- * only the RATIO matters to the router — an absolute value would imply a
- * precision the weights do not have.
- */
-function Weights({ value, onChange }: {
-  value: Record<string, number>
-  onChange: (v: Record<string, number>) => void
-}) {
-  const keys = ['cost', 'cap', 'speed'] as const
-  const LABEL = { cost: 'Cheaper', cap: 'More capable', speed: 'Faster' }
-  const total = keys.reduce((a, k) => a + (Number(value[k]) || 0), 0) || 1
-
-  return (
-    <div className="weights">
-      {keys.map((k) => {
-        const pct = Math.round(((Number(value[k]) || 0) / total) * 100)
-        return (
-          <div className="weight-row" key={k}>
-            <span className="weight-label">{LABEL[k]}</span>
-            <input
-              type="range" min={0} max={100} value={pct}
-              onChange={(e) => onChange({ ...value, [k]: Number(e.target.value) / 100 })}
-            />
-            <span className="weight-pct">{pct}%</span>
-          </div>
-        )
-      })}
-    </div>
-  )
 }
 
 function ModelList({ value, onChange }: {
@@ -192,22 +138,27 @@ function ModelList({ value, onChange }: {
  * "Max steps per turn" could silently cap every turn at a handful of hops.
  * Wheel now blurs the field instead of changing it.
  */
-function IntField({ spec, value, onCommit }: {
-  spec: SettingSpec; value: number; onCommit: (v: number) => void
+function IntField({ spec, value, onCommit, money }: {
+  spec: SettingSpec; value: number; onCommit: (v: number) => void; money?: boolean
 }) {
   const [draft, setDraft] = useState(String(value))
   useEffect(() => { setDraft(String(value)) }, [value])
   const commit = () => {
-    const n = Math.max(spec.min ?? 0, Math.min(spec.max ?? 999, Math.round(Number(draft) || 0)))
+    // A cleared money field is mid-edit, not "No limit".
+    if (money && !draft.trim()) { setDraft(String(value)); return }
+    const raw = Number(draft) || 0
+    const n = Math.max(spec.min ?? 0, Math.min(spec.max ?? 999, money ? Math.round(raw * 100) / 100 : Math.round(raw)))
     setDraft(String(n))
     if (n !== value) onCommit(n)
   }
   return (
     <div className="stepper">
+      {money && <span className="stepper-unit">$</span>}
       <input
         id={`f-${spec.key}`}
         type="number"
-        inputMode="numeric"
+        inputMode={money ? 'decimal' : 'numeric'}
+        step={money ? 0.5 : 1}
         min={spec.min ?? 0} max={spec.max ?? 999}
         value={draft}
         onChange={(e) => setDraft(e.target.value)}

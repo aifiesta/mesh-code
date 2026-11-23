@@ -13,7 +13,7 @@ shown first.
 | Another local process / another user on the box | same | Loopback-only bind + token |
 | A prompt injection in a file, web page or command output | to make the agent exfiltrate secrets or write somewhere bad | System-prompt rule that external content is data; safety gates on paths and commands; sensitive-path denylist that applies even in bypass mode |
 | A malicious or confused model | to write outside the project, read `~/.ssh`, `curl \| sh` | Same gates, plus the approval dialog showing the real diff/command |
-| A shared terminal or screen | the API key or the engine token | Key stored `0600`; token on a private pipe, never a shared tty |
+| A shared terminal or screen | the API key or the engine token | Key stored `0600` (macOS/Linux); token on a private pipe, never a shared tty |
 
 ## The transport
 
@@ -65,12 +65,41 @@ or a web page. So:
   output never becomes clickable, and they open in the real browser
 - navigation away from the engine origin is blocked
 
+## The local model
+
+- `llama-server` binds `127.0.0.1` on a free port and requires a key minted
+  per launch, written to a `0600` file (macOS/Linux) and passed with
+  `--api-key-file`, so another user's process cannot borrow the model.
+  Processes running as you can read the key, as they can read your files.
+- Every runtime archive and model file is checked against a sha256 before
+  use. A remote manifest may re-pin the download facts (repository,
+  revision, file name, sha256, size, runtime tag), each model's ranking and
+  sizing figures, and the model list;
+  each is validated as a bare name on a trusted host (Hugging Face, GitHub).
+  Server flags and URL templates always come from the bundled copy, so a
+  tampered remote cannot inject server arguments or paths. Archives are
+  extracted with path-escape and symlink checks.
+- A server left behind by a crash is found by its pid file and stopped on
+  the next launch, and only if its command line contains `llama-server`.
+
+## Commands you type
+
+A message that starts with `!` runs in the project folder without an
+approval dialog, like the Shell tab: it is you typing, not the agent. The
+command, its exit code and at most 4,000 characters of its output (the start
+and the end) are added to the conversation as data and sent to whichever
+model answers next, which may be a cloud one. The rest is not sent or saved;
+the window shows up to 8,000 characters of it until the app reloads. Do not
+`!cat` a secret you would not paste into a prompt.
+
 ## Secrets
 
-- API key: `~/.mesh-code/credentials`, created `0600` via `os.open` with
+- API key: `~/.mesh-code/credentials`, created `0600` (macOS/Linux) via `os.open` with
   the mode set — never write-then-chmod, which leaves a readable window.
 - The key is never written to `config.json` (`save_config` strips it) and is
   sent only to the configured Mesh gateway.
+- The spend ledger (`~/.mesh-code/budget.json`) is written `0600` (macOS/Linux); it holds
+  amounts only, no prompts or keys.
 - `base_url` must be `https://`, or `http://` for a genuinely local host —
   resolved through a URL parser, so `http://localhost.evil.com` is rejected
   rather than smuggled through as "local".

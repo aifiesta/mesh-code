@@ -100,9 +100,6 @@ export class EngineClient {
   setModel(session: string, model: string) {
     this.send(Req.SET_MODEL, { session, model })
   }
-  setRoute(session: string, route_mode: string) {
-    this.send(Req.SET_ROUTE, { session, route_mode })
-  }
   stopServer(session: string, pid: number) {
     this.send(Req.STOP_SERVER, { session, pid })
   }
@@ -112,6 +109,16 @@ export class EngineClient {
   saveKey(key: string) {
     this.send(Req.SAVE_KEY, { key })
   }
+  escalate(session: string, harder = false) { this.send(Req.ESCALATE, { session, harder }) }
+  deescalate(session: string) { this.send(Req.DEESCALATE, { session }) }
+  budgetOverride(clearKeyCap = false) { this.send(Req.BUDGET_OVERRIDE, { clear_key_cap: clearKeyCap }) }
+  runCommand(session: string, command: string) { this.send(Req.RUN_COMMAND, { session, command }) }
+  localInstall(model: string) { this.send(Req.LOCAL_INSTALL, { model }) }
+  localCancel(job: string) { this.send(Req.LOCAL_CANCEL, { job }) }
+  localDelete(model: string) { this.send(Req.LOCAL_DELETE, { model }) }
+  localServer(action: 'stop' | 'restart') { this.send(Req.LOCAL_SERVER, { action }) }
+  localRefresh() { this.send(Req.LOCAL_REFRESH, {}) }
+  localDecline() { this.send(Req.LOCAL_DECLINE, {}) }
 
   /** Beta feedback → the engine relays it to the Google Form (POST
    *  /api/feedback). Plain HTTP rather than the socket: a one-shot

@@ -498,9 +498,8 @@ TOOLS = [
 OUTPUT_LIMIT = 8000
 # read_file cap: an uncapped read (a 2 MB bundle, a log file) lands whole in
 # history INSIDE the compactor's keep-recent window, where nothing can trim
-# it — one such read makes a context-length error unrecoverable. 80k chars
-# (~20k tokens) is plenty for any file a model should read in one piece.
-READ_LIMIT = 80_000
+# it. 24k chars (~6k tokens) keeps one read from inflating every later hop.
+READ_LIMIT = 24_000
 MAX_BASH_TIMEOUT = 600  # model-requested run_bash timeout ceiling (seconds)
 PLAN_TOOLS = ("create_plan", "update_step")  # meta — auto-approved, no side effects
 # Asking the user a question has no side effects and is answered by the user
@@ -1169,7 +1168,8 @@ def _long_file_map(path: Path, content: str, lines: list) -> str:
             f"about {len(content) // 4} tokens — so it is not returned whole.")
     how = ("[Read the part you need by calling again with offset and limit. "
            "To find a line, search with a shell command (grep -n). To read "
-           "all of it, call again with offset=1.]")
+           "it from the top, call again with offset=1; a long file comes "
+           "back in parts.]")
     defs = _definitions(path, lines)
     if defs:
         shown, used = [], 0
@@ -1238,23 +1238,16 @@ def read_file_detail(arguments: dict, cwd: "str | Path | None" = None) -> dict:
                 "with a shell command.]",
                 content=content,
             )
-        if len(content) <= min(READ_LIMIT, WHOLE_READ_LIMIT):
+        if len(content) <= WHOLE_READ_LIMIT:
             return result(content, whole=True, shown=True, content=content)
-        if len(content) <= READ_LIMIT:
-            # Fits, but is long enough that returning it whole is the single
-            # most expensive thing a read can do. Return a map instead; one
-            # more call with offset=1 still gets all of it.
-            return result(_long_file_map(target, content, lines), content=content)
-        # Too big for one read — see READ_LIMIT. Return the first chunk, cut
-        # at a line boundary, with the footer that says how to continue.
-        start, count = 1, None
-    else:
-        # Lenient on purpose: offset 0 means "from the top" and limit 0 means
-        # "no limit" — an error here would cost a whole extra round trip.
-        start = max(1, _as_int(offset)) if offset is not None else 1
-        count = _as_int(limit) if limit is not None else None
-        if count is not None and count < 1:
-            count = None
+        return result(_long_file_map(target, content, lines), content=content)
+
+    # Lenient on purpose: offset 0 means "from the top" and limit 0 means
+    # "no limit" — an error here would cost a whole extra round trip.
+    start = max(1, _as_int(offset)) if offset is not None else 1
+    count = _as_int(limit) if limit is not None else None
+    if count is not None and count < 1:
+        count = None
 
     if total == 0:
         return result(f"[{target.name} is empty.]", content=content)
@@ -1441,8 +1434,11 @@ def apply_edit(target: Path, old: str, new: str, replace_all: bool = False,
 
 def execute(name: str, arguments: dict, cfg: "dict | None" = None,
             cwd: "str | Path | None" = None,
-            cancel: "threading.Event | None" = None) -> str:
+            cancel: "threading.Event | None" = None, *, condense: bool = True) -> str:
     """Run a tool locally and return a string result for the model.
+
+    `condense=False` returns run_bash output uncut and saves no log: a `!`
+    command's output is the user's, and the session clips it itself.
 
     `cancel` is the session's interrupt flag; run_bash kills the whole
     process tree as soon as it is set.
@@ -1553,7 +1549,8 @@ def execute(name: str, arguments: dict, cfg: "dict | None" = None,
                     "smaller commands."
                 )
             # The "[exit N]" suffix is parsed by compact._describe_action.
-            return f"{condense_output(clean_output(out))}\n[exit {proc.returncode}]"
+            out = clean_output(out)
+            return f"{condense_output(out) if condense else out}\n[exit {proc.returncode}]"
         except Exception as e:
             return f"Error: {e}"
 
