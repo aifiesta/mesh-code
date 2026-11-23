@@ -222,3 +222,20 @@ def test_local_model_setting_only_accepts_an_installed_model(app_client):
         ws.send_text(json.dumps({"type": Request.SET_CONFIG, "key": "local_model", "value": "local/tiny"}))
         _drain(ws, Event.SETTINGS)
         assert engine.cfg["local_model"] == "local/tiny"
+
+
+def test_a_fresh_install_starts_with_smart_routing_on(gateway, local_world, monkeypatch):
+    """Local models live inside Smart routing; with routing pinned by
+    default a new user would never reach them."""
+    from meshharness import settings as settings_mod
+    from meshharness.core import config as config_mod
+    monkeypatch.setenv("MESHAPI_BASE_URL", gateway.base_url)
+    monkeypatch.setenv("MESHAPI_API_KEY", "rsk_test")
+    assert not config_mod.CONFIG_FILE.exists()
+    engine = Engine(token="secret-token")
+    try:
+        assert engine.cfg["route_mode"] == "smart" and engine.cfg["local_enabled"] is True
+        assert json.loads(config_mod.CONFIG_FILE.read_text())["route_mode"] == "smart"
+        assert settings_mod.BY_KEY["route_mode"]["default"] == "smart"
+    finally:
+        engine.shutdown()
