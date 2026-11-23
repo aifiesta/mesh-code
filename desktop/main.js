@@ -220,7 +220,24 @@ async function pickFolder() {
   return r.canceled ? null : r.filePaths[0]
 }
 
+// One copy of the app per user. Each copy runs its own engine, and each
+// engine can load its own local model: two copies on a 16 GB Mac meant two
+// 9B runners (about 11 GB) and a frozen machine. Opening the app again now
+// brings the open window forward instead. (From aifiesta/mesh-code#17.)
+const primary = app.requestSingleInstanceLock()
+if (!primary) app.quit()
+app.on('second-instance', () => {
+  if (win && !win.isDestroyed()) {
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
+  } else if (engine) {
+    createWindow()
+  }
+})
+
 app.whenReady().then(async () => {
+  if (!primary) return
   ipcMain.handle('pick-folder', pickFolder)
   // 'system' hands control back to macOS; 'light'/'dark' force it, which is
   // what repaints the vibrancy behind a manually-chosen theme.
