@@ -127,7 +127,9 @@ class LocalModels:
             if srv["state"] == "ready" and srv.get("model"):
                 running[srv["model"]] = srv["ctx"]
             planned = {m["id"]: p.ctx for m in manifest["models"] if (p := self._plan_for(m["id"]))}
-            return catalog_rows(manifest, installed=self.installed_ids(), default_id=self.default_id(),
+            # Only models that fit this machine are offered for picking.
+            fitting = {**manifest, "models": [m for m in manifest["models"] if m["id"] in planned]}
+            return catalog_rows(fitting, installed=self.installed_ids(), default_id=self.default_id(),
                                 running_ctx=running, planned_ctx=planned)
 
     def status(self) -> dict:

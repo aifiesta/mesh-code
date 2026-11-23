@@ -112,6 +112,7 @@ export function SettingsSheet({ settings, catalog, local, localActions, initialT
               onExclude={(id) => onSet('exclude_models', [...excluded, id])}
               onUnexclude={(id) => onSet('exclude_models', excluded.filter((x) => x !== id))}
               onRefresh={() => onRefreshCatalog(true)}
+              onInstall={(id) => localActions?.install(id)}
             />
           )}
 

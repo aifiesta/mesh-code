@@ -2451,3 +2451,5 @@ body.resizing .rail-resize { pointer-events: auto; }
 .localpanel .browser-row .m-actions { opacity: 1; }
 .localpanel .browser-row.off { opacity: .55; }
 .localpanel .m-actions button:disabled { opacity: .45; cursor: default; }
+.tag.local { background: var(--ok-film); color: var(--ok); }
+.m-id .m-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
