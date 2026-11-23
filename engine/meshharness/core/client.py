@@ -7,7 +7,6 @@ from typing import Iterable, Optional
 import httpx
 
 from . import caching
-from .optimize import prepare
 
 
 def _is_complete_json(s: str) -> bool:
@@ -269,11 +268,8 @@ def stream_chat(
         and surface as the meta dict's `tool_calls` field.
 
     A model that only caches when asked gets the two cache marks (see
-    caching.py). When the `optimize` dial is set (BETA), the request is also
-    rewritten by the phase 1 lever stack in optimize.py before sending, and
-    the plan rides on the final meta dict as `optimize_plan`. If the gateway
-    rejects a request changed in either way, we retry the raw request once,
-    so neither can be the reason a turn fails.
+    caching.py). If the gateway rejects the marked request, we retry the raw
+    request once, so caching can never be the reason a turn fails.
     """
     url = f"{cfg['base_url']}/chat/completions"
     headers = {
@@ -281,36 +277,22 @@ def stream_chat(
         "Content-Type": "application/json",
     }
     # Strip any empty assistant message BEFORE both the raw payload and the
-    # optimize path — one poisons every subsequent turn (see the helper).
+    # marked copy — one poisons every subsequent turn (see the helper).
     messages = _drop_empty_assistant(messages)
     payload = build_payload(messages, cfg, tools)
 
-    plan: dict = {}
     attempts = [payload]
     # Cache marks, on a copy: the raw payload and the stored history never
     # carry one. Not when the gateway picks the model ("auto"): which model
-    # will answer is not known here.
-    marked = messages
+    # will answer is not known here. The raw payload is the fallback.
     if caching.asked_for() and caching.needs_marks(payload["model"]):
         marked = caching.mark(messages)
-    dial = float(cfg.get("optimize") or 0)
-    if dial > 0:
-        # Pass the model string actually being sent ("auto" falls back to
-        # optimize's default cache-minimum heuristic — harmless). Marks set
-        # above count as the client's own, so prepare() adds none.
-        opt_messages, extra, plan = prepare(
-            marked, payload["model"], dial, has_tools=bool(tools)
-        )
-        if plan.get("levers_applied"):
-            optimized = {**payload, **extra, "messages": opt_messages}
-            attempts = [optimized, payload]  # raw payload is the fallback
-    elif marked is not messages:
-        attempts = [{**payload, "messages": marked}, payload]
+        if marked is not messages:
+            attempts = [{**payload, "messages": marked}, payload]
 
-    # A caller-forced output budget wins over every other lever — it exists
-    # because the gateway already rejected this request for asking too much
-    # (input + max_tokens > context window). Applied last, to every attempt,
-    # so optimize's own max_tokens default can't re-trigger the same 400.
+    # A caller-forced output budget — it exists because the gateway already
+    # rejected this request for asking too much (input + max_tokens > context
+    # window). Applied to every attempt.
     forced_max = cfg.get("max_tokens")
     if forced_max:
         attempts = [{**body, "max_tokens": int(forced_max)} for body in attempts]
@@ -327,8 +309,8 @@ def stream_chat(
     for attempt_index, body in enumerate(attempts):
         is_last_attempt = attempt_index == len(attempts) - 1
         retry_raw = False  # set if an in-band error should degrade to the raw request
-        # Fresh accumulator + progress per attempt. A raw retry after an
-        # optimized attempt streamed some content/tool-call deltas used to
+        # Fresh accumulator + progress per attempt. A raw retry after a
+        # marked attempt streamed some content/tool-call deltas used to
         # reuse these: buf concatenated both attempts' text, and accum merged
         # attempt-1 fragments with attempt-2 deltas by index into invalid JSON.
         accum = ToolCallAccumulator()
@@ -338,13 +320,7 @@ def stream_chat(
             if r.status_code >= 400:
                 r.read()  # so e.response.text works in the caller
                 if not is_last_attempt:
-                    # Optimized request rejected; degrade to the raw request.
-                    plan = {
-                        "dial": dial,
-                        "levers_applied": [],
-                        "degraded": f"gateway returned {r.status_code}, sent raw request",
-                    }
-                    continue
+                    continue  # marked request rejected; send the raw request
             r.raise_for_status()
             # The consumer closes this from its own thread on interrupt; that is
             # the only way to unblock iter_lines() while the wire is silent.
@@ -383,14 +359,8 @@ def stream_chat(
                 if err:
                     msg = err.get("message") if isinstance(err, dict) else str(err)
                     if not is_last_attempt:
-                        # Optimized attempt errored in-band (HTTP 200 + {"error"})
+                        # Marked attempt errored in-band (HTTP 200 + {"error"})
                         # — degrade to the raw request, same as an HTTP 4xx would.
-                        # The optimize beta must never be the reason a turn fails.
-                        plan = {
-                            "dial": dial,
-                            "levers_applied": [],
-                            "degraded": "gateway in-band error on optimized request, sent raw",
-                        }
                         retry_raw = True
                     else:
                         last_meta["error"] = msg
@@ -431,10 +401,10 @@ def stream_chat(
                 if usage or cost:
                     last_meta.update({"usage": usage, "cost": cost})
         if retry_raw:
-            # Discard whatever the aborted optimized attempt streamed so the
+            # Discard whatever the aborted marked attempt streamed so the
             # caller doesn't keep its partial text or half tool call.
             yield {"stream_reset": True}
-            continue  # optimized attempt errored in-band — try the raw request
+            continue  # marked attempt errored in-band — try the raw request
         break  # this attempt streamed successfully
 
     if last_model:
@@ -449,8 +419,6 @@ def stream_chat(
         last_meta["accum_dropped"] = accum.dropped
     if tool_calls:
         last_meta["tool_calls"] = tool_calls
-    if plan:
-        last_meta["optimize_plan"] = plan
     if last_meta:
         yield last_meta
 

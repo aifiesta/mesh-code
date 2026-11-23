@@ -594,25 +594,16 @@ def test_a_model_with_no_cached_price_is_counted_in_full():
                - (sent * 1.0 + written * 4.0) / 1e6) < 1e-9
 
 
-def test_anthropic_models_are_full_price_until_the_app_asks_for_caching():
-    full = _priced("anthropic/claude-x")["cost_per_task"]
-    cached = _priced("anthropic/claude-x", asks_for_caching=True)["cost_per_task"]
-    assert cached < 0.4 * full
-    assert abs(cached - _priced("deepseek/x")["cost_per_task"]) < 1e-9
+def test_anthropic_models_are_counted_at_full_price():
+    """The app asks Claude models to cache, but the router does not count
+    on it: the estimate would leave out the cache write price and Claude's
+    larger token counts, and would move small tasks off DeepSeek on that."""
+    sent, written = router.TOKEN_PRICED["mid"]
+    assert abs(_priced("anthropic/claude-x")["cost_per_task"]
+               - (sent * 1.0 + written * 4.0) / 1e6) < 1e-9
+    assert _priced("deepseek/x")["cost_per_task"] < 0.4 * _priced("anthropic/claude-x")["cost_per_task"]
 
 
 def test_caching_makes_a_task_cheaper_not_faster():
     assert _priced("deepseek/x")["minutes_per_task"] == \
         _priced("anthropic/claude-x")["minutes_per_task"]
-
-
-def test_the_session_tells_the_router_whether_it_asks_for_caching(harness, monkeypatch):
-    seen = []
-    real = router.choose
-    monkeypatch.setattr(router, "choose",
-                        lambda *a, **kw: seen.append(kw.get("asks_for_caching")) or real(*a, **kw))
-    off = _scored_session(harness, monkeypatch)
-    off.session.explain_route("fix the typo in README.md")
-    on = _scored_session(harness, monkeypatch, optimize=0.3)
-    on.session.explain_route("fix the typo in README.md")
-    assert seen == [False, True]

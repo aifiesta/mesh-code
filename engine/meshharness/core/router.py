@@ -504,19 +504,19 @@ TOKEN_PRICED = {"low": (12_000, 300), "mid": (40_000, 1_500), "high": (100_000, 
 # providers bill that at a much lower cached rate without being asked: in the
 # recorded runs about three quarters of the input was billed that way. List
 # prices alone made two models look tied whose bills were three times apart.
-# Anthropic models cache only when the request asks for it (the Optimize
-# setting), so they are counted at full price until it does.
+# Anthropic models cache only when the request asks for it. The app does ask
+# (caching.py), but they are still counted at full price: pricing them as
+# cached moves small tasks from DeepSeek to Claude Haiku, and the measured
+# bills do not support that, because this estimate leaves out the cache write
+# price and Claude's larger token counts (docs/bench/caching_pruning).
 CACHED_SHARE = 0.75
 
 
-def _bills_cached(model: str, catalog_row: dict, asks_for_caching: bool) -> bool:
-    """Is re-sent input billed at the cached rate for this model, as the app
-    is set up right now?"""
+def _bills_cached(model: str, catalog_row: dict) -> bool:
+    """Is re-sent input counted at the cached rate for this model?"""
     if (catalog_row.get("pricing") or {}).get("cache_read_input_usd_per_1m") is None:
         return False
-    if (model or "").startswith("anthropic/"):
-        return bool(asks_for_caching)
-    return True
+    return not (model or "").startswith("anthropic/")
 _LEVEL_ORDER = ("default", "none", "low", "medium", "high", "xhigh", "max")
 _TABLE_RUNG = {"low": "low", "mid": "low", "high": "mid", "xhigh": "high", "max": "max"}
 
@@ -613,8 +613,7 @@ def _live_entries(doc, catalog, exclude, needs_tools, needs_ctx, level) -> list:
     return out
 
 
-def _at_token_prices(ents: list, catalog, band: str,
-                     asks_for_caching: bool = False) -> "list | None":
+def _at_token_prices(ents: list, catalog, band: str) -> "list | None":
     """The same entries priced for a typical task on this rung the way the
     gateway would bill it, or None when any price is unknown (the caller keeps
     the benchmark figures for all of them — never a mix of the two scales).
@@ -637,7 +636,7 @@ def _at_token_prices(ents: list, catalog, band: str,
         if not listed or listed <= 0:
             return None
         cost = listed
-        if _bills_cached(e["model"], rows.get(e["model"]) or {}, asks_for_caching):
+        if _bills_cached(e["model"], rows.get(e["model"]) or {}):
             cost = estimate_cost(e["model"], dict(usage, prompt_tokens_details={
                 "cached_tokens": int(sent * CACHED_SHARE)}), catalog) or listed
         out.append(dict(e, cost_per_task=cost,
@@ -658,17 +657,14 @@ def pick_scored(difficulty: str, weights: "dict | None", doc: "dict | None",
                 needs_ctx: int = 0, incumbent: "str | None" = None,
                 exclude: "set | None" = None, incumbent_bonus: float = 0.0,
                 failed: "tuple | None" = None,
-                level: "str | None" = None,
-                asks_for_caching: bool = False) -> "dict | None":
+                level: "str | None" = None) -> "dict | None":
     """Choose a model and thinking level for coding work, or None when the
     scores cover nothing the gateway offers (the caller falls back).
 
     `failed` = (model, level) that was just serving and visibly struggled:
     only entries clearly stronger than it are considered — their cautious
     chance must beat its full score. `level` = a thinking level the user
-    fixed. `asks_for_caching` = the app marks its requests for caching, which
-    is what makes Anthropic models bill re-sent input at the cached rate.
-    Pure — no I/O, no mutation of its inputs."""
+    fixed. Pure — no I/O, no mutation of its inputs."""
     try:
         band = _band(difficulty)
         ents = _live_entries(doc, catalog, exclude, needs_tools, needs_ctx, level)
@@ -676,7 +672,7 @@ def pick_scored(difficulty: str, weights: "dict | None", doc: "dict | None",
             return None
         scale = "benchmark task"
         if band in TOKEN_PRICED:
-            priced = _at_token_prices(ents, catalog, band, asks_for_caching)
+            priced = _at_token_prices(ents, catalog, band)
             if priced:
                 ents, scale = priced, "token prices"
         k = _slider_scale(weights)
@@ -739,8 +735,7 @@ def choose(cohort: str, difficulty: str, weights: "dict | None",
            needs_tools: bool = False, needs_ctx: int = 0,
            incumbent: "str | None" = None, exclude: "set | None" = None,
            incumbent_bonus: float = 0.0, failed: "tuple | None" = None,
-           level: "str | None" = None, scores_doc: "dict | None" = None,
-           asks_for_caching: bool = False) -> "dict | None":
+           level: "str | None" = None, scores_doc: "dict | None" = None) -> "dict | None":
     """The router's one entry point. Coding work is picked from the per-level
     scores; anything they do not cover — another kind of prompt, or an account
     that offers none of the scored models — falls back to the routing table,
@@ -752,8 +747,7 @@ def choose(cohort: str, difficulty: str, weights: "dict | None",
         got = pick_scored(difficulty, weights, scores_doc, catalog,
                           needs_tools=needs_tools, needs_ctx=needs_ctx,
                           incumbent=incumbent, exclude=exclude,
-                          incumbent_bonus=incumbent_bonus, failed=failed, level=level,
-                          asks_for_caching=asks_for_caching)
+                          incumbent_bonus=incumbent_bonus, failed=failed, level=level)
         if got:
             got["cohort"] = cohort
             return got

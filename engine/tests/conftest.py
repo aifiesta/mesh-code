@@ -93,7 +93,7 @@ def harness(gateway, tmp_path):
             "model": "test/model",
             "system": "test",
             "auto_route": False, "repo_memory": False, "fallback_models": [],
-            "reasoning_effort": None, "optimize": 0.0, "max_hops": 0,
+            "reasoning_effort": None, "max_hops": 0,
             "auto_compact": False, "stall_policy": "pause", "route_mode": "off",
             "output_style": "default",
         }
