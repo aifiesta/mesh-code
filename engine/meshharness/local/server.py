@@ -61,6 +61,10 @@ class LocalServer:
         # Held: stopped by the user or by something outside the app; only
         # release() (the Start button) lets ensure() start it again.
         self.held = False
+        # Closed: the app is quitting. Nothing may start a process after
+        # this, or a load that was on its way would leave a runner holding
+        # several GB with nobody to stop it.
+        self._closed = False
         self.last_used = time.monotonic()
         self._in_use = 0
         self.state = "stopped"
@@ -73,6 +77,8 @@ class LocalServer:
         """Return a ready server running exactly this argv, starting or
         swapping as needed. Blocks until /health answers 200."""
         with self._lock:
+            if self._closed:
+                raise LocalServerError("the app is closing")
             same = (self._info and self._proc and self._proc.poll() is None and self._argv == argv)
             if same and self.state == "ready":
                 self.last_used = time.monotonic()
@@ -102,6 +108,12 @@ class LocalServer:
         with self._lock:
             if hold:
                 self.held = True
+            self._stop_locked()
+
+    def close(self) -> None:
+        """The app is quitting: stop the process and refuse every later start."""
+        with self._lock:
+            self._closed = True
             self._stop_locked()
 
     def release(self) -> None:
@@ -180,6 +192,8 @@ class LocalServer:
         while time.monotonic() < deadline:
             if cancel and cancel.is_set():
                 raise LocalServerError("cancelled while the model was loading")
+            if self._closed:
+                raise LocalServerError("the app is closing")
             with self._lock:
                 proc, current = self._proc, self._info
             if current is not info:

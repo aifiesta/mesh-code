@@ -15,6 +15,7 @@ class FakeFileHost:
         self.disconnect_at: int | None = None   # close after this many bytes, once
         self.ignore_range = False               # always answer 200 from byte 0
         self.serve_wrong_bytes = False
+        self.extra_bytes = 0                    # send this much more than the file
         self.status: int | None = None      # force this status on every request
         self.requests: list[dict] = []
         self._lock = threading.Lock()
@@ -26,6 +27,7 @@ class FakeFileHost:
 
             def do_GET(self):
                 data = host.blob if not host.serve_wrong_bytes else bytes(reversed(host.blob))
+                data += b"x" * host.extra_bytes
                 rng = self.headers.get("Range")
                 with host._lock:
                     host.requests.append({"range": rng})

@@ -130,3 +130,11 @@ def test_a_complete_file_without_its_marker_is_verified_not_refetched(tmp_path, 
     dest.write_bytes(b"corrupt")
     download.download(host.url, dest, host.sha256, host.size)
     assert len(host.requests) == 1 and dest.read_bytes() == host.blob
+
+
+def test_a_server_sending_more_than_the_file_is_stopped_at_the_expected_size(tmp_path, host):
+    host.extra_bytes = 50 * 1024 * 1024               # 50 MB more than the 2 MB file
+    with pytest.raises(download.ChecksumMismatch, match="more than the expected"):
+        download.download(host.url, tmp_path / "m.gguf", host.sha256, host.size)
+    assert not (tmp_path / "m.gguf.part").exists() and not (tmp_path / "m.gguf").exists()
+    assert len(host.requests) == 1                    # not retried

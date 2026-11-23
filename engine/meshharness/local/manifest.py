@@ -1,6 +1,14 @@
 """Which models and llama-server build this app can run. The bundled manifest
-is trusted; a remote one may only re-pin download facts (repo, file, sha256,
-size, runtime tag/assets), never anything that reaches a path or the argv."""
+is trusted; a remote one may only re-pin download facts of a model the app
+already ships (file, revision, sha256, size, from the same repository),
+never anything that reaches a path or the argv.
+
+The remote copy is not signed: its fingerprints come from the same file, so
+they prove nothing about who wrote it. Its reach is therefore kept small. It
+can never change the llama-server build (a program the app runs: that only
+changes with an app update), never add a model or point one at another
+repository, and never remove one. The worst a forged copy can do is pick
+another file from the same official repository."""
 from __future__ import annotations
 
 import json
@@ -75,21 +83,24 @@ def refresh(cache_path: Path, app_version: str, *, url: str = MANIFEST_URL,
     return True
 
 
+# What a remote copy may change on a model the app ships. Not the repository
+# (that would let it fetch from anyone's account), not the id or label.
+_REMOTE_REPIN_FIELDS = frozenset({"file", "rev", "sha256", "bytes"})
+
+
 def merge(bundled: dict, remote: dict) -> dict:
-    """Overlay remote download facts onto the bundled manifest. Argv and
-    URL-shaping fields always come from the bundled copy."""
+    """Overlay remote download facts onto the bundled manifest: only the
+    file, revision, fingerprint and size of a bundled model, and only when the
+    remote names the same repository. The runtime, argv and URL-shaping fields
+    always come from the bundled copy (see the module docstring)."""
     out = json.loads(json.dumps(bundled))
     out["updated"] = remote.get("updated", out.get("updated"))
-    rt, rrt = out["runtime"], remote["runtime"]
-    rt["tag"] = rrt["tag"]
-    rt["assets"] = {k: {f: v[f] for f in _ASSET_REQUIRED} for k, v in rrt["assets"].items()}
-    by_id = {m["id"]: m for m in out["models"]}
-    merged = []
-    for rm in remote["models"]:
-        base = dict(by_id.get(rm["id"], {}))
-        base.update({k: v for k, v in rm.items() if k in _REMOTE_MODEL_FIELDS})
-        merged.append(base)
-    out["models"] = merged
+    remote_by_id = {m.get("id"): m for m in remote.get("models", []) if isinstance(m, dict)}
+    for base in out["models"]:
+        rm = remote_by_id.get(base["id"])
+        if not rm or rm.get("repo") != base["repo"]:
+            continue
+        base.update({k: v for k, v in rm.items() if k in _REMOTE_REPIN_FIELDS})
     return out
 
 

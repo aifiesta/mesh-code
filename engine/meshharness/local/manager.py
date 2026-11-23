@@ -90,7 +90,7 @@ class LocalModels:
     def shutdown(self) -> None:
         self._closing.set()
         self.downloads.shutdown()
-        self.server.stop(hold=False)
+        self.server.close()
 
     def default_id(self) -> str | None:
         chosen = self.cfg.get("local_model") or self.state.get("default")
@@ -259,7 +259,7 @@ class LocalModels:
 
     def load_in_background(self) -> None:
         def _load():
-            if not self._loading.acquire(blocking=False):
+            if self._closing.is_set() or not self._loading.acquire(blocking=False):
                 return
             try:
                 self.target_for(self.default_id() or "")

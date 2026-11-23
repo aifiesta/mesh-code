@@ -149,7 +149,8 @@ def test_refresh_force_re_pins_from_a_newer_remote(layer, host, monkeypatch, tmp
     assert _wait(lambda: "local/tiny" in layer.installed_ids())
     newer = json.loads(Path(manager_mod.manifest_mod.BUNDLED).read_text())
     newer["updated"] = "2999-01-01"
-    newer["models"][0]["quality_rank"] = 99
+    newer["models"][0]["rev"] = "abc123"
+    newer["models"][0]["quality_rank"] = 99        # not a download fact: ignored
     for m in newer["models"]:
         for k in ("url", "chat_template_kwargs", "extra_server_args", "request_defaults"):
             m.pop(k, None)
@@ -162,7 +163,8 @@ def test_refresh_force_re_pins_from_a_newer_remote(layer, host, monkeypatch, tmp
         return True
     monkeypatch.setattr(manager_mod.manifest_mod, "refresh", fake_refresh)
     assert layer.refresh(force=True) is True
-    assert layer.manifest["models"][0]["quality_rank"] == 99
+    assert layer.manifest["models"][0]["rev"] == "abc123"
+    assert layer.manifest["models"][0]["quality_rank"] != 99
     assert layer.manifest["models"][0]["url"] == host.url          # bundled-only fields survive the overlay
     assert "local/tiny" in layer.installed_ids()
 
@@ -271,3 +273,16 @@ def test_a_download_that_would_fill_the_disk_is_refused(layer, monkeypatch):
     monkeypatch.setattr(manager_mod.shutil, "disk_usage", lambda p: Usage(10, 10, 100))
     with pytest.raises(ValueError, match="free some space"):
         layer.install("local/tiny")
+
+
+def test_quitting_while_the_model_loads_in_the_background_leaves_nothing_running(layer, monkeypatch):
+    monkeypatch.setenv("FAKE_LLAMA_LOAD_S", "2")
+    layer.boot()
+    assert _wait(lambda: "local/tiny" in layer.installed_ids())
+    assert layer.ready_target() is None                      # starts the background load
+    assert _wait(lambda: layer.server._proc is not None, 5)
+    proc = layer.server._proc
+    layer.shutdown()
+    time.sleep(1.0)
+    assert proc.poll() is not None and layer.server._proc is None
+    assert layer.ready_target() is None and layer.server._proc is None

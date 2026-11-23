@@ -43,9 +43,38 @@ def test_a_newer_remote_re_pins_download_facts_but_never_argv_or_urls(tmp_path):
     bundled = _bundled()
     assert merged["models"][0]["sha256"] == "a" * 64 and merged["models"][0]["bytes"] == 123
     assert merged["models"][0].get("chat_template_kwargs") == bundled["models"][0].get("chat_template_kwargs")
-    assert merged["runtime"]["tag"] == "b99999"
+    assert merged["runtime"]["tag"] == bundled["runtime"]["tag"]      # the runner never changes remotely
+    assert merged["runtime"]["assets"] == bundled["runtime"]["assets"]
     assert merged["runtime"]["server_args"] == bundled["runtime"]["server_args"]
     assert merged["runtime"]["url_template"] == bundled["runtime"]["url_template"]
+
+
+def test_a_remote_copy_cannot_swap_the_runner_add_models_or_change_repository(tmp_path):
+    """The remote list is not signed, so it may only re-pin files of the
+    models the app ships, from the same repository."""
+    cache = tmp_path / "manifest.json"
+    remote = _remote()
+    bundled = _bundled()
+    first, second = remote["models"][0], remote["models"][1]
+    remote["runtime"]["tag"] = "b1"                                  # an older llama.cpp build
+    for a in remote["runtime"]["assets"].values():
+        a["sha256"] = "c" * 64
+    first["repo"] = "someone-else/evil-gguf"                         # another account
+    first["sha256"] = "d" * 64
+    second["sha256"] = "e" * 64                                      # a fair re-pin
+    second["label"] = "Renamed"
+    remote["models"].append({**second, "id": "local/new-one", "sha256": "f" * 64})
+    remote["models"] = [m for m in remote["models"] if m["id"] != bundled["models"][-1]["id"]]
+    cache.write_text(json.dumps(remote))
+    merged = manifest.load(cache, "0.3.0")
+    by_id = {m["id"]: m for m in merged["models"]}
+    assert merged["runtime"] == bundled["runtime"]
+    assert by_id[first["id"]]["repo"] == bundled["models"][0]["repo"]
+    assert by_id[first["id"]]["sha256"] == bundled["models"][0]["sha256"]
+    assert by_id[second["id"]]["sha256"] == "e" * 64
+    assert by_id[second["id"]]["label"] == bundled["models"][1]["label"]
+    assert "local/new-one" not in by_id
+    assert [m["id"] for m in merged["models"]] == [m["id"] for m in bundled["models"]]
 
 
 def test_an_older_or_broken_cache_is_ignored(tmp_path):
