@@ -55,7 +55,7 @@ export function LocalSetupCard({ local, compact, note, onInstall, onCancel, onDe
     body = (
       <>
         <Line head={`Run small tasks on this machine? ${o.label}, ${fmtBytes(o.bytes)}`}
-              sub={`${local.recommended?.reason ?? ''} With Smart routing on, lookups and small changes start on it for free and step up to the cloud when it struggles. Cloud models work while it downloads.`} />
+              sub={`${local.recommended?.reason ? local.recommended.reason + '. ' : ''}With Smart routing on, lookups and small changes start on it for free and step up to the cloud when it struggles. Cloud models work while it downloads.`} />
         <div className="local-actions">
           <button className="btn primary" onClick={() => onInstall(o.model)}>Download {fmtBytes(o.bytes)}</button>
           {onNotNow && <button className="btn subtle" onClick={onNotNow}>Not now</button>}
