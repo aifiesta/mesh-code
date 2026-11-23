@@ -54,6 +54,8 @@ TOOLCALL_FAILURES_FILE = CONFIG_DIR / "toolcall_failures.jsonl"
 # read back exact code/errors it no longer has. (Claude Code does the same —
 # its compact summary points at the session transcript.)
 TRANSCRIPTS_DIR = CONFIG_DIR / "transcripts"
+# The local model layer: downloaded weights, runner builds, server state.
+LOCAL_DIR = CONFIG_DIR / "local"
 FAILURE_LOG_MAX_BYTES = 1_000_000
 _RAW_ARGS_LOG_CAP = 32_768  # bound one pathological record
 
@@ -99,6 +101,18 @@ DEFAULT_CONFIG = {
     # Models observed rejecting reasoning_effort (with tools) — skipped
     # without a doomed retry in future sessions. Evidence-based cache.
     "reasoning_rejected_models": [],
+    # Local model (see local/manager.py). On by default: with Smart routing
+    # on, Lookup and Small change start on it once it is downloaded and
+    # loaded. Nothing downloads until the user says yes on the setup card,
+    # unless local_auto_setup is turned on.
+    "local_enabled": True,
+    "local_auto_setup": False,
+    "local_model": "",
+    "local_context": "auto",
+    "local_gpu": "auto",
+    "local_keep_free_gb": 4,
+    "local_idle_unload_min": 20,
+    "local_use_when_slow": False,
 }
 
 _DIR_MODE = stat.S_IRWXU                       # 0700

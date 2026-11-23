@@ -93,31 +93,61 @@ def test_engine_boots_the_local_layer_and_installs_the_recommended_model(app_cli
         local = hello["data"]["local"]
         assert local["enabled"] is True and local["models"][0]["installed"] is True
         assert local["default_model"] == "local/tiny" and local["recommended"]["model"] == "local/tiny"
-        ids = [m["id"] for m in hello["data"]["catalog"]]
-        assert ids[0] == "local/auto" and "local/tiny" in ids
-    deadline = time.time() + 10
-    while not engine._catalog and time.time() < deadline:
-        time.sleep(0.05)
-    merged = [m["id"] for m in engine.merged_catalog()]
-    assert merged[0] == "local/auto" and "test/model" in merged
-    assert engine.profile()["local"]["default_model"] == "local/tiny"
+        # The local model is a choice inside Smart routing, not a model to pin.
+        assert all(not str(m.get("id", "")).startswith("local/") for m in hello["data"]["catalog"])
 
 
-def test_a_turn_on_local_auto_runs_on_the_fake_server_for_free(app_client, gateway, tmp_path):
+def test_a_lookup_with_smart_routing_starts_on_the_local_server(app_client, gateway, tmp_path):
     client, engine = app_client
     assert _installed(engine)
+    engine.local.target_for("local/tiny")          # loaded: the turn can start local
+    gateway.script(sse_turn("checked on the cloud"))
     with client.websocket_connect("/ws?token=secret-token") as ws:
         ws.receive_text()
-        ws.send_text(json.dumps({"type": Request.OPEN_WORKSPACE, "workspace": str(tmp_path),
-                                 "model": "local/auto"}))
-        started = _drain(ws, Event.SESSION_STARTED)
-        sid = started["session"]
-        ws.send_text(json.dumps({"type": Request.PROMPT, "session": sid, "text": "hi"}))
-        msg = _drain(ws, Event.ASSISTANT_MESSAGE)
+        ws.send_text(json.dumps({"type": Request.OPEN_WORKSPACE, "workspace": str(tmp_path)}))
+        sid = _drain(ws, Event.SESSION_STARTED)["session"]
+        engine.sessions[sid].cfg["route_mode"] = "smart"
+        ws.send_text(json.dumps({"type": Request.PROMPT, "session": sid,
+                                 "text": "In two sentences, what does price.py do? Do not change any files."}))
+        routed = _drain(ws, Event.ROUTED, pred=lambda e: e["data"].get("local"))
+        stepped = _drain(ws, Event.ROUTED, pred=lambda e: e["data"].get("from_local"))
         fin = _drain(ws, Event.TURN_FINISHED)
-    assert msg["data"]["text"] == "hello from llama"
-    assert fin["data"]["local"] is True and fin["data"]["cost"] == 0 and fin["data"]["tokens"] == 16
-    assert gateway.requests == []
+    # The fake server answers "hello from llama" without reading a file: a
+    # guess, so the turn steps up to Smart routing's cloud pick.
+    assert routed["data"]["model"] == "local/tiny"
+    assert "without reading" in stepped["data"]["reason"]
+    assert fin["data"]["local_steps"] == 1 and fin["data"]["stepped_up_from_local"]
+    assert len([r for r in gateway.requests if "messages" in r]) == 1
+
+
+def test_nothing_downloads_until_the_user_says_yes(gateway, local_world, monkeypatch, host):
+    monkeypatch.setenv("MESHAPI_BASE_URL", gateway.base_url)
+    monkeypatch.setenv("MESHAPI_API_KEY", "rsk_test")
+    engine = Engine(token="secret-token")           # local_auto_setup is off by default
+    try:
+        engine.local.boot()
+        st = engine.local.status()
+        assert st["enabled"] and st["offer"]["model"] == "local/tiny" and st["jobs"] == []
+        time.sleep(0.3)
+        assert engine.local.installed_ids() == set()
+        engine.local.decline()
+        assert engine.local.status()["offer"] is None
+    finally:
+        engine.shutdown()
+
+
+def test_a_disabled_layer_refuses_to_download(gateway, local_world, monkeypatch):
+    monkeypatch.setenv("MESHAPI_BASE_URL", gateway.base_url)
+    monkeypatch.setenv("MESHAPI_API_KEY", "rsk_test")
+    engine = Engine(token="secret-token")
+    try:
+        engine.local.boot()
+        engine.local.on_setting("local_enabled", False)
+        with pytest.raises(ValueError, match="turned off"):
+            engine.local.install("local/tiny")
+        assert engine.local.status()["offer"] is None
+    finally:
+        engine.shutdown()
 
 
 def test_local_requests_round_trip_over_the_socket(app_client):
@@ -129,7 +159,9 @@ def test_local_requests_round_trip_over_the_socket(app_client):
         st = _drain(ws, Event.LOCAL_STATUS)
         assert st["data"]["models"][0]["installed"] is True
         ws.send_text(json.dumps({"type": Request.LOCAL_SERVER, "action": "stop"}))
-        _drain(ws, Event.LOCAL_STATUS, pred=lambda e: e["data"]["server"]["state"] == "stopped")
+        st = _drain(ws, Event.LOCAL_STATUS, pred=lambda e: e["data"]["server"]["state"] == "stopped")
+        assert st["data"]["server"]["held"] is True        # a stop stays a stop
+        assert engine.local.ready_target() is None and engine.local.server.state == "stopped"
         ws.send_text(json.dumps({"type": Request.LOCAL_DELETE, "model": "local/tiny"}))
         st = _drain(ws, Event.LOCAL_STATUS, pred=lambda e: not e["data"]["models"][0]["installed"])
         assert engine.local.installed_ids() == set()
@@ -157,38 +189,6 @@ def test_local_settings_coerce_and_reach_the_layer(app_client):
     assert saved["local_context"] == "64k" and saved["local_enabled"] is False
 
 
-def test_gateway_catalog_cache_semantics_survive_the_merge(app_client, gateway):
-    client, engine = app_client
-    deadline = time.time() + 10
-    while not engine._catalog and time.time() < deadline:
-        time.sleep(0.05)
-    assert engine._catalog and all(not m.get("local") for m in engine._catalog)
-    merged = engine.merged_catalog()
-    assert merged[0]["id"] == "local/auto" and any(m["id"] == "test/model" for m in merged)
-    assert engine.profile()["models"] == len(engine._catalog)
-
-
-def test_a_snapshot_from_before_local_first_is_moved_to_local_auto(gateway, local_world, monkeypatch, tmp_path):
-    from meshharness.core import config as config_mod
-    monkeypatch.setenv("MESHAPI_BASE_URL", gateway.base_url)
-    monkeypatch.setenv("MESHAPI_API_KEY", "rsk_test")
-    config_mod.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    config_mod.CONFIG_FILE.write_text(json.dumps({"model": "test/model"}))      # pre-local config
-    config_mod.SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    (config_mod.SESSIONS_DIR / "abc.json").write_text(json.dumps({
-        "id": "abc", "workspace": str(tmp_path), "model": "test/model", "messages": []}))
-    (config_mod.SESSIONS_DIR / "pinned.json").write_text(json.dumps({
-        "id": "pinned", "workspace": str(tmp_path), "model": "test/cheap", "messages": []}))
-    engine = Engine(token="secret-token")
-    try:
-        assert engine.cfg["local_fallback_model"] == "test/model"
-        assert engine.sessions["abc"].cfg["model"] == "local/auto"
-        assert engine.sessions["pinned"].cfg["model"] == "test/cheap"        # a different pin is respected
-        assert json.loads((config_mod.SESSIONS_DIR / "abc.json").read_text())["model"] == "local/auto"
-    finally:
-        engine.shutdown()
-
-
 def test_a_disabled_layer_hides_its_rows_stops_the_server_and_never_probes(app_client, monkeypatch):
     client, engine = app_client
     assert _installed(engine)
@@ -202,7 +202,6 @@ def test_a_disabled_layer_hides_its_rows_stops_the_server_and_never_probes(app_c
     while engine.local.server.state != "stopped" and time.time() < deadline:
         time.sleep(0.05)
     assert engine.local.server.state == "stopped"
-    assert all(not m.get("local") for m in engine.merged_catalog())
     probed = []
     monkeypatch.setattr(manager_mod, "probe", lambda *_: probed.append(1))
     fresh = manager_mod.LocalModels({"local_enabled": False}, local_dir=engine.local.local_dir / "x",

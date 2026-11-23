@@ -51,6 +51,7 @@ from .core import fx as fx_mod
 from .core import __version__
 from .core import config as config_mod
 from .core.permissions import Mode, from_str as mode_from_str
+from .local.manager import LocalModels
 from .protocol import Event, Request, event
 from .session import Session
 
@@ -99,6 +100,14 @@ class Engine:
         self._usage_lock = threading.Lock()
         self.cfg = config_mod.load_config()
         self._catalog: list | None = None
+        # The local model layer: one per engine, shared by every session.
+        # Booted on a thread at start (lifespan); a problem there never
+        # blocks the engine. Its rows are kept out of the catalog: the local
+        # model is a choice inside Smart routing, not a model to pin.
+        self.local = LocalModels(
+            self.cfg, local_dir=config_mod.LOCAL_DIR, app_version=__version__,
+            emit=lambda type_, data: self.emit(event(type_, None, **data)),
+            on_catalog_change=lambda: None)
         self.usage = config_mod.load_usage()
         # Display-only exchange rate. Fetched in the background, never in a turn.
         self.fx = fx_mod.RateKeeper()
@@ -127,7 +136,7 @@ class Engine:
                         continue
                     if not Path(data["workspace"]).is_dir():
                         continue  # the project folder is gone
-                    sess = Session.restore(data, dict(self.cfg), self.emit)
+                    sess = Session.restore(data, dict(self.cfg), self.emit, local=self.local)
                     sess.catalog = self._catalog
                     self.sessions[sess.id] = sess
                     self.add_root(str(sess.workspace))
@@ -225,7 +234,7 @@ class Engine:
         if model:
             cfg["model"] = model
         self.add_root(workspace)
-        s = Session(sid, workspace, cfg, self.emit, mode=mode_from_str(mode))
+        s = Session(sid, workspace, cfg, self.emit, mode=mode_from_str(mode), local=self.local)
         self.sessions[sid] = s
         s.catalog = self._catalog
         s.start()
@@ -379,6 +388,7 @@ class Engine:
         for s in list(self.sessions.values()):
             s.close()
         self.sessions.clear()
+        self.local.shutdown()
 
 
 def create_app(engine: Engine, ui_dir: Path | None = None) -> FastAPI:
@@ -389,6 +399,7 @@ def create_app(engine: Engine, ui_dir: Path | None = None) -> FastAPI:
         engine.spawn(engine.pump())
         engine.spawn(engine.catalog())
         engine.spawn(engine.fx_loop())
+        engine.spawn(asyncio.to_thread(engine.local.boot))
         try:
             yield
         finally:
@@ -495,6 +506,7 @@ def create_app(engine: Engine, ui_dir: Path | None = None) -> FastAPI:
             catalog=engine._catalog or [],
             profile=engine.profile(),
             fx=engine.fx_info(),
+            local=engine.local.status(),
         )))
         try:
             while True:
@@ -513,6 +525,39 @@ def create_app(engine: Engine, ui_dir: Path | None = None) -> FastAPI:
         app.mount("/", StaticFiles(directory=str(ui_dir), html=True), name="ui")
 
     return app
+
+
+async def _local_request(engine: Engine, kind: str, msg: dict) -> None:
+    """Local-layer commands run off the event loop: a delete, a stop or a
+    start can block on the process for seconds."""
+    local = engine.local
+    try:
+        if kind == Request.LOCAL_INSTALL:
+            await asyncio.to_thread(local.install, msg.get("model") or "")
+        elif kind == Request.LOCAL_CANCEL:
+            local.cancel(msg.get("job") or "")
+        elif kind == Request.LOCAL_DELETE:
+            await asyncio.to_thread(local.delete, msg.get("model") or "")
+        elif kind == Request.LOCAL_SERVER:
+            action = msg.get("action") or "stop"
+            if action in ("start", "restart"):
+                # A start waits for the model to load; never hold the socket loop for that.
+                async def _start():
+                    try:
+                        await asyncio.to_thread(local.server_action, action)
+                    except Exception as e:
+                        engine.emit(event(Event.NOTICE, None, level="warn", message=f"local model: {e}"))
+                    engine.emit(event(Event.LOCAL_STATUS, None, **local.status()))
+                engine.spawn(_start())
+            else:
+                await asyncio.to_thread(local.server_action, "stop")
+        elif kind == Request.LOCAL_REFRESH:
+            await asyncio.to_thread(local.refresh, force=True)
+        elif kind == Request.LOCAL_DECLINE:
+            local.decline()
+    except Exception as e:
+        engine.emit(event(Event.NOTICE, None, level="warn", message=f"local model: {e}"))
+    engine.emit(event(Event.LOCAL_STATUS, None, **local.status()))
 
 
 async def handle_request(engine: Engine, msg: dict) -> None:
@@ -605,13 +650,19 @@ async def handle_request(engine: Engine, msg: dict) -> None:
             key, value = msg.get("key"), msg.get("value")
             try:
                 clean = settings_mod.coerce(key, value)
-            except settings_mod.InvalidSetting as e:
+                if str(key).startswith("local_"):
+                    engine.local.validate_setting(key, clean)
+            except (settings_mod.InvalidSetting, ValueError) as e:
                 engine.emit(event(Event.CONFIG_ERROR, sid, key=key, message=str(e)))
                 return
-            targets = [s] if s else list(engine.sessions.values())
+            # Local settings belong to the machine, not one chat: every
+            # session follows them.
+            targets = [s] if s and not str(key).startswith("local_") else list(engine.sessions.values())
             engine.cfg[key] = clean          # new sessions inherit it
             for sess in targets:
                 sess.update_cfg(**{key: clean})
+            if str(key).startswith("local_"):
+                engine.local.on_setting(key, clean)
             try:
                 # Persist only what the schema declares. engine.cfg also holds
                 # runtime-resolved values (api_key, base_url) that are not
@@ -627,6 +678,12 @@ async def handle_request(engine: Engine, msg: dict) -> None:
                 # Show the saved rate at once (or dollars), then fetch if due.
                 engine.emit(event(Event.FX, None, **engine.fx_info()))
                 engine.spawn(engine.refresh_fx())
+            return
+
+        if kind in (Request.LOCAL_STATUS, Request.LOCAL_INSTALL, Request.LOCAL_CANCEL,
+                    Request.LOCAL_DELETE, Request.LOCAL_SERVER, Request.LOCAL_REFRESH,
+                    Request.LOCAL_DECLINE):
+            await _local_request(engine, kind, msg)
             return
 
         if kind == Request.LIST_MODELS:
@@ -680,6 +737,10 @@ async def handle_request(engine: Engine, msg: dict) -> None:
             s.set_model(msg.get("model") or s.cfg.get("model"))
         elif kind == Request.SET_ROUTE:
             s.update_cfg(route_mode=msg.get("route_mode", "off"))
+        elif kind == Request.ESCALATE:
+            s.escalate(harder=bool(msg.get("harder")))
+        elif kind == Request.DEESCALATE:
+            s.deescalate()
         elif kind == Request.SET_STYLE:
             s.update_cfg(output_style=msg.get("style", "default"))
         elif kind == Request.LIST_DIR:

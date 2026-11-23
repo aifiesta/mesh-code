@@ -479,7 +479,10 @@ def _ranked_view(ranked: list, score) -> list:
 # scores and stay on the table above. `choose()` is the one entry point.
 
 SCORED_COHORTS = ("agentic", "coding")
-TIME_VALUE = 0.05        # dollars per minute of waiting, at the default speed weight
+# Dollars per minute of waiting, at the default speed weight. A third of the
+# first $0.05 (23 Nov 2026): waiting matters less than the bill. Simulated on
+# the live catalog, no pick changed; it only matters for a slow (local) model.
+TIME_VALUE = 0.05 / 3
 SCORED_FLOOR = 0.6       # never pick under 60% of the best chance available
 STICKY_MARGIN = 0.10     # keep the serving model while it is within 10% of the best
 # The scores carry margins of 5 to 12 points, so two entries whose expected

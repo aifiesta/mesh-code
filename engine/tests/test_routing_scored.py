@@ -61,9 +61,9 @@ def test_expected_cost_is_attempt_plus_wait_plus_failure_risk():
     top = _pick("xhigh")["ranked"][0]                        # judged on the hard score alone
     e = DOC["models"][top["model"]]["levels"][top["level"]]
     strongest = DOC["models"]["t/strong"]["levels"]["max"]
-    rescue = strongest["cost_per_task"] + 0.05 * strongest["minutes_per_task"]
+    rescue = strongest["cost_per_task"] + router.TIME_VALUE * strongest["minutes_per_task"]
     chance = (e["hard"]["score"] - e["hard"]["margin"]) / 100
-    want = e["cost_per_task"] + 0.05 * e["minutes_per_task"] + (1 - chance) * rescue
+    want = e["cost_per_task"] + router.TIME_VALUE * e["minutes_per_task"] + (1 - chance) * rescue
     assert abs(top["expected"] - want) < 0.011
     assert top["chance"] == round(chance * 100)
 
@@ -493,7 +493,7 @@ def test_just_under_the_top_a_failure_costs_the_strongest_entry():
     ents = router._live_entries(DOC, _cat(), None, False, 0, None)
     strongest = DOC["models"]["t/strong"]["levels"]["max"]
     assert abs(router._step_up_price(ents, "xhigh", _k())
-               - (strongest["cost_per_task"] + 0.05 * strongest["minutes_per_task"])) < 1e-9
+               - (strongest["cost_per_task"] + router.TIME_VALUE * strongest["minutes_per_task"])) < 1e-9
 
 
 def test_lower_down_a_failure_costs_less_because_it_climbs_one_level_at_a_time():
