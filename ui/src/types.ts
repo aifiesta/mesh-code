@@ -248,6 +248,13 @@ export type CatalogModel = {
   output_modalities?: string[]
   is_free?: boolean
   pricing?: Record<string, number | string>
+  /** A model that runs on this machine (the engine's local layer). */
+  local?: boolean
+  name?: string
+  installed?: boolean
+  size_bytes?: number
+  /** On the `local/auto` row: the concrete model it resolves to. */
+  resolves_to?: string
 }
 
 export type DirEntry = {

@@ -49,6 +49,7 @@ from .core.plan import Plan
 from .core.tools import TOOLS, build_system_messages, find_stub_markers, summarize_call
 from .local import prompt as local_prompt
 from .local.manager import LocalUnavailable
+from .local.provider import is_local
 from .terminal import Terminal
 from .protocol import Decision, Event, event
 
@@ -713,7 +714,7 @@ class Session:
                     reply,
                     tool_calls_this_turn=self.state.get("_turn_tool_calls", 0),
                     user_asked_action=router.asks_for_action(text))
-                if local_hop:
+                if local_hop and self.state.get("_on_local"):
                     # The local model gets the same check every turn it answers
                     # (it does not use up the cloud pick's one), plus one more:
                     # an answer with nothing read behind it is a guess.
@@ -731,7 +732,8 @@ class Session:
                               text=reply, model=model_used)
                     self.state["messages"].append(
                         {"role": "assistant", "content": reply})
-                if local_hop and self._finish_check_failed(turn_id, hop):
+                if (local_hop and self.state.get("_on_local")
+                        and self._finish_check_failed(turn_id, hop)):
                     continue      # the tests failed: the cloud pick takes it from here
                 if has_reply:
                     self._plan_finish()
@@ -758,7 +760,7 @@ class Session:
             # A doomed batch or fresh stub markers reset the streak and, for
             # the doom case, escalate — evidence the model is out of its depth.
             all_doomed = report["total"] > 0 and report["doomed"] == report["total"]
-            if local_hop:
+            if local_hop and self.state.get("_on_local"):
                 failed_round = report["total"] > 0 and report["failed"] == report["total"]
                 self.state["_local_failed_rounds"] = (
                     self.state.get("_local_failed_rounds", 0) + 1 if failed_round else 0)
@@ -884,6 +886,19 @@ class Session:
                     # Request-only: the stored chat keeps main's full prompt,
                     # so a step-up sends the cloud model everything as usual.
                     msgs = self._local_messages(msgs)
+            elif is_local(cfg.get("model")):
+                # The user picked a local model in the model list: every step
+                # runs on it, as with any picked model. Loading it waits (and
+                # Stop still stops); not downloaded, stopped or turned off
+                # ends the turn with the reason.
+                try:
+                    target = self._picked_local_target(cfg["model"])
+                except LocalUnavailable as e:
+                    if self._interrupt.is_set():
+                        raise KeyboardInterrupt
+                    return "", {"error": f"local model: {e}", "local_unavailable": True}
+                msgs = self._local_messages(msgs)
+            picked_local = target is not None and not self.state.get("_on_local")
             try:
                 if target is not None:
                     self.local.server.begin_use()
@@ -895,7 +910,7 @@ class Session:
             except KeyboardInterrupt:
                 raise
             except httpx.HTTPStatusError as e:
-                if target is not None:
+                if target is not None and not picked_local:
                     self._local_hop_failed(f"HTTP {e.response.status_code}")
                     attempt = 0
                     continue
@@ -921,27 +936,34 @@ class Session:
                     continue
                 if not tried_non_streaming and loopguard.is_retryable_status(code):
                     tried_non_streaming = True
-                    got = self._non_streaming(msgs)
+                    got = self._non_streaming(msgs, target)
                     if got is not None:
                         return got
                 raise
             except httpx.RequestError as e:
-                if target is not None:
+                if target is not None and not picked_local:
                     self._local_hop_failed(type(e).__name__)
                     attempt = 0
                     continue
+                if picked_local:
+                    # Picked local: no cloud to hand over to. Forget a dead
+                    # server; the retry below then says why it cannot run.
+                    try:
+                        self.local.recover()
+                    except Exception:
+                        pass
                 if attempt < loopguard.MAX_STREAM_ATTEMPTS:
                     self._wait_retry(attempt, f"network error ({type(e).__name__})")
                     continue
                 if not tried_non_streaming:
                     tried_non_streaming = True
-                    got = self._non_streaming(msgs)
+                    got = self._non_streaming(msgs, target)
                     if got is not None:
                         return got
                 raise
 
             err = meta.get("error")
-            if err and target is not None:
+            if err and target is not None and not picked_local:
                 self._local_hop_failed(str(err)[:120])
                 attempt = 0
                 continue
@@ -1040,7 +1062,7 @@ class Session:
             meta["ttft"] = ttft
         return "".join(buf), meta
 
-    def _non_streaming(self, msgs):
+    def _non_streaming(self, msgs, target=None):
         """Last-resort blocking request — Mesh's own retry and provider
         fallback only cover non-streaming calls, so this is where a run of
         streaming failures can still recover."""
@@ -1049,7 +1071,7 @@ class Session:
                       message="streaming keeps failing — trying one non-streaming request")
             # The hop's effective cfg, as the streaming attempt used: the
             # live smart pick, and no thinking level this model has refused.
-            return complete_chat(msgs, self._effective_cfg(), tools=TOOLS,
+            return complete_chat(msgs, self._effective_cfg(), tools=TOOLS, target=target,
                                  max_tokens=self.state.get("_max_tokens_shrunk"))
         except Exception:
             return None
@@ -1373,6 +1395,15 @@ class Session:
             return self.local.ready_target()
         except Exception:
             return None
+
+    def _picked_local_target(self, model_id: str):
+        """A Target for a local model the user picked in the model list.
+        Blocks while it loads; raises LocalUnavailable with a reason."""
+        if self.local is None or not self.cfg.get("local_enabled", True):
+            raise LocalUnavailable("local models are turned off in Settings", permanent=True)
+        return self.local.target_for(
+            model_id, cancel=self._interrupt,
+            notify=lambda msg: self.emit(Event.NOTICE, level="info", message=msg))
 
     def _local_fit(self) -> "tuple[bool, str]":
         """Does this chat fit the local model? Half its window at most: the

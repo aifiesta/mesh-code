@@ -102,12 +102,13 @@ class Engine:
         self._catalog: list | None = None
         # The local model layer: one per engine, shared by every session.
         # Booted on a thread at start (lifespan); a problem there never
-        # blocks the engine. Its rows are kept out of the catalog: the local
-        # model is a choice inside Smart routing, not a model to pin.
+        # blocks the engine. Its models are rows in the catalog the picker
+        # shows, so they can be picked like any other model (see
+        # merged_catalog); Smart routing never picks them from the list.
         self.local = LocalModels(
             self.cfg, local_dir=config_mod.LOCAL_DIR, app_version=__version__,
             emit=lambda type_, data: self.emit(event(type_, None, **data)),
-            on_catalog_change=lambda: None)
+            on_catalog_change=self._share_catalog)
         self.usage = config_mod.load_usage()
         # Display-only exchange rate. Fetched in the background, never in a turn.
         self.fx = fx_mod.RateKeeper()
@@ -137,7 +138,7 @@ class Engine:
                     if not Path(data["workspace"]).is_dir():
                         continue  # the project folder is gone
                     sess = Session.restore(data, dict(self.cfg), self.emit, local=self.local)
-                    sess.catalog = self._catalog
+                    sess.catalog = self.merged_catalog()
                     self.sessions[sess.id] = sess
                     self.add_root(str(sess.workspace))
                 except Exception:
@@ -236,7 +237,7 @@ class Engine:
         self.add_root(workspace)
         s = Session(sid, workspace, cfg, self.emit, mode=mode_from_str(mode), local=self.local)
         self.sessions[sid] = s
-        s.catalog = self._catalog
+        s.catalog = self.merged_catalog()
         s.start()
         return s
 
@@ -270,9 +271,7 @@ class Engine:
             # A session opened before the first fetch (or restored on boot)
             # has no catalog and can't price a hop. Hand it over here too,
             # not only on the fetch path.
-            for s in self.sessions.values():
-                if not s.catalog:
-                    s.catalog = self._catalog
+            self._share_catalog(emit=False)
             return self._catalog
         import time as _time
         now = _time.monotonic()
@@ -297,9 +296,26 @@ class Engine:
             self._catalog = []
         if not self._catalog:
             self._catalog_retry_after = now + 15  # cool down, then retry
-        for s in self.sessions.values():
-            s.catalog = self._catalog
+        self._share_catalog(emit=False)
         return self._catalog
+
+    def merged_catalog(self) -> list:
+        """Local models first, then the gateway's. `_catalog` itself stays
+        gateway-only, so its retry-when-empty rule keeps working."""
+        try:
+            rows = self.local.catalog_rows()
+        except Exception:
+            rows = []
+        return rows + (self._catalog or [])
+
+    def _share_catalog(self, emit: bool = True) -> None:
+        """Hand the merged catalog to every session; `emit` also sends it to
+        the windows, which only a change (download, delete, setting) needs."""
+        merged = self.merged_catalog()
+        for s in list(self.sessions.values()):    # called from worker threads too
+            s.catalog = merged
+        if emit:
+            self.emit(event(Event.CATALOG, None, models=merged, refreshed=False))
 
     def add_root(self, path: str) -> str:
         p = str(Path(path).expanduser().resolve())
@@ -443,7 +459,8 @@ def create_app(engine: Engine, ui_dir: Path | None = None) -> FastAPI:
     async def models(token: str = ""):
         if not secrets.compare_digest(token, engine.token):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
-        return {"models": await engine.catalog()}
+        await engine.catalog()
+        return {"models": engine.merged_catalog()}
 
     # Where the sidebar's beta-feedback dialog lands: the "Mesh Code Beta
     # Feedback" Google Form. The renderer's CSP only allows connections to
@@ -503,7 +520,7 @@ def create_app(engine: Engine, ui_dir: Path | None = None) -> FastAPI:
             sessions=[s.describe() for s in engine.sessions.values()],
             has_key=bool(engine.cfg.get("api_key")),
             settings=settings_mod.describe(engine.cfg),
-            catalog=engine._catalog or [],
+            catalog=engine.merged_catalog(),
             profile=engine.profile(),
             fx=engine.fx_info(),
             local=engine.local.status(),
@@ -687,8 +704,8 @@ async def handle_request(engine: Engine, msg: dict) -> None:
             return
 
         if kind == Request.LIST_MODELS:
-            engine.emit(event(Event.CATALOG, sid,
-                              models=await engine.catalog(force=bool(msg.get("refresh"))),
+            await engine.catalog(force=bool(msg.get("refresh")))
+            engine.emit(event(Event.CATALOG, sid, models=engine.merged_catalog(),
                               refreshed=bool(msg.get("refresh"))))
             return
 

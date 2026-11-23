@@ -93,8 +93,9 @@ def test_engine_boots_the_local_layer_and_installs_the_recommended_model(app_cli
         local = hello["data"]["local"]
         assert local["enabled"] is True and local["models"][0]["installed"] is True
         assert local["default_model"] == "local/tiny" and local["recommended"]["model"] == "local/tiny"
-        # The local model is a choice inside Smart routing, not a model to pin.
-        assert all(not str(m.get("id", "")).startswith("local/") for m in hello["data"]["catalog"])
+        # Local models are in the model list, first, like any other model.
+        ids = [m["id"] for m in hello["data"]["catalog"]]
+        assert ids[0] == "local/auto" and "local/tiny" in ids
 
 
 def test_a_lookup_with_smart_routing_starts_on_the_local_server(app_client, gateway, tmp_path):
@@ -239,3 +240,30 @@ def test_a_fresh_install_starts_with_smart_routing_on(gateway, local_world, monk
         assert settings_mod.BY_KEY["route_mode"]["default"] == "smart"
     finally:
         engine.shutdown()
+
+
+
+def test_a_local_model_picked_in_the_model_list_runs_the_turn_for_free(app_client, gateway, tmp_path):
+    client, engine = app_client
+    assert _installed(engine)
+    with client.websocket_connect("/ws?token=secret-token") as ws:
+        ws.receive_text()
+        ws.send_text(json.dumps({"type": Request.OPEN_WORKSPACE, "workspace": str(tmp_path)}))
+        sid = _drain(ws, Event.SESSION_STARTED)["session"]
+        ws.send_text(json.dumps({"type": Request.SET_CONFIG, "session": sid, "key": "route_mode", "value": "off"}))
+        ws.send_text(json.dumps({"type": Request.SET_MODEL, "session": sid, "model": "local/tiny"}))
+        ws.send_text(json.dumps({"type": Request.PROMPT, "session": sid, "text": "hi"}))
+        msg = _drain(ws, Event.ASSISTANT_MESSAGE)
+        fin = _drain(ws, Event.TURN_FINISHED)
+    assert msg["data"]["text"] == "hello from llama"
+    assert fin["data"]["local"] is True and fin["data"]["cost"] == 0 and fin["data"]["model"] == "local/tiny"
+    assert [r for r in gateway.requests if "messages" in r] == []
+
+
+def test_the_model_list_offers_only_local_models_that_fit(app_client, local_world, monkeypatch):
+    client, engine = app_client
+    assert _installed(engine)
+    big = dict(local_world["models"][0], id="local/huge", label="Huge", bytes=200 * 1024 ** 3)
+    engine.local.manifest["models"].append(big)
+    ids = [m["id"] for m in engine.merged_catalog()]
+    assert "local/tiny" in ids and "local/huge" not in ids

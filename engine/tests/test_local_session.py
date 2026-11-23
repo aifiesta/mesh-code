@@ -73,6 +73,15 @@ class StubLocal:
     def context_window(self):
         return self.window
 
+    def target_for(self, model_id, *, cancel=None, notify=None):
+        """A model picked in the model list: blocks while loading."""
+        from meshharness.local.manager import LocalUnavailable
+        self.picked = model_id
+        t = self.ready_target()
+        if t is None:
+            raise LocalUnavailable("Tiny is not downloaded yet")
+        return t
+
     def recover(self, *, force=False):
         self.recovered += 1
 
@@ -328,3 +337,41 @@ def test_a_long_chat_starts_on_the_cloud_not_the_local_model(harness, gateway, l
     h.session.submit(LOOKUP)
     h.wait_for(Event.TURN_FINISHED)
     assert llama.requests == []
+
+
+
+# ---- a local model picked in the model list, like any other model ----------------
+
+def test_a_picked_local_model_runs_every_step_and_never_steps_up(harness, gateway, llama, monkeypatch):
+    monkeypatch.setattr(finishcheck, "find_test_command", lambda root: "exit 1")
+    llama.script(sse_turn(tool_calls=[{"id": "w", "name": "write_file",
+                                       "arguments": json.dumps({"path": "README.md", "content": "hi\n"})}]),
+                 sse_turn("Done."))
+    local = StubLocal(llama)
+    h = harness(mode=Mode.BYPASS, model="local/tiny", route_mode="off", local=local)
+    h.session.catalog = CATALOG
+    h.session.submit(STANDARD)                  # any level: the user picked it
+    fin = h.wait_for(Event.TURN_FINISHED)
+    assert _chat_requests(gateway) == [] and len(llama.requests) == 2
+    assert local.picked == "local/tiny"
+    assert fin["data"]["cost"] == 0 and fin["data"]["local_steps"] == 2
+    assert not fin["data"]["stepped_up_from_local"] and h.of(Event.ROUTED) == []
+    assert h.of(Event.TOOL_PROPOSED) == [] and len(h.of(Event.TOOL_STARTED)) == 1, \
+        "no finish check or step-up: the picked model is the one the user wants"
+    sent = llama.requests[0]
+    assert sent["model"] == "local/tiny" and sum(1 for m in sent["messages"] if m["role"] == "system") == 1
+
+
+def test_a_picked_local_model_that_is_not_ready_ends_the_turn_with_the_reason(harness, gateway, llama):
+    h = harness(model="local/tiny", route_mode="off", local=StubLocal(llama, ready=False))
+    h.session.submit("hi")
+    err = h.wait_for(Event.ERROR)
+    assert err["data"]["fatal"] and "not downloaded" in err["data"]["message"]
+    assert _chat_requests(gateway) == [] and llama.requests == []
+
+
+def test_a_picked_local_model_with_local_turned_off_says_so(harness, gateway, llama):
+    h = harness(model="local/tiny", route_mode="off", local=StubLocal(llama), local_enabled=False)
+    h.session.submit("hi")
+    err = h.wait_for(Event.ERROR)
+    assert "turned off" in err["data"]["message"] and _chat_requests(gateway) == []
