@@ -1,19 +1,14 @@
 import { useEffect, useState } from 'react'
 import { Wordmark } from './Logo'
 
-/**
- * Connect, replace, or remove the Mesh API key.
- *
- * One component, two placements. As a `gate` it is the first-run screen; as
- * a `modal` it is how you change keys later — which had no route at all
- * before: the gate only ever appeared when NO key was stored, so anyone
- * whose key was picked up from the meshapi CLI had no way to set their own.
- *
- * The key is verified against the gateway before it is saved, so a typo
- * fails here rather than on the first prompt.
- */
-export function KeyGate({ variant = 'gate', error, resultAt, hint, source, onSave, onClear, onClose }: {
+/** Connect, replace, or remove the Mesh API key: the first-run `gate`, or a
+ *  `modal` later. The key is verified against the gateway before it is saved. */
+export function KeyGate({ variant = 'gate', error, resultAt, hint, source, onSave, onClear, onClose, below, onContinueLocal }: {
   variant?: 'gate' | 'modal'
+  /** Rendered under the card on the first-run gate: the local model setup. */
+  below?: React.ReactNode
+  /** Offered when a local model is installed: use the app with no key at all. */
+  onContinueLocal?: () => void
   error: string | null
   /** Bumped whenever ANY key.result lands — success or failure. */
   resultAt?: number
@@ -93,6 +88,12 @@ export function KeyGate({ variant = 'gate', error, resultAt, hint, source, onSav
         </button>
       </div>
 
+      {variant === 'gate' && onContinueLocal && (
+        <button className="btn ghost wide" onClick={onContinueLocal}>
+          Continue with the local model only
+        </button>
+      )}
+
       <p className="fine">
         Get a key at <a href="https://app.meshapi.ai" target="_blank" rel="noreferrer noopener">app.meshapi.ai</a>.
         It is stored locally with owner-only permissions and is only ever sent
@@ -107,5 +108,5 @@ export function KeyGate({ variant = 'gate', error, resultAt, hint, source, onSav
       <div onClick={(e) => e.stopPropagation()}>{card}</div>
     </div>
   }
-  return <div className="gate">{card}</div>
+  return <div className="gate"><div className="gate-stack">{card}{below}</div></div>
 }

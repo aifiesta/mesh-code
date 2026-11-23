@@ -6,7 +6,6 @@ from typing import Iterable, Optional
 
 import httpx
 
-from .optimize import prepare
 
 
 def _is_complete_json(s: str) -> bool:
@@ -128,27 +127,63 @@ class ToolCallAccumulator:
         return named
 
 
-def build_payload(messages: list, cfg: dict, tools: Optional[list] = None) -> dict:
+_CACHE_MARK = {"type": "ephemeral"}
+
+
+def with_cache_markers(messages: list) -> list:
+    """Mark the system prompt and the newest message as cache breakpoints.
+    The gateway does not add them for Anthropic models, and a prefix under
+    the provider's minimum just isn't cached, so marking is always safe."""
+    out = list(messages)
+    idx = {len(out) - 1} if out else set()
+    if out and out[0].get("role") == "system":
+        idx.add(0)
+    for i in idx:
+        out[i] = {**out[i], "cache_control": _CACHE_MARK}
+    return out
+
+
+# llama-server reads only the flat field, which stops at "high".
+_FLAT_LEVELS = ("none", "low", "medium", "high")
+
+
+def build_payload(messages: list, cfg: dict, tools: Optional[list] = None,
+                  target=None) -> dict:
     """Build the /chat/completions request body from session config.
 
     Pure function (unit-testable without a network). Mesh extensions:
-      - auto_route  -> model:"auto" (gateway Auto Router picks per prompt)
-      - fallback_models -> `models` ordered fallback list
-      - reasoning_effort (our setting) -> sent as `reasoning: {"effort": …}`
-        when set ("none" is a real level; None means "don't send"). The
-        gateway's older top-level `reasoning_effort` field is deprecated and
-        refuses anything above "high"; `reasoning.effort` takes every level
-        up to "max" (checked live 2026-11-17, docs/bench/model_scoring).
+      - auto_route  -> model:"auto" (gateway Auto Router picks per prompt),
+        with exclude_models so the router never picks a banned model
+      - models / fallback_models -> `models` ordered fallback list (a
+        policy tier's own chain wins over the user's list)
+      - weight_profile -> sent with model:"auto"
+      - reasoning_effort -> `reasoning: {"effort": …}` for Mesh, whose flat
+        `reasoning_effort` field is deprecated and stops at "high"; a local
+        server still gets the flat field. None means "don't send".
     """
+    local = bool(target and target.local)
     payload: dict = {
-        "model": "auto" if cfg.get("auto_route") else cfg["model"],
-        "messages": messages,
+        "model": target.model if target else ("auto" if cfg.get("auto_route") else cfg["model"]),
+        "messages": messages if local else with_cache_markers(messages),
         "stream": True,
     }
-    if cfg.get("fallback_models"):
-        payload["models"] = list(cfg["fallback_models"])
-    if cfg.get("reasoning_effort"):
-        payload["reasoning"] = {"effort": cfg["reasoning_effort"]}
+    fallbacks = cfg["models"] if "models" in cfg else cfg.get("fallback_models")
+    if fallbacks and not local:
+        payload["models"] = list(fallbacks)
+    if payload["model"] == "auto":
+        if cfg.get("exclude_models"):
+            payload["exclude_models"] = list(cfg["exclude_models"])
+        if cfg.get("weight_profile"):
+            payload["weight_profile"] = cfg["weight_profile"]
+    level = cfg.get("reasoning_effort")
+    if level and (target is None or target.supports_reasoning_effort):
+        if local:
+            payload["reasoning_effort"] = level if level in _FLAT_LEVELS else "high"
+        else:
+            payload["reasoning"] = {"effort": level}
+    if target:
+        for k, v in target.request_defaults.items():
+            payload.setdefault(k, v)
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
@@ -234,13 +269,9 @@ def nearest_level(wanted: str, accepted, refused=()) -> "str | None":
 
 
 def _drop_empty_assistant(messages: list) -> list:
-    """Remove assistant messages that carry neither text nor tool_calls. One
-    such message — appended after an earlier empty/failed response — otherwise
-    POISONS every later turn: the Bedrock/Anthropic backend rejects an empty
-    text block with HTTP 200 + an in-band ValidationException ("text content
-    blocks must be non-empty"), which the user experiences as the CLI silently
-    hanging (?→? tok forever). Consecutive user messages ARE accepted by the
-    gateway, so dropping these is safe."""
+    """Remove assistant messages with neither text nor tool_calls: Bedrock
+    rejects an empty text block in-band, which poisons every later turn.
+    Consecutive user messages are accepted, so dropping them is safe."""
     def _blank(c) -> bool:
         # content is normally str or None here; a list (multimodal blocks) is
         # never "blank" — and calling .strip() on it would crash the stream.
@@ -255,10 +286,27 @@ def _drop_empty_assistant(messages: list) -> list:
     ]
 
 
+def _endpoint(cfg: dict, target, *, blocking: bool = False) -> tuple:
+    """(url, headers, timeout) for one hop. A cloud target uses 120 s
+    streaming / 300 s blocking; a local target gets a long read timeout
+    because CPU prefill of a 30k-token context takes minutes."""
+    base = target.base_url if target else cfg["base_url"]
+    key = target.api_key if target else cfg["api_key"]
+    if target and target.local:
+        timeout = httpx.Timeout(connect=10.0, read=target.read_timeout, write=60.0, pool=10.0)
+    else:
+        timeout = 300 if blocking else 120
+    headers = {"Content-Type": "application/json"}
+    if key:    # an empty bearer is an invalid header, not an unauthenticated request
+        headers["Authorization"] = f"Bearer {key}"
+    return (f"{base.rstrip('/')}/chat/completions", headers, timeout)
+
+
 def stream_chat(
     messages: list,
     cfg: dict,
     tools: Optional[list] = None,
+    target=None,
 ) -> Iterable:
     """Yield content deltas, then a final dict with usage/cost/model/tool_calls.
 
@@ -267,42 +315,20 @@ def stream_chat(
       - `tool_calls` arrive as deltas indexed by position; we accumulate them
         and surface as the meta dict's `tool_calls` field.
 
-    When the `optimize` dial is set (BETA), the request is rewritten by the
-    phase 1 lever stack in optimize.py before sending, and the plan rides on
-    the final meta dict as `optimize_plan`. If the gateway rejects the
-    optimized request, we retry the raw request once, so the beta can never
-    be the reason a turn fails.
     """
-    url = f"{cfg['base_url']}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {cfg['api_key']}",
-        "Content-Type": "application/json",
-    }
-    # Strip any empty assistant message BEFORE both the raw payload and the
-    # optimize path — one poisons every subsequent turn (see the helper).
+    url, headers, timeout = _endpoint(cfg, target)
+    local = bool(target and target.local)
+    # Strip any empty assistant message first: one poisons every later turn.
     messages = _drop_empty_assistant(messages)
-    payload = build_payload(messages, cfg, tools)
+    payload = build_payload(messages, cfg, tools, target)
+    if local:
+        payload["stream_options"] = {"include_usage": True}
 
-    plan: dict = {}
-    attempts = [payload]
-    dial = float(cfg.get("optimize") or 0)
-    if dial > 0:
-        # Pass the model string actually being sent ("auto" falls back to
-        # optimize's default cache-minimum heuristic — harmless).
-        opt_messages, extra, plan = prepare(
-            messages, payload["model"], dial, has_tools=bool(tools)
-        )
-        if plan.get("levers_applied"):
-            optimized = {**payload, **extra, "messages": opt_messages}
-            attempts = [optimized, payload]  # raw payload is the fallback
-
-    # A caller-forced output budget wins over every other lever — it exists
-    # because the gateway already rejected this request for asking too much
-    # (input + max_tokens > context window). Applied last, to every attempt,
-    # so optimize's own max_tokens default can't re-trigger the same 400.
+    # A caller-forced output budget wins: the gateway already rejected this
+    # request for asking too much (input + max_tokens > context window).
     forced_max = cfg.get("max_tokens")
     if forced_max:
-        attempts = [{**body, "max_tokens": int(forced_max)} for body in attempts]
+        payload["max_tokens"] = int(forced_max)
 
     last_meta: dict = {}
     last_model: str = ""
@@ -311,123 +337,90 @@ def stream_chat(
     dropped_sample = ""  # nonzero implicates the gateway relay, not the model)
     progress_tool = ""   # spinner feed: which tool's arguments are streaming
     progress_chars = 0   # ...and how many argument chars have arrived so far
-    request_ids: list = []  # every attempt's x-request-id (billing lookup)
+    request_ids: list = []  # the x-request-id (billing lookup)
 
-    for attempt_index, body in enumerate(attempts):
-        is_last_attempt = attempt_index == len(attempts) - 1
-        retry_raw = False  # set if an in-band error should degrade to the raw request
-        # Fresh accumulator + progress per attempt. A raw retry after an
-        # optimized attempt streamed some content/tool-call deltas used to
-        # reuse these: buf concatenated both attempts' text, and accum merged
-        # attempt-1 fragments with attempt-2 deltas by index into invalid JSON.
-        accum = ToolCallAccumulator()
-        progress_tool = ""
-        progress_chars = 0
-        with httpx.stream("POST", url, json=body, headers=headers, timeout=120) as r:
-            if r.status_code >= 400:
-                r.read()  # so e.response.text works in the caller
-                if not is_last_attempt:
-                    # Optimized request rejected; degrade to the raw request.
-                    plan = {
-                        "dial": dial,
-                        "levers_applied": [],
-                        "degraded": f"gateway returned {r.status_code}, sent raw request",
-                    }
-                    continue
-            r.raise_for_status()
-            # The consumer closes this from its own thread on interrupt; that is
-            # the only way to unblock iter_lines() while the wire is silent.
-            yield {"stream_response": r}
-            # When auto-routed, the gateway names the concrete model it
-            # picked in this header; SSE chunks' `model` agrees, but the
-            # header is the authoritative belt-and-braces.
-            resolved = r.headers.get("x-resolved-model-id")
-            if resolved:
-                last_model = resolved
-            # The gateway's own id for this request — the key that unlocks
-            # its authoritative cost via POST /v1/usage/events.
-            rid = r.headers.get("x-request-id")
-            if rid:
-                last_meta["request_id"] = rid
-                request_ids.append(rid)
-            for line in r.iter_lines():
-                if not line or not line.startswith("data: "):
-                    continue
-                data = line[6:]
-                if data.strip() == "[DONE]":
-                    break
-                try:
-                    obj = json.loads(data)
-                except json.JSONDecodeError:
-                    dropped_chunks += 1
-                    if not dropped_sample:
-                        dropped_sample = data[:200]
-                    continue
+    with httpx.stream("POST", url, json=payload, headers=headers, timeout=timeout) as r:
+        if r.status_code >= 400:
+            r.read()  # so e.response.text works in the caller
+        r.raise_for_status()
+        # The consumer closes this from its own thread on interrupt; that is
+        # the only way to unblock iter_lines() while the wire is silent.
+        yield {"stream_response": r}
+        # When auto-routed, the gateway names the concrete model it
+        # picked in this header; SSE chunks' `model` agrees, but the
+        # header is the authoritative belt-and-braces.
+        resolved = r.headers.get("x-resolved-model-id")
+        if resolved:
+            last_model = resolved
+        # The gateway's own id for this request — the key that unlocks
+        # its authoritative cost via POST /v1/usage/events.
+        rid = r.headers.get("x-request-id")
+        if rid:
+            last_meta["request_id"] = rid
+            request_ids.append(rid)
+        for line in r.iter_lines():
+            if not line or not line.startswith("data: "):
+                continue
+            data = line[6:]
+            if data.strip() == "[DONE]":
+                break
+            try:
+                obj = json.loads(data)
+            except json.JSONDecodeError:
+                dropped_chunks += 1
+                if not dropped_sample:
+                    dropped_sample = data[:200]
+                continue
 
-                # In-band error: the gateway can return HTTP 200 and then stream
-                # an {"error": …} chunk (validation / context / rate-limit). It
-                # has no `choices`/`usage`, so it used to be silently dropped —
-                # surfacing it is what turns a silent "hang" into a real message.
-                err = obj.get("error")
-                if err:
-                    msg = err.get("message") if isinstance(err, dict) else str(err)
-                    if not is_last_attempt:
-                        # Optimized attempt errored in-band (HTTP 200 + {"error"})
-                        # — degrade to the raw request, same as an HTTP 4xx would.
-                        # The optimize beta must never be the reason a turn fails.
-                        plan = {
-                            "dial": dial,
-                            "levers_applied": [],
-                            "degraded": "gateway in-band error on optimized request, sent raw",
-                        }
-                        retry_raw = True
-                    else:
-                        last_meta["error"] = msg
-                        refusal = reasoning_refusal(err)
-                        if refusal is not None:
-                            last_meta["reasoning_rejected"] = refusal
-                    break
+            # In-band error: HTTP 200 followed by an {"error": …} chunk with
+            # no choices/usage. Surfaced, or the turn reads as a hang.
+            err = obj.get("error")
+            if err:
+                msg = err.get("message") if isinstance(err, dict) else str(err)
+                last_meta["error"] = msg
+                refusal = reasoning_refusal(err)
+                if refusal is not None:
+                    last_meta["reasoning_rejected"] = refusal
+                break
 
-                if obj.get("model"):
-                    last_model = obj["model"]
+            if obj.get("model"):
+                last_model = obj["model"]
 
-                choices = obj.get("choices") or []
-                if choices:
-                    delta = choices[0].get("delta", {})
+            choices = obj.get("choices") or []
+            if choices:
+                delta = choices[0].get("delta", {})
 
-                    content = delta.get("content")
-                    if content:
-                        yield content
+                content = delta.get("content")
+                if content:
+                    yield content
 
-                    tc_deltas = delta.get("tool_calls") or []
-                    for tc in tc_deltas:
-                        accum.add(tc)
-                        fn = tc.get("function") or {}
-                        if fn.get("name"):
-                            progress_tool = fn["name"]
-                        progress_chars += len(fn.get("arguments") or "")
-                    if tc_deltas:
-                        # Spinner feed: an 8KB write_file argument used to
-                        # stream in dead silence. render_stream pops these —
-                        # they never reach the meta dict.
-                        yield {"stream_progress": {
-                            "tool": progress_tool or None,
-                            "chars": progress_chars,
-                        }}
+                tc_deltas = delta.get("tool_calls") or []
+                for tc in tc_deltas:
+                    accum.add(tc)
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        progress_tool = fn["name"]
+                    progress_chars += len(fn.get("arguments") or "")
+                if tc_deltas:
+                    # Spinner feed while a long tool argument streams;
+                    # the consumer pops these, they never reach meta.
+                    yield {"stream_progress": {
+                        "tool": progress_tool or None,
+                        "chars": progress_chars,
+                    }}
 
-                usage = obj.get("usage")
-                cost = obj.get("cost")
-                if usage or cost:
-                    last_meta.update({"usage": usage, "cost": cost})
-        if retry_raw:
-            # Discard whatever the aborted optimized attempt streamed so the
-            # caller doesn't keep its partial text or half tool call.
-            yield {"stream_reset": True}
-            continue  # optimized attempt errored in-band — try the raw request
-        break  # this attempt streamed successfully
+            usage = obj.get("usage")
+            cost = obj.get("cost")
+            if usage or cost:
+                last_meta.update({"usage": usage, "cost": cost})
+            if obj.get("timings"):
+                last_meta["timings"] = obj["timings"]
 
     if last_model:
         last_meta["model"] = last_model
+    if local:
+        last_meta["local"] = True
+        last_meta["model"] = target.display_id
     if request_ids:
         last_meta["request_ids"] = request_ids
     if dropped_chunks:
@@ -438,14 +431,12 @@ def stream_chat(
         last_meta["accum_dropped"] = accum.dropped
     if tool_calls:
         last_meta["tool_calls"] = tool_calls
-    if plan:
-        last_meta["optimize_plan"] = plan
     if last_meta:
         yield last_meta
 
 
 def complete_chat(messages: list, cfg: dict, tools: "Optional[list]" = None,
-                  max_tokens: "int | None" = None) -> tuple:
+                  max_tokens: "int | None" = None, target=None) -> tuple:
     """Non-streaming fallback for one hop. Returns (reply_text, meta).
 
     Why this exists: Mesh's own retry + provider fallback is documented to
@@ -457,18 +448,14 @@ def complete_chat(messages: list, cfg: dict, tools: "Optional[list]" = None,
     Same meta shape as stream_chat's final yield, so callers need no special
     casing: {usage, cost, model, tool_calls?, error?, elapsed}.
     """
-    url = f"{cfg['base_url'].rstrip('/')}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {cfg['api_key']}",
-        "Content-Type": "application/json",
-    }
-    payload = build_payload(_drop_empty_assistant(messages), cfg, tools)
+    url, headers, timeout = _endpoint(cfg, target, blocking=True)
+    payload = build_payload(_drop_empty_assistant(messages), cfg, tools, target)
     payload["stream"] = False
     if max_tokens:
         payload["max_tokens"] = int(max_tokens)
 
     started = time.time()
-    r = httpx.post(url, json=payload, headers=headers, timeout=300)
+    r = httpx.post(url, json=payload, headers=headers, timeout=timeout)
     r.raise_for_status()
     data = r.json()
     meta: dict = {"elapsed": time.time() - started, "non_streaming": True}
@@ -501,6 +488,9 @@ def complete_chat(messages: list, cfg: dict, tools: "Optional[list]" = None,
     meta["model"] = (
         r.headers.get("x-resolved-model-id") or data.get("model") or ""
     )
+    if target and target.local:
+        meta["local"] = True
+        meta["model"] = target.display_id
     rid = r.headers.get("x-request-id")
     if rid:
         meta["request_id"] = rid

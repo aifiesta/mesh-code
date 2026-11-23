@@ -2,7 +2,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { EngineClient } from './engine'
 import { initialState, reduce, type SessionState } from './store'
 import { dismissOverlays } from './useDismissable'
-import { MODES, Req, shortPath, type Mode, type Profile } from './types'
+import { MODES, Req, shortPath, type LocalStatus, type Mode, type Profile } from './types'
 import { ApprovalDialog } from './components/ApprovalDialog'
 import { CommandPalette, type Action } from './components/CommandPalette'
 import { ControlBar } from './components/ControlBar'
@@ -17,6 +17,7 @@ import { Thinking } from './components/Thinking'
 import { AskInline } from './components/AskInline'
 import { Composer } from './components/Composer'
 import { KeyGate } from './components/KeyGate'
+import { LocalSetupCard } from './components/LocalSetupCard'
 import { Markdown } from './components/Markdown'
 import { Chevron } from './components/Chevron'
 import { FileBadge } from './components/FileBadge'
@@ -29,12 +30,20 @@ export default function App() {
   const clientRef = useRef<EngineClient | null>(null)
   const [sheet, setSheet] = useState<string | null>(null)
   const [palette, setPalette] = useState(false)
+  const [localOnly, setLocalOnly] = useState<boolean>(() => {
+    try { return localStorage.getItem('mesh.localOnly') === '1' } catch { return false }
+  })
   const [keyDialog, setKeyDialog] = useState(false)
+  const localInstalled = !!state.local?.enabled && state.local.models.some((m) => m.installed)
+  const gateShown = state.ready && !state.hasKey && !(localOnly && localInstalled)
+  const gateRef = useRef(gateShown)
+  gateRef.current = gateShown
   const [confirmDelete, setConfirmDelete] = useState<any>(null)
   // Switching the active repository is a bigger move than it looks: the
   // conversation you are leaving keeps running, and people assumed it was
   // being thrown away. Confirm it, and say plainly what happens.
   const [confirmSwitch, setConfirmSwitch] = useState<{ path: string; name: string } | null>(null)
+  const [confirmClose, setConfirmClose] = useState<string | null>(null)
   // The rail is 300px of permanent chrome; on a laptop that is a third of
   // the transcript. Hiding it is remembered per machine.
   // The left sidebar collapses too (⌘B, or the chevron in its header) —
@@ -67,12 +76,8 @@ export default function App() {
   const stateRef = useRef(state)
   stateRef.current = state
 
-  // Theme. The CSS has always supported an explicit override; there was
-  // simply no control for it, so "light or dark" meant "whatever the OS
-  // says". `system` stamps no attribute and lets prefers-color-scheme win.
-  // Light by default. The key is versioned because the old default
-  // ('system') was written back to storage on first run, so an unversioned
-  // read could not tell "never chose" from "chose system".
+  // `system` stamps no attribute and lets prefers-color-scheme win. The
+  // storage key is versioned so "never chose" and "chose system" differ.
   const [theme, setTheme] = useState<'system' | 'light' | 'dark'>(() => {
     try { return (localStorage.getItem('mesh.theme.v2') as any) || 'light' }
     catch { return 'light' }
@@ -198,13 +203,13 @@ export default function App() {
   // The two confirm dialogs had no Escape handling; every other modal
   // closes on it. One effect dismisses whichever is open.
   useEffect(() => {
-    if (!confirmDelete && !confirmSwitch) return
+    if (!confirmDelete && !confirmSwitch && !confirmClose) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { setConfirmDelete(null); setConfirmSwitch(null) }
+      if (e.key === 'Escape') { setConfirmDelete(null); setConfirmSwitch(null); setConfirmClose(null) }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [confirmDelete, confirmSwitch])
+  }, [confirmDelete, confirmSwitch, confirmClose])
 
   // Opening the key dialog clears any stale rejection first, so reopening
   // "Replace API key" never greets a pristine form with the old red error.
@@ -227,9 +232,7 @@ export default function App() {
   // empty UI transcript — request the replay once per session.
   const hydrated = useRef<Set<string>>(new Set())
   useEffect(() => {
-    if (!session || session.busy) return
-    if (session.messages.length > 0) { hydrated.current.add(session.id); return }
-    if (hydrated.current.has(session.id)) return
+    if (!session?.needsHistory || hydrated.current.has(session.id)) return
     hydrated.current.add(session.id)
     clientRef.current?.send(Req.GET_HISTORY, { session: session.id })
   }, [session])
@@ -262,6 +265,7 @@ export default function App() {
       // under its scrim let ⌘K's autofocus steal the caret — you'd type into
       // an invisible palette and Enter could run a hidden action.
       if (activeRef.current && stateRef.current.sessions[activeRef.current]?.approval) return
+      if (gateRef.current) return
       if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); setPalette((p) => !p) }
       if (mod && e.key === ',') { e.preventDefault(); setSheet((v) => (v ? null : 'model')) }
       if (mod && e.key.toLowerCase() === 'b') { e.preventDefault(); setSideOpen((v) => !v) }
@@ -314,14 +318,51 @@ export default function App() {
     if (dir) requestSwitch(dir, dir.replace(/\/+$/, '').split('/').pop() || dir)
   }, [requestSwitch])
 
+  // The gate retakes the screen with no overlay left behind it.
+  useEffect(() => { if (gateShown) { setSheet(null); setPalette(false); setKeyDialog(false) } }, [gateShown])
+
+  // local_model must name an installed model; a pick the engine reports as
+  // not on disk is cleared.
+  const localModelPick = state.settings?.settings.find((s) => s.key === 'local_model')?.value as string | undefined
+  useEffect(() => {
+    const row = localModelPick ? state.local?.models.find((m) => m.id === localModelPick) : undefined
+    if (row && !row.installed && !row.job && !state.local?.jobs.some((j) => j.target === row.id)) setConfig('local_model', '')
+  }, [localModelPick, state.local, setConfig])
+
   if (!state.ready) return <Splash connection={state.connection} />
 
-  if (!state.hasKey) {
+  const localCard = state.local && (state.local.jobs.length > 0 || state.local.needs_confirm
+    || (state.local.server.state === 'failed' && state.local.server.error)) ? state.local : null
+  const appNotices = state.appNotices.map((n) => (
+    <div className={`notice ${n.level} app-notice`} key={n.id}>
+      {n.text}
+      <button className="link" onClick={() => dispatch({ t: 'dismissAppNotice', id: n.id })}>Dismiss</button>
+    </div>
+  ))
+
+  if (gateShown) {
     return (
       <KeyGate
         error={state.keyError}
         resultAt={state.keyResult?.at}
         onSave={(k) => client?.saveKey(k)}
+        onContinueLocal={localInstalled ? () => {
+          try { localStorage.setItem('mesh.localOnly', '1') } catch { /* private mode */ }
+          setLocalOnly(true)
+        } : undefined}
+        below={
+          <>
+            {appNotices}
+            {state.local && (
+              <LocalSetupCard
+                local={state.local}
+                onInstall={(m) => client?.localInstall(m)}
+                onCancel={(j) => client?.localCancel(j)}
+                onDecline={() => client?.localDecline()}
+              />
+            )}
+          </>
+        }
       />
     )
   }
@@ -358,13 +399,9 @@ export default function App() {
         explorer={session ? (
           <>
             <Explorer
-              /* The files panel FOLLOWS THE ACTIVE SESSION. Its workspace is
-                 the (dotted, expanded) root; other sessions' projects are NOT
-                 listed here — they're reachable by clicking their session
-                 above, which swaps this whole tree. Only genuinely added
-                 browse folders appear alongside. The old version showed every
-                 folder ever opened with a stale global "active" flag, so
-                 switching chats left the tree stuck on the previous project. */
+              /* The files panel follows the active session: its workspace is
+                 the expanded root, other sessions' projects are reached by
+                 clicking them above; only added browse folders sit alongside. */
               roots={(() => {
                 // Every open session is a project NODE (the sessions list is
                 // gone — these nodes are it), active first; then folders
@@ -421,7 +458,7 @@ export default function App() {
               })()}
               activeChat={session.id}
               onSwitchChat={(id) => dispatch({ t: 'activate', id })}
-              onCloseSession={(id) => client?.send(Req.CLOSE_SESSION, { session: id })}
+              onCloseSession={setConfirmClose}
               onNewChat={(path) => client?.send(Req.NEW_SESSION, { workspace: path })}
             />
             <button className="add-folder" onClick={addFolder}>+ Add folder…</button>
@@ -487,6 +524,38 @@ export default function App() {
           </div>
         </div>
       )}
+      {confirmClose && state.sessions[confirmClose] && (() => {
+        const x = state.sessions[confirmClose]
+        const last = !Object.values(state.sessions).some((o) => o.id !== x.id && o.workspace === x.workspace)
+        return (
+          <div className="modal-scrim" onClick={() => setConfirmClose(null)}>
+            <div className="modal confirm" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+              <header>
+                <span className="tool-chip run_bash">close</span>
+                <h2>Close “{x.label || x.title}”?</h2>
+              </header>
+              <div className="approval-body">
+                <p className="confirm-text">
+                  {x.busy ? <>It is still working; closing stops it. </> : null}
+                  The conversation is removed and cannot be reopened.
+                  {last ? <> This is the last chat in <b>{x.title}</b>, so the project leaves the sidebar too.</> : null}
+                </p>
+                <pre className="command-block">{x.workspace}</pre>
+              </div>
+              <footer>
+                <button className="btn ghost" onClick={() => setConfirmClose(null)}>Keep it</button>
+                <div className="spacer" />
+                <button className="btn danger-solid" onClick={() => {
+                  client?.send(Req.CLOSE_SESSION, { session: x.id })
+                  // The project node exists for its chats: the last one closing takes it along.
+                  if (last) client?.send(Req.REMOVE_FOLDER, { path: x.workspace })
+                  setConfirmClose(null)
+                }}>Close chat</button>
+              </footer>
+            </div>
+          </div>
+        )
+      })()}
       {tour && <Tour onDone={endTour} />}
       {keyDialog && (
         <KeyGate
@@ -513,6 +582,9 @@ export default function App() {
             () => setTour(true),
             setTheme,
             (m: string) => session && client?.setMode(session.id, m),
+            () => setSheet('local'),
+            () => setSheet('budget'),
+            state.local?.default_model ? () => client?.localServer('restart') : null,
           )}
         />
       )}
@@ -520,6 +592,18 @@ export default function App() {
         <SettingsSheet
           settings={state.settings}
           catalog={state.catalog}
+          local={state.local}
+          localActions={{
+            install: (m) => client?.localInstall(m),
+            cancel: (j) => client?.localCancel(j),
+            remove: (m) => client?.localDelete(m),
+            setDefault: (m) => setConfig('local_model', m),
+            server: (a) => client?.localServer(a),
+            refresh: () => client?.localRefresh(),
+          }}
+          initialTab={sheet}
+          notices={state.appNotices}
+          onDismissNotice={(id) => dispatch({ t: 'dismissAppNotice', id })}
           error={state.configError}
           onSet={setConfig}
           onClose={() => { setSheet(null); dispatch({ t: 'dismissConfigError' }) }}
@@ -531,15 +615,34 @@ export default function App() {
           key={session.id}
           s={session}
           profile={state.profile}
+          local={state.local}
+          banner={
+            <>
+              {appNotices}
+              {localCard && (
+                <LocalSetupCard
+                  local={localCard}
+                  compact
+                  onInstall={(m) => client?.localInstall(m)}
+                  onCancel={(j) => client?.localCancel(j)}
+                  onDecline={() => client?.localDecline()}
+                  onOpenSettings={() => setSheet('local')}
+                />
+              )}
+            </>
+          }
           controls={
             <ControlBar
               status={session.status}
               settings={state.settings}
               catalog={state.catalog}
-              routeExplain={state.routeExplain}
+              local={state.local}
+              budget={state.budget}
               onSet={setConfig}
-              onExplain={() => client?.send(Req.ROUTE_PREVIEW, { session: session.id, text: '' })}
               onOpenSettings={(tab) => tab === '__palette' ? setPalette(true) : setSheet(tab ?? 'model')}
+              onEscalate={(harder) => client?.escalate(session.id, harder)}
+              onDeescalate={() => client?.deescalate(session.id)}
+              onBudgetOverride={(clear) => client?.budgetOverride(clear)}
             />
           }
           onSend={(text, attachments, refs) => {
@@ -553,6 +656,9 @@ export default function App() {
             ? client.fileUrl(session.id, session.file.root ?? session.workspace, session.file.path)
             : null}
           onInterrupt={() => { dispatch({ t: 'stopping', id: session.id }); client?.interrupt(session.id) }}
+          onRunCommand={(command) => client?.runCommand(session.id, command)}
+          onEscalate={session.status?.policy?.policy === 'local-first' ? () => client?.escalate(session.id) : undefined}
+          escalated={session.status?.policy?.tier === 'escalated'}
           onMode={(m) => client?.setMode(session.id, m)}
           onDecide={(d) => session.approval && client?.approve(session.id, session.approval.token, d)}
           onAnswer={(a) => {
@@ -567,6 +673,7 @@ export default function App() {
           }}
           onStopServer={(pid) => client?.stopServer(session.id, pid)}
           onManageKey={openKeyDialog}
+          onManageLocal={() => setSheet('local')}
           railOpen={railOpen}
           onRailResize={startRailResize}
           onCommands={() => setPalette(true)}
@@ -579,7 +686,7 @@ export default function App() {
           onShowRail={() => setRailOpen(true)}
           onCloseFile={() => dispatch({ t: 'closeFile', id: session.id })}
           onMention={mentionPath}
-          approvalIsTop={!palette && !sheet && !keyDialog && !tour && !confirmDelete && !confirmSwitch}
+          approvalIsTop={!palette && !sheet && !keyDialog && !tour && !confirmDelete && !confirmSwitch && !confirmClose}
         />
       ) : (
         <main className="empty">
@@ -588,6 +695,16 @@ export default function App() {
             <h2>No project open</h2>
             <p>Open a folder to start. The agent reads, writes and runs commands inside it — nowhere else, unless you say so.</p>
             <button className="btn primary" onClick={openFolder}>Open project…</button>
+            {appNotices}
+            {state.local && (
+              <LocalSetupCard
+                local={state.local}
+                onInstall={(m) => client?.localInstall(m)}
+                onCancel={(j) => client?.localCancel(j)}
+                onDecline={() => client?.localDecline()}
+                onOpenSettings={() => setSheet('local')}
+              />
+            )}
           </div>
         </main>
       )}
@@ -595,9 +712,12 @@ export default function App() {
   )
 }
 
-function SessionView({ s, controls, profile, railOpen, onRailResize, railResizing, onSend, onInterrupt, onMode, onCommands, onLoadJournal, onDecide, approvalIsTop, onAnswer, onDismissAsk, onStopServer, onManageKey, onHideRail, onShowRail, onTermRun, onTermInterrupt, onTermClear, onCloseFile, onMention, onNeedFiles, onOpenRef, fileUrl }: {
+function SessionView({ s, controls, banner, profile, local, railOpen, onRailResize, railResizing, onSend, onInterrupt, onRunCommand, onEscalate, escalated, onMode, onCommands, onLoadJournal, onDecide, approvalIsTop, onAnswer, onDismissAsk, onStopServer, onManageKey, onManageLocal, onHideRail, onShowRail, onTermRun, onTermInterrupt, onTermClear, onCloseFile, onMention, onNeedFiles, onOpenRef, fileUrl }: {
   s: SessionState
   controls: React.ReactNode
+  /** App-level notices and the local download banner, above the transcript. */
+  banner: React.ReactNode
+  local: LocalStatus | null
   profile: Profile | null
   onSend: (t: string, a: { name: string; data_url: string }[], refs: string[]) => void
   onNeedFiles: () => void
@@ -605,6 +725,9 @@ function SessionView({ s, controls, profile, railOpen, onRailResize, railResizin
   onOpenRef: (path: string) => void
   fileUrl: string | null
   onInterrupt: () => void
+  onRunCommand: (command: string) => void
+  onEscalate?: () => void
+  escalated?: boolean
   onMode: (m: Mode) => void
   onCommands: () => void
   onLoadJournal: () => void
@@ -613,6 +736,7 @@ function SessionView({ s, controls, profile, railOpen, onRailResize, railResizin
   onDismissAsk: () => void
   onStopServer: (pid: number) => void
   onManageKey: () => void
+  onManageLocal: () => void
   railOpen: boolean
   onRailResize: (e: React.PointerEvent) => void
   railResizing: boolean
@@ -657,6 +781,7 @@ function SessionView({ s, controls, profile, railOpen, onRailResize, railResizin
           </div>
         </header>
 
+        {banner}
         <div
           className="transcript"
           ref={scroller}
@@ -699,6 +824,17 @@ function SessionView({ s, controls, profile, railOpen, onRailResize, railResizin
                 )
               case 'tool':
                 return <ToolCardView key={m.id} card={m.card} />
+              case 'shell':
+                return (
+                  <div className={`tool-card shell-card ${m.running ? 'running' : m.ok ? 'ok' : 'error'}`} key={m.id} id={`m-${m.id}`}>
+                    <div className="tool-head">
+                      <span className="tool-icon">$</span>
+                      <span className="tool-summary mono">{m.command}</span>
+                      <span className="tool-state">{m.running ? <span className="pulse">running…</span> : m.ok ? 'done' : 'failed'}</span>
+                    </div>
+                    {m.output && <pre className="tool-body">{m.output}</pre>}
+                  </div>
+                )
               case 'plan':
                 return <PlanCard key={m.id} plan={m.plan} />
               case 'ask':
@@ -734,7 +870,7 @@ function SessionView({ s, controls, profile, railOpen, onRailResize, railResizin
                 return (
                   <div className="turn-foot" key={m.id} id={`m-${m.id}`}>
                     {m.model} · {m.hops} hop{m.hops === 1 ? '' : 's'} · {m.tokens.toLocaleString()} tok ·
-                    {' '}{m.estimated ? '~' : ''}${m.cost.toFixed(6)} · {m.elapsed.toFixed(1)}s
+                    {' '}{m.local && m.cost === 0 ? 'free · local' : `${m.estimated ? '~' : ''}$${m.cost.toFixed(6)}${m.local ? ' · partly local' : ''}`}{m.escalated ? ` · escalated to ${m.escalated.split('/').pop()}` : ''} · {m.elapsed.toFixed(1)}s
                   </div>
                 )
             }
@@ -750,6 +886,9 @@ function SessionView({ s, controls, profile, railOpen, onRailResize, railResizin
           controls={controls}
           onSend={onSend}
           onInterrupt={onInterrupt}
+          onRunCommand={onRunCommand}
+          onEscalate={onEscalate}
+          escalated={escalated}
           onMode={onMode}
           onCommands={onCommands}
           fileIndex={s.fileIndex}
@@ -762,10 +901,12 @@ function SessionView({ s, controls, profile, railOpen, onRailResize, railResizin
         plan={s.plan}
         servers={servers}
         profile={profile}
+        local={local}
         sessionCost={s.status?.session_cost ?? 0}
         sessionTokens={s.status?.session_tokens ?? 0}
         onStopServer={onStopServer}
         onManageKey={onManageKey}
+        onManageLocal={onManageLocal}
         onHide={onHideRail}
         onResize={onRailResize}
         resizing={railResizing}
@@ -809,12 +950,13 @@ function paletteActions(
   startTour: () => void,
   setTheme: (t: 'system' | 'light' | 'dark') => void,
   setMode: (m: string) => void,
+  manageLocal: () => void,
+  manageBudget: () => void,
+  restartLocal: (() => void) | null,
 ): Action[] {
   return [
-    // All one group. These were five groups of ONE item each, which turned
-    // the top of the palette into five headers and five rows — grouping that
-    // groups nothing is just noise. Only Appearance and Permissions below
-    // have enough members to earn a section.
+    // One group: only Appearance and Permissions have enough members to
+    // earn a section of their own.
     { id: 'open', title: 'Open project…', group: 'Actions', keywords: 'folder workspace directory', run: openFolder },
     { id: 'models', title: 'Browse models', group: 'Actions',
       hint: 'Compare every model on price and context', keywords: 'catalog price context switch', run: browseModels },
@@ -826,6 +968,15 @@ function paletteActions(
     { id: 'tour', title: 'Take the guided tour', group: 'Actions',
       hint: 'A two-minute walkthrough anchored to the real UI',
       keywords: 'walkthrough onboarding help intro getting started features', run: startTour },
+    { id: 'budget', title: 'Set the monthly budget', group: 'Actions',
+      hint: 'How much the cloud may spend; today’s share follows from it',
+      keywords: 'budget limit spend monthly cost money usage cap dollars', run: manageBudget },
+    { id: 'local', title: 'Manage local models', group: 'Actions',
+      hint: 'Download, delete or switch the model that runs on this machine',
+      keywords: 'local offline llama gguf download free machine', run: manageLocal },
+    ...(restartLocal ? [{ id: 'local-restart', title: 'Restart the local model server', group: 'Actions',
+      hint: 'Reload the weights, for example after changing context or GPU settings',
+      keywords: 'local llama server restart reload', run: restartLocal }] : []),
     ...([
       ['system', 'Match system', 'Follow your macOS appearance setting'],
       ['light', 'Light', ''],

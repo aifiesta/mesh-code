@@ -38,12 +38,13 @@ class Event:
     """engine -> frontend."""
 
     # ---- lifecycle
+    ENGINE_READY = "engine.ready"    # first frame on a new socket: sessions, settings, catalog
+    KEY_RESULT = "key.result"        # outcome of save.key / clear.key
     SESSION_STARTED = "session.started"
     HISTORY = "history"              # replay of a session's conversation for the UI
     CHAT_CLEARED = "chat.cleared"    # the session's conversation was reset
     JOURNAL = "journal"              # the project journal markdown
     SESSION_CLOSED = "session.closed"
-    WORKSPACE_CHANGED = "workspace.changed"
 
     # ---- one user prompt and everything it causes
     TURN_STARTED = "turn.started"
@@ -77,10 +78,13 @@ class Event:
     NOTICE = "notice"                  # info | warn — non-fatal
     ERROR = "error"
     COMPACTED = "compacted"
-    ROUTED = "routed"                  # smart router picked a model
+    COMMAND_STARTED = "command.started"    # a `!` command the user typed
+    COMMAND_FINISHED = "command.finished"
+    POLICY_CHANGED = "policy.changed"  # tier moved: escalated, handed back, de-escalated
+    BUDGET_UPDATED = "budget.updated"  # ledger snapshot (session None)
+    BUDGET_HOLD = "budget.hold"        # a cloud hop was refused; why
     SETTINGS = "settings"              # schema + current values
     CATALOG = "catalog"                # model list with context + pricing
-    ROUTE_EXPLAIN = "route.explain"    # ranked candidates for a draft prompt
     CONFIG_ERROR = "config.error"      # a rejected setting, with the reason
     DIR_LISTING = "dir.listing"        # children of one workspace directory
     FILE_PREVIEW = "file.preview"      # a workspace file, for the viewer
@@ -89,6 +93,9 @@ class Event:
     TERM_OUTPUT = "term.output"        # one line from the user's shell
     TERM_READY = "term.ready"
     FOLDERS = "folders"                # the open roots, and which is active
+    LOCAL_STATUS = "local.status"      # the local model layer: hardware, models, server, jobs
+    LOCAL_PROGRESS = "local.progress"  # one download job's phase and bytes
+    LOCAL_READY = "local.ready"        # a model finished installing
 
 
 class Request:
@@ -99,13 +106,16 @@ class Request:
     APPROVAL_RESPONSE = "approval.response"   # reply to TOOL_PROPOSED
     ASK_RESPONSE = "ask.response"             # reply to ASK_USER
     SET_MODE = "set.mode"
+    RUN_COMMAND = "run.command"     # `!cmd` from the composer: run it, show it, tell the model
+    ESCALATE = "escalate"          # strong model for the rest of the turn (or the next)
+    DEESCALATE = "deescalate"
+    BUDGET_OVERRIDE = "budget.override"  # allow more today; clear a key-cap hold
+    BUDGET_STATUS = "budget.status"
     SET_MODEL = "set.model"
-    SET_ROUTE = "set.route"
     SET_STYLE = "set.style"
     OPEN_WORKSPACE = "open.workspace"
     ADD_FOLDER = "add.folder"        # another browsable root, same window
     REMOVE_FOLDER = "remove.folder"
-    SET_ACTIVE_FOLDER = "set.active.folder"  # which root the AGENT works in
     NEW_SESSION = "new.session"
     NEW_CHAT = "new.chat"            # reset THIS session's conversation (keeps servers)
     GET_HISTORY = "get.history"      # ask for a replayable conversation history
@@ -117,7 +127,6 @@ class Request:
     SAVE_KEY = "save.key"
     CLEAR_KEY = "clear.key"       # forget the key this app stored
     SET_CONFIG = "set.config"        # one validated setting, from any surface
-    ROUTE_PREVIEW = "route.preview"  # "which model would you pick, and why?"
     LIST_DIR = "list.dir"            # one directory of the workspace tree
     READ_FILE = "read.file"          # preview a workspace file in the viewer
     FIND_FILES = "find.files"        # flat list of a root's files, for the @ picker
@@ -127,6 +136,13 @@ class Request:
     TERM_RUN = "term.run"            # the USER's own shell, not the agent's
     TERM_INTERRUPT = "term.interrupt"
     TERM_CLOSE = "term.close"
+    LOCAL_STATUS = "local.status"
+    LOCAL_INSTALL = "local.install"   # {model}
+    LOCAL_CANCEL = "local.cancel"     # {job}
+    LOCAL_DELETE = "local.delete"     # {model}
+    LOCAL_SERVER = "local.server"     # {action: stop|restart}
+    LOCAL_REFRESH = "local.refresh"
+    LOCAL_DECLINE = "local.decline"
 
 
 # Approval verdicts. ALWAYS is "auto-approve this tool for the rest of the

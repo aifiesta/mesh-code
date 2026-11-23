@@ -4,7 +4,6 @@
 export const Ev = {
   SETTINGS: 'settings',
   CATALOG: 'catalog',
-  ROUTE_EXPLAIN: 'route.explain',
   DIR_LISTING: 'dir.listing',
   FILE_PREVIEW: 'file.preview',
   FILE_INDEX: 'file.index',
@@ -38,12 +37,19 @@ export const Ev = {
   NOTICE: 'notice',
   ERROR: 'error',
   COMPACTED: 'compacted',
-  ROUTED: 'routed',
+  COMMAND_STARTED: 'command.started',
+  COMMAND_FINISHED: 'command.finished',
+  POLICY_CHANGED: 'policy.changed',
+  BUDGET_UPDATED: 'budget.updated',
+  BUDGET_HOLD: 'budget.hold',
   ENGINE_READY: 'engine.ready',
   HISTORY: 'history',
   CHAT_CLEARED: 'chat.cleared',
   JOURNAL: 'journal',
   KEY_RESULT: 'key.result',
+  LOCAL_STATUS: 'local.status',
+  LOCAL_PROGRESS: 'local.progress',
+  LOCAL_READY: 'local.ready',
 } as const
 
 export const Req = {
@@ -52,8 +58,12 @@ export const Req = {
   APPROVAL_RESPONSE: 'approval.response',
   ASK_RESPONSE: 'ask.response',
   SET_MODE: 'set.mode',
+  RUN_COMMAND: 'run.command',
+  ESCALATE: 'escalate',
+  DEESCALATE: 'deescalate',
+  BUDGET_OVERRIDE: 'budget.override',
+  BUDGET_STATUS: 'budget.status',
   SET_MODEL: 'set.model',
-  SET_ROUTE: 'set.route',
   SET_STYLE: 'set.style',
   OPEN_WORKSPACE: 'open.workspace',
   ADD_FOLDER: 'add.folder',
@@ -77,8 +87,14 @@ export const Req = {
   TERM_RUN: 'term.run',
   TERM_INTERRUPT: 'term.interrupt',
   TERM_CLOSE: 'term.close',
-  ROUTE_PREVIEW: 'route.preview',
   LIST_MODELS: 'list.models',
+  LOCAL_STATUS: 'local.status',
+  LOCAL_INSTALL: 'local.install',
+  LOCAL_CANCEL: 'local.cancel',
+  LOCAL_DELETE: 'local.delete',
+  LOCAL_SERVER: 'local.server',
+  LOCAL_REFRESH: 'local.refresh',
+  LOCAL_DECLINE: 'local.decline',
 } as const
 
 export type WireEvent = {
@@ -120,8 +136,9 @@ export type Msg =
   | { kind: 'user'; id: string; text: string; attachments?: string[]; refs?: string[] }
   | { kind: 'assistant'; id: string; text: string; streaming?: boolean; model?: string }
   | { kind: 'tool'; id: string; card: ToolCard }
+  | { kind: 'shell'; id: string; callId: string; command: string; output?: string; ok?: boolean; running: boolean }
   | { kind: 'notice'; id: string; level: string; text: string; detail?: any }
-  | { kind: 'turn'; id: string; cost: number; tokens: number; elapsed: number; model: string; hops: number; estimated?: boolean }
+  | { kind: 'turn'; id: string; cost: number; tokens: number; elapsed: number; model: string; hops: number; estimated?: boolean; local?: boolean; escalated?: string | null }
   | { kind: 'server'; id: string; url: string; pid: number; port: number; cmd: string; stopped?: boolean }
   | { kind: 'plan'; id: string; plan: Plan }
   | { kind: 'ask'; id: string; ask: Ask; answered?: string[] }
@@ -138,16 +155,41 @@ export type AskQuestion = {
 }
 export type Ask = { token: string; questions: AskQuestion[] }
 
+export type BudgetWindow = {
+  spent: number; limit: number; pct: number; resets: number
+  by_kind: Record<string, number>; override?: boolean
+}
+export type BudgetSnapshot = {
+  month: BudgetWindow
+  day: BudgetWindow
+  key_cap: boolean
+  held: 'day' | 'month' | 'key_cap' | null
+  estimated_usd: number
+}
+
+export type PolicyInfo = {
+  policy: 'local-first' | 'cloud-auto' | 'pinned'
+  tier: 'local' | 'cloud_fallback' | 'cloud_auto' | 'pinned' | 'escalated'
+  escalation_model: string | null
+  audit_model: string | null
+  /** The model an escalation is on, or will be on next turn. */
+  escalated: string | null
+  escalated_reason: string | null
+  escalation_pending: boolean
+}
+
 export type Status = {
-  model: string; mode: Mode; route_mode: string; session_cost: number
+  model: string; mode: Mode; policy?: PolicyInfo; budget?: BudgetSnapshot | null; session_cost: number
   session_tokens: number; workspace: string; busy: boolean
-  /** The turn IN FLIGHT: the model a hop actually ran on (the router may
-   *  have picked it, so it is not necessarily `model`), and the spend so
-   *  far. Session totals only move when a turn ends. */
+  /** The turn IN FLIGHT: the model a hop actually ran on (the gateway or a
+   *  local pin may differ from `model`), and the spend so far. Session
+   *  totals only move when a turn ends. */
   turn_model?: string | null
   turn_cost?: number
   turn_tokens?: number
   turn_estimated?: boolean
+  /** The last hop ran on this machine: nothing was billed. */
+  turn_local?: boolean
   servers: { pid: number; port: number; url: string; cmd: string }[]
 }
 
@@ -166,7 +208,7 @@ export type SettingOption = { value: any; label: string; blurb?: string }
 export type SettingSpec = {
   key: string
   category: string
-  /** enum | bool | int | dial | weights | text | model | model_list */
+  /** enum | bool | int | money | text | model | model_list | local_model */
   type: string
   label: string
   help?: string
@@ -176,7 +218,6 @@ export type SettingSpec = {
   value?: any
   min?: number
   max?: number
-  step?: number
   beta?: boolean
   multiline?: boolean
   zero_label?: string
@@ -190,6 +231,14 @@ export type SettingsDoc = {
 
 export type CatalogModel = {
   id: string
+  name?: string
+  /** A model served by this machine's llama-server (zero price). */
+  local?: boolean
+  installed?: boolean
+  size_bytes?: number
+  recommended?: boolean
+  /** On the `local/auto` row: the concrete model it resolves to. */
+  resolves_to?: string
   context_length?: number
   model_type?: string
   supports_thinking?: boolean
@@ -240,22 +289,47 @@ export type Profile = {
    *  none to a data-plane key, so this is a local tally, labelled as one. */
   lifetime?: { cost: number; tokens: number; turns: number; since: number | null }
   account_url?: string
+  local?: { default_model: string | null; server_state: string; ram_gb: number | null }
 }
 
-export type RouteExplain = {
-  available: boolean
-  mode: string
-  cohort: string | null
-  difficulty?: string
-  /** Task level by name, and the rule that set it — picks from the per-level scores only. */
-  task?: string | null
-  why?: string | null
-  thinking?: string | null
-  weights?: Record<string, number>
-  pick?: string
-  ranked: any[]
-  reason?: string
+export type LocalJob = {
+  id: string; kind: 'model' | 'runtime'; target: string
+  phase: 'queued' | 'downloading' | 'verifying' | 'done' | 'error' | 'cancelled'
+  bytes: number; total: number; rate_bps: number; eta_s: number | null; error: string | null
 }
+
+export type LocalModelRow = {
+  id: string; label: string; bytes: number; ctx_max: number; ctx: number | null
+  installed: boolean; fits: boolean; slow: boolean; tight?: boolean; recommended: boolean
+  family?: string; license?: string; job: LocalJob | null
+}
+
+export type LocalStatus = {
+  enabled: boolean
+  booted: boolean
+  hardware: {
+    os: string; arch: string; ram_gb: number; avail_gb: number; cores: number
+    gpu: { kind: string; name: string; vram_gb: number; driver: string }
+    disk_free_gb: number; probe_failed: boolean
+  } | null
+  probe_failed: boolean
+  recommended: { model: string; ctx: number; reason: string; slow: boolean } | null
+  runtime: { tag: string | null; variant: string | null; source: string; path?: string | null; error?: string | null }
+  models: LocalModelRow[]
+  default_model: string | null
+  server: { state: string; model: string | null; port: number | null; ctx: number | null
+            pid: number | null; restarts: number; error: string | null; started_at: number | null }
+  jobs: LocalJob[]
+  needs_confirm: { model: string; bytes: number; reason: 'size' | 'slow' } | null
+  declined: boolean
+  restart_needed: boolean
+  boot_error: string | null
+}
+
+export const fmtBytes = (n: number) =>
+  n >= 1e9 ? `${(n / 1e9).toFixed(n >= 1e10 ? 0 : 1)} GB`
+    : n >= 1e6 ? `${Math.round(n / 1e6)} MB`
+      : n >= 1e3 ? `${Math.round(n / 1e3)} KB` : `${n} B`
 
 /** $/1M tokens for a catalog row, preferring discounted then per-1M then per-1k. */
 export function pricePerM(m: CatalogModel, kind: 'prompt' | 'completion'): number | null {

@@ -1,8 +1,4 @@
-import { Ev, type Approval, type Ask, type CatalogModel, type DirEntry, type FilePreview, type Root, type Msg, type Plan, type Profile, type RouteExplain, type SettingsDoc, type Status, type ToolCard, type WireEvent } from './types'
-
-/** The thinking level as Settings names it. */
-const THINKING: Record<string, string> = { none: 'off', low: 'low', medium: 'medium', high: 'high', xhigh: 'extra high', max: 'max' }
-const thinkingLabel = (level: string) => THINKING[level] ?? level
+import { Ev, type Approval, type Ask, type CatalogModel, type DirEntry, type FilePreview, type BudgetSnapshot, type LocalJob, type LocalStatus, type Root, type Msg, type Plan, type Profile, type SettingsDoc, type Status, type ToolCard, type WireEvent } from './types'
 
 /**
  * Turning the event stream into renderable state.
@@ -22,6 +18,8 @@ export type SessionState = {
   workspace: string
   createdAt?: number
   messages: Msg[]
+  /** Adopted from the engine (restart, reload): its history is replayed once. */
+  needsHistory?: boolean
   plan: Plan | null
   status: Status | null
   approval: Approval | null
@@ -58,12 +56,17 @@ export type AppState = {
   catalog: CatalogModel[]
   roots: Root[]
   activeRoot: string | null
-  routeExplain: RouteExplain | null
   profile: Profile | null
   /** Last key.result. `at` is what lets the UI react to a repeat
    *  of the same outcome — two successes in a row are two events. */
   keyResult: { ok: boolean; detail: string; cleared: boolean; at: number } | null
   configError: { key: string; message: string } | null
+  /** The local model layer: hardware, models, downloads, server. */
+  local: LocalStatus | null
+  /** The cloud spend ledger: today and this month against the limits. */
+  budget: BudgetSnapshot | null
+  /** Engine notices that belong to no session (migration, local layer). */
+  appNotices: { id: string; level: string; text: string }[]
 }
 
 export const initialState: AppState = {
@@ -78,16 +81,16 @@ export const initialState: AppState = {
   catalog: [],
   roots: [],
   activeRoot: null,
-  routeExplain: null,
   profile: null,
   keyResult: null,
   configError: null,
+  local: null,
+  budget: null,
+  appNotices: [],
 }
 
 let uid = 0
 const nid = () => `m${++uid}`
-// provider/model -> model (matches the ControlBar helper)
-const shortModel = (m: string) => (m && m.includes('/') ? m.split('/').slice(1).join('/') : (m || ''))
 
 function blank(id: string, title: string, workspace: string,
                createdAt?: number): SessionState {
@@ -110,11 +113,13 @@ export type Action =
   | { t: 'clearTerm'; id: string }
   | { t: 'clearKeyError' }
   | { t: 'stopping'; id: string }
+  | { t: 'dismissAppNotice'; id: string }
 
 export function reduce(state: AppState, action: Action): AppState {
   if (action.t === 'connection') return { ...state, connection: action.state }
   if (action.t === 'dismissConfigError') return { ...state, configError: null }
   if (action.t === 'clearKeyError') return { ...state, keyError: null }
+  if (action.t === 'dismissAppNotice') return { ...state, appNotices: state.appNotices.filter((n) => n.id !== action.id) }
 
   if (action.t === 'stopping') {
     // Optimistic: the button flips to "stopping" on the click. The engine
@@ -176,10 +181,12 @@ export function reduce(state: AppState, action: Action): AppState {
       const settings = d.settings ?? state.settings
       const catalog = d.catalog?.length ? d.catalog : state.catalog
       const profile = d.profile ?? state.profile
+      const local = d.local ?? state.local
+      const budget = d.budget ?? state.budget
       for (const row of (d.sessions ?? [])) {
         if (!sessions[row.id]) {
-          sessions[row.id] = blank(row.id, row.title ?? 'session', row.workspace ?? '',
-                                   row.created_at)
+          sessions[row.id] = { ...blank(row.id, row.title ?? 'session', row.workspace ?? '',
+                                   row.created_at), needsHistory: true }
           order.push(row.id)
         }
         // Seed status from the descriptor so a hydrated session shows its
@@ -190,7 +197,7 @@ export function reduce(state: AppState, action: Action): AppState {
           busy: !!row.busy,
           label: row.label ?? sessions[row.id].label,
           status: sessions[row.id].status ?? {
-            model: row.model, mode: row.mode, route_mode: 'off',
+            model: row.model, mode: row.mode, policy: row.policy,
             session_cost: row.session_cost ?? 0, session_tokens: row.session_tokens ?? 0,
             workspace: row.workspace ?? '', busy: !!row.busy, servers: [],
           },
@@ -209,8 +216,37 @@ export function reduce(state: AppState, action: Action): AppState {
         ? state.active : (prunedOrder[0] ?? null)
       return {
         ...state, ready: true, hasKey: !!d.has_key, sessions, order: prunedOrder,
-        settings, catalog, profile, active,
+        settings, catalog, profile, active, local, budget,
       }
+    }
+
+    case Ev.BUDGET_UPDATED:
+      return { ...state, budget: d as BudgetSnapshot }
+
+    case Ev.LOCAL_STATUS:
+      return { ...state, local: d as LocalStatus }
+
+    case Ev.LOCAL_PROGRESS: {
+      // Patch the job in place between status events so the bars move.
+      if (!state.local) return state
+      const job = d as LocalJob
+      const over = job.phase === 'done' || job.phase === 'error' || job.phase === 'cancelled'
+      const jobs = over
+        ? state.local.jobs.filter((j) => j.id !== job.id)
+        : state.local.jobs.some((j) => j.id === job.id)
+          ? state.local.jobs.map((j) => (j.id === job.id ? job : j))
+          : [...state.local.jobs, job]
+      const models = state.local.models.map((m) =>
+        m.job?.id === job.id || (!m.job && m.id === job.target && !over) ? { ...m, job: over ? null : job } : m)
+      const next = { ...state, local: { ...state.local, jobs, models } }
+      return job.phase === 'error'
+        ? appendNotice(next, 'warn', `${job.kind === 'runtime' ? `llama-server (${job.target})` : job.target.replace('local/', '')} download failed: ${job.error ?? 'unknown error'}`)
+        : next
+    }
+
+    case Ev.LOCAL_READY: {
+      const text = `${String(d.model ?? '').replace('local/', '')} is ready${d.first ? ' and is now the default for coding' : ''}.`
+      return appendNotice(state, 'info', text)
     }
 
     case Ev.SETTINGS:
@@ -221,9 +257,6 @@ export function reduce(state: AppState, action: Action): AppState {
 
     case Ev.CATALOG:
       return { ...state, catalog: d.models ?? [] }
-
-    case Ev.ROUTE_EXPLAIN:
-      return { ...state, routeExplain: d as RouteExplain }
 
     case Ev.CONFIG_ERROR:
       return { ...state, configError: { key: d.key, message: d.message } }
@@ -254,15 +287,11 @@ export function reduce(state: AppState, action: Action): AppState {
         ? { ...prior, title: d.title ?? prior.title, label: d.label ?? prior.label,
             workspace: d.workspace ?? prior.workspace }
         : { ...blank(sid, d.title ?? 'session', d.workspace ?? '', d.created_at),
-            label: d.label ?? '' }
+            label: d.label ?? '', needsHistory: !!d.resumed }
       return {
         ...state,
         sessions: { ...state.sessions, [sid]: s },
         order: state.order.includes(sid) ? state.order : [...state.order, sid],
-        // Always focus it. This used to be `state.active ?? sid`, so opening
-        // a second project left the first one active: the new project's chat
-        // was never shown and everything typed went into the old thread,
-        // which is what made every project look like one merged chat.
         active: sid,
       }
     }
@@ -276,6 +305,8 @@ export function reduce(state: AppState, action: Action): AppState {
     }
   }
 
+  if (!sid && ev.type === Ev.NOTICE) return appendNotice(state, d.level ?? 'info', d.message)
+
   if (!sid || !state.sessions[sid]) return state
 
   return mutate(state, sid, (s) => {
@@ -284,23 +315,25 @@ export function reduce(state: AppState, action: Action): AppState {
         return { ...s, status: d as Status, busy: !!d.busy }
 
       case Ev.HISTORY: {
-        // Replay from the engine's own history — the UI transcript did not
-        // survive the restart, the conversation did. Only hydrate an EMPTY
-        // transcript: live messages must never be clobbered by a late reply.
-        if (s.messages.length > 0) return s
+        // Replayed once, in front of whatever streamed in since the reload; a
+        // tool call already shown live is not shown twice.
+        if (!s.needsHistory) return s
+        const live = new Set(s.messages.flatMap((m) => (m.kind === 'tool' ? [m.card.callId] : [])))
         const messages: Msg[] = []
         for (const m of (d.messages ?? []) as any[]) {
           if (m.kind === 'user') messages.push({ kind: 'user', id: nid(), text: m.text })
           else if (m.kind === 'assistant') messages.push({ kind: 'assistant', id: nid(), text: m.text })
-          else if (m.kind === 'tool') messages.push({
+          else if (m.kind === 'tool' && !(m.id && live.has(m.id))) messages.push({
             kind: 'tool', id: nid(),
-            card: { callId: nid(), name: m.name, summary: m.summary,
+            card: { callId: m.id ?? nid(), name: m.name, summary: m.summary,
                     status: m.ok ? 'ok' : 'error' } as ToolCard,
           })
           else if (m.kind === 'notice') messages.push({
             kind: 'notice', id: nid(), level: 'info', text: m.text })
+          else if (m.kind === 'shell') messages.push({
+            kind: 'shell', id: nid(), callId: nid(), command: m.command, output: m.output, ok: !!m.ok, running: false })
         }
-        return { ...s, messages }
+        return { ...s, needsHistory: false, messages: [...messages, ...s.messages] }
       }
 
       case Ev.CHAT_CLEARED:
@@ -473,9 +506,7 @@ export function reduce(state: AppState, action: Action): AppState {
         }
 
       case Ev.SERVER_STOPPED:
-        // Was silently dropped: the transcript's server card kept its live
-        // dot and clickable URL to a dead server. Mark the matching card
-        // stopped so it reads as finished.
+        // Mark the matching card stopped so its live dot and URL go dead.
         return {
           ...s,
           messages: s.messages.map((m) =>
@@ -517,26 +548,39 @@ export function reduce(state: AppState, action: Action): AppState {
           }],
         }
 
+      case Ev.COMMAND_STARTED:
+        // Busy, so Stop and Escape reach a long command.
+        return { ...s, busy: true, stopping: false,
+                 messages: [...s.messages, { kind: 'shell', id: nid(), callId: d.id, command: d.command, running: true }] }
+
+      case Ev.COMMAND_FINISHED: {
+        const found = s.messages.some((m) => m.kind === 'shell' && m.callId === d.id)
+        const done = { output: d.output ?? '', ok: !!d.ok, running: false }
+        return {
+          ...s, busy: false, stopping: false,
+          messages: found
+            ? s.messages.map((m) => (m.kind === 'shell' && m.callId === d.id ? { ...m, ...done } : m))
+            : [...s.messages, { kind: 'shell', id: nid(), callId: d.id, command: d.command, ...done }],
+        }
+      }
+
+      case Ev.BUDGET_HOLD:
+        return s   // the notice that follows carries the words
+
+      case Ev.POLICY_CHANGED: {
+        // Only an escalation on a weak reply discards the bubble still streaming.
+        const last = s.messages[s.messages.length - 1]
+        return d.discard_reply && last && last.kind === 'assistant' && last.streaming
+          ? { ...s, messages: s.messages.slice(0, -1) }
+          : s
+      }
+
       case Ev.NOTICE:
-      case Ev.COMPACTED:
-      case Ev.ROUTED: {
-        // A scored pick chooses the thinking level along with the model.
-        const picked = ev.type === Ev.ROUTED
-          ? shortModel(d.model) + (d.thinking && d.thinking !== 'default' ? ` at ${thinkingLabel(d.thinking)} thinking` : '')
-          : ''
+      case Ev.COMPACTED: {
         const text =
           ev.type === Ev.COMPACTED
             ? `Compacted history (${d.before_tok}→${d.after_tok} tokens) — ${d.reason}`
-            : ev.type === Ev.ROUTED
-              ? (d.escalated
-                  ? `Stepped up to ${picked}${d.task ? ` (${d.task})` : ''} — ${d.reason ?? 'the model was struggling'}`
-                  : d.settled
-                    ? `Settled back to ${picked}${d.task ? ` (${d.task})` : ''} after clean progress`
-                    // a scored pick names the task level and the rule that set it
-                    : d.task
-                      ? `Routed to ${picked} — ${d.task}${d.why ? ` (${d.why})` : ''}`
-                      : `Routed to ${picked} (${d.cohort}${d.difficulty && d.difficulty !== 'mid' ? ` · ${d.difficulty}` : ''})`)
-              : d.message
+            : d.message
         return {
           ...s,
           messages: [...s.messages, {
@@ -586,7 +630,7 @@ export function reduce(state: AppState, action: Action): AppState {
           elapsed: d.elapsed, model: d.model, hops: d.hops,
           // Carry the estimate flag onto the permanent record so a computed
           // cost is shown as ~ here too, not just in the live bar.
-          estimated: !!d.cost_estimated,
+          estimated: !!d.cost_estimated, local: !!d.local, escalated: d.escalated ?? null,
         }]
         // The plan is the model's OWN bookkeeping, kept by calling
         // update_step. It can finish the work and simply stop ticking the
@@ -608,6 +652,12 @@ export function reduce(state: AppState, action: Action): AppState {
         return s
     }
   })
+}
+
+/** Session-less notices never touch a transcript: HISTORY skips a session
+ *  that already has messages, so a notice there would block the replay. */
+function appendNotice(state: AppState, level: string, text: string): AppState {
+  return { ...state, appNotices: [...state.appNotices, { id: nid(), level, text }] }
 }
 
 // A stream aborted or errored mid-flight never sends ASSISTANT_MESSAGE, so

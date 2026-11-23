@@ -24,7 +24,9 @@ from typing import Any
 # Categories, in the order a settings screen should show them.
 CATEGORIES = [
     ("model", "Model", "Which model answers, and what it costs"),
-    ("routing", "Routing", "Let Mesh choose per prompt, or pin one model"),
+    ("local", "Local model", "A coding model that runs on this machine — free, offline, private while it answers"),
+    ("routing", "Policy", "Who writes the code, and when the cloud steps in"),
+    ("budget", "Budget", "What the cloud may spend; work on this machine is always free"),
     ("behaviour", "Behaviour", "How the assistant works and writes"),
     ("limits", "Limits & recovery", "What happens on long or stuck turns"),
     ("privacy", "Memory & privacy", "What persists between sessions"),
@@ -40,8 +42,8 @@ SCHEMA: list[dict] = [
         "key": "model",
         "category": "model",
         "type": "model",              # rendered by the catalog picker
-        "label": "Model",
-        "help": "The model used when routing is off, and the starting point when it is on.",
+        "label": "Pinned model",
+        "help": "The model used when the policy is Pinned.",
         "why": "Bigger models are better at multi-step work; smaller ones are far cheaper for edits and questions.",
     },
     {
@@ -57,50 +59,203 @@ SCHEMA: list[dict] = [
         "category": "model",
         "type": "model_list",
         "label": "Never use",
-        "help": "Models the router will never pick, even if the table rates them highly.",
+        "help": "Models the gateway's auto routing must never pick.",
         "why": "For models that are wrong for your work, priced badly for you, or that you are not allowed to send data to.",
     },
     {
-        "key": "route_mode",
-        "category": "routing",
-        "type": "enum",
-        "label": "Routing",
-        "default": "off",
-        "options": [
-            _opt("off", "Pinned", "Always use the model above."),
-            _opt("smart", "Smart (local)", "A bundled table picks per prompt. No extra tokens, no extra network hop."),
-            _opt("auto", "Gateway auto", "Mesh's own Auto Router picks. Costs a classifier hop."),
-        ],
-        "help": "Who chooses the model for each prompt.",
-        "why": "Smart routing spends less on easy prompts and reaches for a stronger model on hard ones, deciding locally in microseconds.",
+        "key": "local_enabled",
+        "category": "local",
+        "type": "bool",
+        "label": "Use a local model",
+        "default": True,
+        "help": "Run the recommended model on this machine for coding turns.",
+        "why": "Off hides local models and never starts the server; everything goes to the cloud.",
     },
     {
-        "key": "route_effort",
-        "category": "routing",
+        "key": "local_auto_setup",
+        "category": "local",
+        "type": "bool",
+        "label": "Download automatically on first run",
+        "default": True,
+        "help": "Fetch the recommended model without asking when it is 8 GB or less and runs on the GPU (or on the CPU with Use even when slow on); otherwise ask.",
+        "why": "A first run that just works, at the cost of a few GB of disk you were not asked about.",
+    },
+    {
+        "key": "local_model",
+        "category": "local",
+        "type": "local_model",
+        "label": "Local model",
+        "default": "",
+        "help": "Which downloaded model local/auto resolves to; only installed models are accepted. Empty means the tier recommendation.",
+        "why": "Pick a bigger model if you have the memory, a smaller one if the fan bothers you.",
+    },
+    {
+        "key": "local_fallback_model",
+        "category": "local",
+        "type": "model",
+        "label": "Until it's ready",
+        "default": "anthropic/claude-sonnet-4.5",
+        "help": "Cloud model used while the local one downloads, or if it fails to start.",
+        "why": "The download takes minutes; this is what answers meanwhile.",
+    },
+    {
+        "key": "local_context",
+        "category": "local",
         "type": "enum",
-        "label": "Effort",
+        "label": "Context window",
         "default": "auto",
-        "depends_on": {"route_mode": "smart"},
         "options": [
-            _opt("auto", "Auto", "Read the task level from the prompt, and step up when the model struggles."),
-            _opt("low", "Lookup", "Explain or answer; nothing is changed."),
-            _opt("medium", "Small change", "One or two actions in one or two files."),
-            _opt("high", "Standard task", "Several actions or files, or the whole project."),
-            _opt("xhigh", "Complex task", "Many files, an unknown cause, design choices."),
-            _opt("max", "Deep work", "Always the strongest model, whatever it costs."),
+            _opt("auto", "Auto", "The largest that keeps memory free."),
+            _opt("16k", "16k", ""), _opt("32k", "32k", ""), _opt("64k", "64k", ""),
+            _opt("128k", "128k", ""), _opt("256k", "256k", ""),
         ],
-        "help": "How hard the router leans on capability rather than price.",
-        "why": "Auto is usually right. Force it up for a gnarly refactor, down for a batch of small edits.",
+        "help": "Bigger windows use more memory. Auto keeps the configured amount free.",
+        "why": "Long files need a big window; a laptop needs its memory back.",
     },
     {
-        "key": "route_weights",
+        "key": "local_gpu",
+        "category": "local",
+        "type": "enum",
+        "label": "GPU",
+        "default": "auto",
+        "options": [
+            _opt("auto", "Auto", "Use the GPU when it clearly helps."),
+            _opt("on", "On", "Offload every layer, even when memory is unknown."),
+            _opt("off", "Off", "CPU only."),
+        ],
+        "help": "Whether model layers are placed on the GPU.",
+        "why": "Auto is right on Apple Silicon; force it on for a discrete card the probe cannot size.",
+    },
+    {
+        "key": "local_keep_free_gb",
+        "category": "local",
+        "type": "int",
+        "label": "Memory to keep free",
+        "default": 4,
+        "min": 2, "max": 32,
+        "help": "Gigabytes of RAM the local model must leave untouched.",
+        "why": "Lower it for a bigger model; raise it if the rest of the machine starts swapping.",
+    },
+    {
+        "key": "local_idle_unload_min",
+        "category": "local",
+        "type": "int",
+        "label": "Unload after idle",
+        "default": 20,
+        "min": 0, "max": 240,
+        "zero_label": "Never",
+        "help": "Minutes of silence before the model is unloaded from memory.",
+        "why": "Unloading gives the memory back; reloading costs a few seconds on the next turn.",
+    },
+    {
+        "key": "local_use_when_slow",
+        "category": "local",
+        "type": "bool",
+        "label": "Use even when slow",
+        "default": False,
+        "help": "Run the local model on machines where it would be slow (no GPU, little memory).",
+        "why": "Free and kept on this machine, but a turn may take minutes; off means the cloud fallback answers.",
+    },
+    {
+        "key": "policy",
         "category": "routing",
-        "type": "weights",
+        "type": "enum",
+        "label": "Who writes",
+        "default": "local-first",
+        "options": [
+            _opt("local-first", "Local first", "The model on this machine writes; a strong cloud model takes over when it is stuck."),
+            _opt("cloud-auto", "Gateway auto", "Mesh's Auto Router picks a cloud model per prompt."),
+            _opt("pinned", "Pinned", "Always the pinned model."),
+        ],
+        "help": "Local first is free for most of the work; the cloud is called only when it earns its keep.",
+        "why": "A local model handles edits and runs; a strong model is worth paying for when the local one is stuck.",
+    },
+    {
+        "key": "escalation_model",
+        "category": "routing",
+        "type": "model",
+        "label": "Escalate to",
+        "default": "",
+        "depends_on": {"policy": "local-first"},
+        "help": "The strong model that takes over a stuck turn. Empty means the shipped chain (Sonnet 5.5 first).",
+        "why": "Picked from the Artificial Analysis coding-agent index; the shipped chain is updated with the app.",
+    },
+    {
+        "key": "escalation_fallbacks",
+        "category": "routing",
+        "type": "model_list",
+        "label": "Escalation fallbacks",
+        "default": [],
+        "depends_on": {"policy": "local-first"},
+        "help": "Tried in order when the escalation model fails; the shipped chain follows these.",
+        "why": "Provider outages fail over server-side without ending the turn.",
+    },
+    {
+        "key": "escalation_effort",
+        "category": "routing",
+        "type": "enum",
+        "label": "Escalation effort",
+        "default": "high",
+        "depends_on": {"policy": "local-first"},
+        "options": [
+            _opt("medium", "Medium", ""),
+            _opt("high", "High", "The default for a stuck turn."),
+            _opt("xhigh", "Very high", ""),
+            _opt("max", "Max", "The model thinks as long as it likes."),
+        ],
+        "help": "Reasoning budget for the escalated model.",
+        "why": "Higher costs more tokens per turn; Harder uses the next level up for that one escalation.",
+    },
+    {
+        "key": "auto_escalate",
+        "category": "routing",
+        "type": "bool",
+        "label": "Escalate on its own",
+        "default": True,
+        "depends_on": {"policy": "local-first"},
+        "help": "Hand a stuck turn to the strong model without asking: repeated actions, failed tool batches, a refusal.",
+        "why": "Off means the Escalate button is the only way up; nothing is spent unasked.",
+    },
+    {
+        "key": "escalation_sticky",
+        "category": "routing",
+        "type": "enum",
+        "label": "After escalating",
+        "default": "turn",
+        "depends_on": {"policy": "local-first"},
+        "options": [
+            _opt("turn", "Back to local next turn", ""),
+            _opt("session", "Stay escalated this session", "Until you de-escalate."),
+        ],
+        "help": "Whether the next turn starts local again.",
+        "why": "A hard stretch of work may want the strong model for several turns.",
+    },
+    {
+        "key": "weight_profile",
+        "category": "routing",
+        "type": "enum",
         "label": "Balance",
-        "default": {"cost": 0.5, "cap": 0.3, "speed": 0.2},
-        "depends_on": {"route_mode": "smart"},
-        "help": "How the router trades cost against capability and speed.",
-        "why": "Weights move the pick along each cohort's efficiency frontier — no setting can select a model the table says cannot do the task.",
+        "default": "balanced",
+        "depends_on": {"policy": "cloud-auto"},
+        "options": [
+            _opt("quality_first", "Quality first", ""),
+            _opt("balanced", "Balanced", ""),
+            _opt("cost_first", "Cost first", ""),
+            _opt("latency_first", "Latency first", ""),
+        ],
+        "help": "Mesh's weight profile for its Auto Router.",
+        "why": "The router trades quality, price and speed per prompt along this profile.",
+    },
+    {
+        "key": "monthly_budget_usd",
+        "category": "budget",
+        "type": "money",
+        "label": "Monthly limit",
+        "default": 10.0,
+        "min": 0.0, "max": 10000.0,
+        "zero_label": "No limit",
+        "help": "Cloud spend this app allows per calendar month. Today's share is what is left this month divided by the days left; past it, cloud work pauses until midnight unless you allow more from the usage ring.",
+        "why": "Ten dollars covers a month of six-hour days when the local model writes and the cloud only rescues stuck turns.",
     },
     {
         "key": "reasoning_effort",
@@ -134,17 +289,6 @@ SCHEMA: list[dict] = [
         ],
         "help": "Affects prose only — never what the assistant is allowed to do.",
         "why": "Concise is good once you trust it; explanatory is good when reviewing unfamiliar code.",
-    },
-    {
-        "key": "optimize",
-        "category": "behaviour",
-        "type": "dial",
-        "label": "Token savings",
-        "default": 0.0,
-        "min": 0.0, "max": 0.95, "step": 0.05,
-        "beta": True,
-        "help": "How aggressively to trim what gets re-sent each turn.",
-        "why": "Cuts spend on long sessions. Higher values prune more context, so raise it gradually and watch quality.",
     },
     {
         "key": "system",
@@ -195,7 +339,7 @@ SCHEMA: list[dict] = [
         "label": "Repo memory",
         "default": True,
         "help": "Remember durable facts and file structure for this project between sessions.",
-        "why": "Next session starts warm. Stored in ~/.mesh-harness/context/, never inside your repo.",
+        "why": "Next session starts warm. Stored in ~/.mesh-code/context/, never inside your repo.",
     },
 ]
 
@@ -230,6 +374,16 @@ def coerce(key: str, value: Any) -> Any:
     if kind == "bool":
         return bool(value)
 
+    if kind == "money":
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            raise InvalidSetting(f"{key} must be a number")
+        lo, hi = spec.get("min", 0.0), spec.get("max", 10**6)
+        if not lo <= f <= hi:
+            raise InvalidSetting(f"{key} must be between {lo} and {hi}")
+        return round(f, 2)
+
     if kind == "int":
         try:
             n = int(value)
@@ -240,29 +394,6 @@ def coerce(key: str, value: Any) -> Any:
             raise InvalidSetting(f"{key} must be between {lo} and {hi}")
         return n
 
-    if kind == "dial":
-        try:
-            f = float(value)
-        except (TypeError, ValueError):
-            raise InvalidSetting(f"{key} must be a number")
-        lo, hi = spec.get("min", 0.0), spec.get("max", 1.0)
-        if not lo <= f <= hi:
-            raise InvalidSetting(f"{key} must be between {lo} and {hi}")
-        return round(f, 4)
-
-    if kind == "weights":
-        if not isinstance(value, dict):
-            raise InvalidSetting("balance must be an object")
-        out = {}
-        for k in ("cost", "cap", "speed"):
-            try:
-                out[k] = max(0.0, float(value.get(k, 0)))
-            except (TypeError, ValueError):
-                raise InvalidSetting(f"balance.{k} must be a number")
-        if sum(out.values()) <= 0:
-            raise InvalidSetting("at least one balance weight must be above zero")
-        return out
-
     if kind in ("model_list",):
         if value in (None, "", "off"):
             return []
@@ -270,12 +401,12 @@ def coerce(key: str, value: Any) -> Any:
             raise InvalidSetting(f"{key} must be a list of model ids")
         return [x.strip() for x in value if x.strip()]
 
-    if kind in ("model", "text"):
+    if kind in ("model", "text", "local_model"):
         if value is None:
             return ""
         if not isinstance(value, str):
             raise InvalidSetting(f"{key} must be text")
-        return value.strip() if kind == "model" else value
+        return value.strip() if kind in ("model", "local_model") else value
 
     raise InvalidSetting(f"unhandled setting type {kind!r}")
 

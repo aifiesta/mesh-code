@@ -22,12 +22,10 @@ a = Analysis(
     ["../engine/meshharness/__main__.py"],
     pathex=["../engine"],
     binaries=[],
-    # The routing table is DATA, not code — PyInstaller will not find it by
-    # import analysis, and without it smart routing silently degrades to the
-    # pinned model.
-    datas=[("../engine/meshharness/core/routing_table.json",
-            "meshharness/core"),
-           ("../engine/meshharness/core/model_scores.json",
+    # JSON the import scan cannot see: the local-model manifest, the policy chains.
+    datas=[("../engine/meshharness/local/manifest.json",
+            "meshharness/local"),
+           ("../engine/meshharness/core/policy.json",
             "meshharness/core")],
     hiddenimports=hidden,
     hookspath=[],

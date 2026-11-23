@@ -52,7 +52,7 @@ this instruction on its background so you do not have to send it separately.
 - macOS 11 or later.
 - Nothing else. Python and Node are inside the app.
 - A Mesh API key from https://app.meshapi.ai — the app asks on first launch,
-  and a guided tour runs automatically.
+  and the guided tour is offered from the sidebar, never forced.
 
 ## Before you publish a build
 
