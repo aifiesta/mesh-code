@@ -1168,7 +1168,8 @@ def _long_file_map(path: Path, content: str, lines: list) -> str:
             f"about {len(content) // 4} tokens — so it is not returned whole.")
     how = ("[Read the part you need by calling again with offset and limit. "
            "To find a line, search with a shell command (grep -n). To read "
-           "all of it, call again with offset=1.]")
+           "it from the top, call again with offset=1; a long file comes "
+           "back in parts.]")
     defs = _definitions(path, lines)
     if defs:
         shown, used = [], 0
@@ -1237,23 +1238,16 @@ def read_file_detail(arguments: dict, cwd: "str | Path | None" = None) -> dict:
                 "with a shell command.]",
                 content=content,
             )
-        if len(content) <= min(READ_LIMIT, WHOLE_READ_LIMIT):
+        if len(content) <= WHOLE_READ_LIMIT:
             return result(content, whole=True, shown=True, content=content)
-        if len(content) <= READ_LIMIT:
-            # Fits, but is long enough that returning it whole is the single
-            # most expensive thing a read can do. Return a map instead; one
-            # more call with offset=1 still gets all of it.
-            return result(_long_file_map(target, content, lines), content=content)
-        # Too big for one read — see READ_LIMIT. Return the first chunk, cut
-        # at a line boundary, with the footer that says how to continue.
-        start, count = 1, None
-    else:
-        # Lenient on purpose: offset 0 means "from the top" and limit 0 means
-        # "no limit" — an error here would cost a whole extra round trip.
-        start = max(1, _as_int(offset)) if offset is not None else 1
-        count = _as_int(limit) if limit is not None else None
-        if count is not None and count < 1:
-            count = None
+        return result(_long_file_map(target, content, lines), content=content)
+
+    # Lenient on purpose: offset 0 means "from the top" and limit 0 means
+    # "no limit" — an error here would cost a whole extra round trip.
+    start = max(1, _as_int(offset)) if offset is not None else 1
+    count = _as_int(limit) if limit is not None else None
+    if count is not None and count < 1:
+        count = None
 
     if total == 0:
         return result(f"[{target.name} is empty.]", content=content)

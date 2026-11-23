@@ -99,11 +99,11 @@ def test_a_non_numeric_range_is_rejected_before_it_runs():
     assert tools.validate_call("read_file", {"path": "f", "offset": 3, "limit": 4}) is None
 
 
-def test_oversized_file_returns_a_first_chunk_cut_at_a_line_boundary(
+def test_a_read_from_the_top_returns_a_first_chunk_cut_at_a_line_boundary(
         tmp_path, monkeypatch):
     monkeypatch.setattr(tools, "READ_LIMIT", 200)
     (tmp_path / "big.txt").write_text(_numbered(100))
-    detail = tools.read_file_detail({"path": "big.txt"}, cwd=tmp_path)
+    detail = tools.read_file_detail({"path": "big.txt", "offset": 1}, cwd=tmp_path)
     lines = detail["text"].splitlines()
     assert detail["whole"] is False
     assert lines[0] == "1\tline 1"
@@ -119,11 +119,10 @@ def test_reading_can_continue_from_the_footer_until_the_end(tmp_path, monkeypatc
     """The user's requirement: the model is never stuck with the first range."""
     monkeypatch.setattr(tools, "READ_LIMIT", 300)
     (tmp_path / "big.txt").write_text(_numbered(120))
-    seen, offset, calls = [], None, 0
+    seen, offset, calls = [], 1, 0
     while True:
-        args = {"path": "big.txt"} if offset is None else {"path": "big.txt",
-                                                           "offset": offset}
-        out = tools.execute("read_file", args, cwd=tmp_path)
+        out = tools.execute("read_file", {"path": "big.txt", "offset": offset},
+                            cwd=tmp_path)
         calls += 1
         *body, footer = out.splitlines()
         seen += [row.split("\t", 1)[1] for row in body]
@@ -1017,3 +1016,13 @@ def test_the_saved_log_reads_without_a_prompt_in_auto_mode(
     assert not h.of(Event.TOOL_PROPOSED), "the engine's own log must not prompt"
     assert _tool_results(gateway)[-1].startswith(
         "250\ttests/test_bulk.py::test_case_250 FAILED")
+
+
+def test_a_long_unranged_read_returns_the_map_at_the_real_limits(tmp_path):
+    src = "".join(f"def handler_{i}(request):\n    return {i}\n\n\n" for i in range(1500))
+    assert len(src) > tools.READ_LIMIT
+    (tmp_path / "big.py").write_text(src)
+    detail = tools.read_file_detail({"path": "big.py"}, cwd=tmp_path)
+    assert detail["whole"] is False and detail["shown"] is False
+    assert "is long" in detail["text"] and "def handler_0" in detail["text"]
+    assert len(detail["text"]) < tools.LONG_FILE_MAP_CHARS + 1_000
