@@ -157,7 +157,7 @@ def fetch_request_cost(cfg: dict, request_ids: list,
                        timeout: float = 3.0) -> "float | None":
     """Billed USD for one hop from GET /usage/requests/{id}, summed over ids.
 
-    A hop can carry several ids (optimized attempt degraded to raw); every
+    A hop can carry several ids (marked attempt degraded to raw); every
     accepted attempt was billed. None only when no id could be settled.
     """
     events = _fetch_request_events(cfg, request_ids, timeout)

@@ -20,8 +20,8 @@ mark on the last message (Claude Haiku 5.5); $0.178 against $0.0571 on
 Claude Opus 5.5. The mark has to be a key on the message itself: inside a
 content part of a tool message the gateway ignores it without an error.
 
-This does not depend on the "Token savings" setting, and it never changes
-what the model is sent: only the two marks are added, on copies.
+It never changes what the model is sent: only the two marks are added, on
+copies.
 """
 
 import os

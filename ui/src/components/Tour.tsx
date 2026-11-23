@@ -61,7 +61,7 @@ export const TOUR: TourStep[] = [
     target: '.controlbar .ctl-cost',
     placement: 'top',
     title: 'Cost and tokens, live',
-    body: 'The session spend and token count, updated per hop as the agent works — not just at the end. When a model reports no price it is computed from the catalog and marked ~. The popover holds the token-savings dial for long runs.',
+    body: 'The session spend and token count, updated per hop as the agent works — not just at the end. When a model reports no price it is computed from the catalog and marked ~. Click it for the bill so far, split by step.',
   },
   {
     id: 'rail',
@@ -73,7 +73,7 @@ export const TOUR: TourStep[] = [
   {
     id: 'palette',
     title: 'Everything is one shortcut away',
-    body: '⌘K searches every setting and action by name or by what it does — try “cheap”. ⌘, opens the full settings, including a fuzzy-searchable browser of every model on your account.',
+    body: '⌘K searches every setting and action by name or by what it does — try “spend”. ⌘, opens the full settings, including a fuzzy-searchable browser of every model on your account.',
   },
 ]
 

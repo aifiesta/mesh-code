@@ -110,8 +110,7 @@ def test_nothing_to_mark_returns_the_same_list():
 
 def _cfg(gateway, **over):
     cfg = {"base_url": gateway.base_url, "api_key": "rsk_test", "model": CLAUDE,
-           "auto_route": False, "fallback_models": [], "reasoning_effort": None,
-           "optimize": 0.0}
+           "auto_route": False, "fallback_models": [], "reasoning_effort": None}
     cfg.update(over)
     return cfg
 
@@ -120,14 +119,14 @@ def _send(gateway, messages, **over):
     return [x for x in stream_chat(messages, _cfg(gateway, **over))]
 
 
-def test_a_claude_request_carries_the_marks_with_the_dial_off(gateway):
+def test_a_claude_request_carries_the_marks(gateway):
     gateway.script(sse_turn("ok", model=CLAUDE))
     chat = _chat()
     snapshot = copy.deepcopy(chat)
     _send(gateway, chat)
     sent = gateway.requests[0]
     assert _marked(sent["messages"]) == [0, 4]
-    assert "max_tokens" not in sent, "caching must not cap the reply the way the dial does"
+    assert "max_tokens" not in sent, "caching must never cap the reply"
     assert chat == snapshot, "the stored history must never carry a mark"
 
 
@@ -160,16 +159,6 @@ def test_a_refused_marked_request_is_sent_again_without_marks(gateway):
     assert "ok" in "".join(x for x in out if isinstance(x, str))
     assert _marked(gateway.requests[0]["messages"]) == [0, 4]
     assert _marked(gateway.requests[1]["messages"]) == []
-
-
-def test_with_the_dial_on_claude_keeps_the_mark_on_the_last_message(gateway):
-    """The dial's own placement is the second-to-last message, which bills
-    the newest message in full on one step and writes it on the next."""
-    gateway.script(sse_turn("ok", model=CLAUDE))
-    _send(gateway, _chat(), optimize=0.1)
-    sent = gateway.requests[0]
-    assert _marked(sent["messages"]) == [0, 4]
-    assert sent["max_tokens"]
 
 
 # -- in a chat -----------------------------------------------------------------

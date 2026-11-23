@@ -152,7 +152,7 @@ export function ControlBar({ status, settings, catalog, routeExplain, onSet, onO
           </span>
         </button>
         {open === 'cost' && (
-          <Pop title="Spend" onSettings={() => { setOpen(null); onOpenSettings('behaviour') }}>
+          <Pop title="Spend" onSettings={() => { setOpen(null); onOpenSettings('routing') }}>
             <dl className="pop-stats">
               <div><dt>This turn</dt><dd>${(status?.turn_cost ?? 0).toFixed(6)}</dd></div>
               <div><dt>Session</dt><dd>${(status?.session_cost ?? 0).toFixed(6)}</dd></div>
@@ -169,7 +169,6 @@ export function ControlBar({ status, settings, catalog, routeExplain, onSet, onO
                     + 'be priced from the catalog, so this is not what you were billed.'
                   : 'What the gateway actually billed, not an estimate.'}
             </p>
-            {spec('optimize') && <Field spec={spec('optimize')!} onChange={onSet} compact />}
           </Pop>
         )}
       </div>

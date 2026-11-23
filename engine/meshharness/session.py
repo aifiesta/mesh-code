@@ -156,7 +156,6 @@ class Session:
             route_weights=self.cfg.get("route_weights"),
             reasoning_effort=self.cfg.get("reasoning_effort"),
             output_style=self.cfg.get("output_style", "default"),
-            optimize=self.cfg.get("optimize", 0.0),
             max_hops=self.cfg.get("max_hops", 0),
             stall_policy=self.cfg.get("stall_policy", "pause"),
             auto_compact=self.cfg.get("auto_compact", True),
@@ -926,7 +925,7 @@ class Session:
                               chars=p.get("chars", 0))
                     continue
                 if ev.get("stream_reset"):
-                    # The optimized attempt aborted in-band and the raw retry
+                    # The marked attempt aborted in-band and the raw retry
                     # is starting over: drop its partial text so the stored
                     # reply isn't the two attempts concatenated.
                     buf.clear()
@@ -1064,19 +1063,6 @@ class Session:
         self.state["_smart_effort"] = info.get("effort") if info.get("scored") else None
         self.turn_model = info["model"]
 
-    def _asks_for_caching(self) -> bool:
-        """Does the router price Anthropic models as cached? Only with the
-        Optimize setting on, as before, although caching.py now asks for
-        caching on every request to them. Pricing them as cached moves small
-        tasks from DeepSeek to Claude Haiku, and the measured bills do not
-        support that: the estimate leaves out the cache write price and
-        Claude's larger token counts (docs/bench/caching_pruning). Left as it
-        was until that is decided."""
-        try:
-            return float(self.cfg.get("optimize") or 0) > 0
-        except (TypeError, ValueError):
-            return False
-
     def _serving(self) -> tuple:
         """(model, thinking level) of the pick serving right now."""
         return (self.state.get("_smart_pick"), self.state.get("_smart_level"))
@@ -1128,8 +1114,7 @@ class Session:
                                 needs_tools=True, needs_ctx=self._needs_ctx(),
                                 incumbent=self.state.get("_smart_last"),
                                 exclude=exclude,
-                                level=self.cfg.get("reasoning_effort"),
-                                asks_for_caching=self._asks_for_caching())
+                                level=self.cfg.get("reasoning_effort"))
             if got and got.get("model"):
                 self._apply_pick(got, difficulty)
                 self.emit(Event.ROUTED, model=got["model"], cohort=cohort,
@@ -1168,8 +1153,7 @@ class Session:
                                 exclude=set(self.state.get("_smart_bad") or set()),
                                 # only something clearly stronger than what just struggled
                                 failed=prev if self.state.get("_smart_scored") else None,
-                                level=self.cfg.get("reasoning_effort"),
-                                asks_for_caching=self._asks_for_caching())
+                                level=self.cfg.get("reasoning_effort"))
             if not got or not got.get("model"):
                 return False
             self.state["_smart_escalations"] = self.state.get("_smart_escalations", 0) + 1
@@ -1213,8 +1197,7 @@ class Session:
                                 incumbent=self.state.get("_smart_last"),
                                 exclude=set(self.state.get("_smart_bad") or set()),
                                 incumbent_bonus=self._switch_cost_bonus(),
-                                level=self.cfg.get("reasoning_effort"),
-                                asks_for_caching=self._asks_for_caching())
+                                level=self.cfg.get("reasoning_effort"))
             if not got or not got.get("model"):
                 return
             prev = self._serving()
@@ -1283,8 +1266,7 @@ class Session:
                                 self.cfg.get("route_weights"), table, self.catalog,
                                 needs_tools=True, incumbent=self.cfg.get("model"),
                                 exclude=set(self.cfg.get("exclude_models") or []),
-                                level=self.cfg.get("reasoning_effort"),
-                                asks_for_caching=self._asks_for_caching())
+                                level=self.cfg.get("reasoning_effort"))
             out.update({
                 "available": bool(got),
                 "pick": (got or {}).get("model"),
@@ -1780,8 +1762,7 @@ class Session:
         stub = None
         if not ranged:
             try:
-                stub = memory.dedupe_read(self.state, abspath,
-                                          float(self.cfg.get("optimize") or 0))
+                stub = memory.dedupe_read(self.state, abspath)
             except Exception:
                 stub = None
         if stub is not None:

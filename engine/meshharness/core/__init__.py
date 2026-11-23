@@ -17,8 +17,8 @@ to the original so fixes can flow between the two. What changed, and why:
               and the frontend renders it.
 
 Everything else — the streaming client and its tool-call repair, the
-routing table and cohort classifier, repo memory, compaction, the optimize
-levers, loop/stall guards — is byte-for-byte the CLI's.
+routing table and cohort classifier, repo memory, compaction, loop/stall
+guards — is byte-for-byte the CLI's.
 """
 
 __version__ = "0.1.4"

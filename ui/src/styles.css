@@ -1269,7 +1269,6 @@ kbd {
   font-size: var(--t-2xs); text-transform: uppercase; letter-spacing: .08em;
   padding: 2px 6px; border-radius: var(--r-xs); font-weight: 650;
 }
-.tag.beta { background: var(--warn-film); color: var(--warn); }
 .tag.now { background: var(--brand-film); color: var(--brand); }
 .tag.never { background: var(--danger-film); color: var(--danger); }
 .tag.think { background: var(--film-3); color: var(--ink-3); }
@@ -1305,9 +1304,7 @@ kbd {
 .toggle.on::before { background: linear-gradient(135deg, var(--brand), var(--brand-2)); box-shadow: none; }
 .toggle.on .knob { transform: translateX(14px); background: #ffffff; }
 
-.dial { display: flex; align-items: center; gap: 14px; }
 input[type=range] { accent-color: var(--brand); flex: 1; max-width: 270px; }
-.dial-value { font-family: var(--sans); font-size: var(--t-sm); color: var(--ink-2); min-width: 36px; }
 .stepper { display: flex; align-items: center; gap: 11px; }
 .stepper input { width: 84px; font-family: var(--sans); }
 .stepper-note { font-size: var(--t-sm); color: var(--ink-3); }
