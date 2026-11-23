@@ -73,6 +73,8 @@ export type AppState = {
   localNotNow: boolean
   /** The last thing the local layer said outside any chat (a failed download, a refused start). */
   localNote: { level: string; text: string } | null
+  /** A one-time note from the engine to the whole app (e.g. Smart routing switched on). */
+  appNote: string | null
 }
 
 export const initialState: AppState = {
@@ -95,6 +97,7 @@ export const initialState: AppState = {
   local: null,
   localNotNow: false,
   localNote: null,
+  appNote: null,
 }
 
 let uid = 0
@@ -124,12 +127,14 @@ export type Action =
   | { t: 'clearKeyError' }
   | { t: 'stopping'; id: string }
   | { t: 'localNotNow' }
+  | { t: 'dismissAppNote' }
 
 export function reduce(state: AppState, action: Action): AppState {
   if (action.t === 'connection') return { ...state, connection: action.state }
   if (action.t === 'dismissConfigError') return { ...state, configError: null }
   if (action.t === 'clearKeyError') return { ...state, keyError: null }
   if (action.t === 'localNotNow') return { ...state, localNotNow: true }
+  if (action.t === 'dismissAppNote') return { ...state, appNote: null }
 
   if (action.t === 'stopping') {
     // Optimistic: the button flips to "stopping" on the click. The engine
@@ -319,6 +324,7 @@ export function reduce(state: AppState, action: Action): AppState {
     }
   }
 
+  if (!sid && ev.type === Ev.NOTICE && d.app) return { ...state, appNote: String(d.message ?? '') }
   // The local layer speaks outside any chat; keep its last word for the card.
   if (!sid && ev.type === Ev.NOTICE && String(d.message ?? '').startsWith('local model')) {
     return { ...state, localNote: { level: d.level ?? 'info', text: String(d.message) } }

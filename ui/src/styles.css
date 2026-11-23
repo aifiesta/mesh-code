@@ -2453,3 +2453,8 @@ body.resizing .rail-resize { pointer-events: auto; }
 .localpanel .m-actions button:disabled { opacity: .45; cursor: default; }
 .tag.local { background: var(--ok-film); color: var(--ok); }
 .m-id .m-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.app-note { display: flex; align-items: center; gap: 10px; text-align: left; }
+.app-note > span { flex: 1; min-width: 0; }
+.app-note .link { flex: none; color: inherit; opacity: .75; font-size: var(--t-xs); }
+.chat > .app-note { margin: 0 26px 8px; }
+.empty .app-note { margin-top: 18px; }

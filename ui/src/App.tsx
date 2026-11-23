@@ -334,7 +334,13 @@ export default function App() {
     (!!loc.offer && !state.localNotNow) || loc.jobs.length > 0
     || ['failed', 'crashed'].includes(loc.server.state)
     || state.localNote?.level === 'warn')
-  const localBanner = localShown && loc ? (
+  const appNoteBanner = state.appNote ? (
+    <div className="notice info app-note">
+      <span>{state.appNote}</span>
+      <button className="link" onClick={() => dispatch({ t: 'dismissAppNote' })}>Dismiss</button>
+    </div>
+  ) : null
+  const localCard = localShown && loc ? (
     <LocalSetupCard
       local={loc}
       compact
@@ -347,6 +353,7 @@ export default function App() {
       onOpenSettings={() => setSheet('local')}
     />
   ) : null
+  const localBanner = appNoteBanner || localCard ? <>{appNoteBanner}{localCard}</> : null
 
   if (!state.hasKey) {
     return (
