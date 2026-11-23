@@ -1,7 +1,7 @@
 /* Turn saved window frames into a .webm.   node video.js FRAMES_DIR OUT.webm
    Frames are JPEGs named in order; each one's time is its file time. */
 const fs = require('fs'), path = require('path'), { spawn } = require('child_process')
-const FFMPEG = '/Users/asjadahmad/Library/Caches/ms-playwright/ffmpeg-1011/ffmpeg-mac'
+const FFMPEG = require('path').join(process.env.HOME, 'Library/Caches/ms-playwright/ffmpeg-1011/ffmpeg-mac')
 async function makeVideo(frames, out) {
   if (!frames.length) return null
   const ff = spawn(FFMPEG, ['-loglevel', 'error', '-f', 'image2pipe', '-c:v', 'mjpeg', '-i', 'pipe:0', '-y', '-an', '-r', '25',

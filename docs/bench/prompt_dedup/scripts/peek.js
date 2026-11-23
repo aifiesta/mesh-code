@@ -1,5 +1,5 @@
 /* What is a window showing right now?   node peek.js PORT */
-const { chromium } = require('/Users/asjadahmad/.npm/_npx/e41f203b7505f1fb/node_modules/playwright-core')
+const { chromium } = require(require('path').join(process.env.HOME, '.npm/_npx/e41f203b7505f1fb/node_modules/playwright-core'))
 ;(async () => {
   const browser = await chromium.connectOverCDP('http://127.0.0.1:' + process.argv[2])
   const page = browser.contexts()[0].pages()[0]

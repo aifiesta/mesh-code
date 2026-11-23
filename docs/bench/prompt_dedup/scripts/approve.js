@@ -1,7 +1,7 @@
 /* Approve the "Start this server?" dialog a test chat is waiting on, then wait for the turn to end and
    save what the window shows.   node approve.js PORT OUT_DIR */
 const fs = require('fs'), path = require('path')
-const { chromium } = require('/Users/asjadahmad/.npm/_npx/e41f203b7505f1fb/node_modules/playwright-core')
+const { chromium } = require(require('path').join(process.env.HOME, '.npm/_npx/e41f203b7505f1fb/node_modules/playwright-core'))
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 ;(async () => {
   const browser = await chromium.connectOverCDP('http://127.0.0.1:' + process.argv[2])

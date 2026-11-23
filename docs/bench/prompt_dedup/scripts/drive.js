@@ -8,7 +8,7 @@
    before = the window whose engine runs the code before the change (debug port 9347)
    after  = the window whose engine runs the code with the change   (debug port 9349) */
 const fs = require('fs'), path = require('path')
-const { chromium } = require('/Users/asjadahmad/.npm/_npx/e41f203b7505f1fb/node_modules/playwright-core')
+const { chromium } = require(require('path').join(process.env.HOME, '.npm/_npx/e41f203b7505f1fb/node_modules/playwright-core'))
 const { makeVideo } = require('./video.js')
 const ROOT = path.resolve(__dirname, '..')
 const [ENGINE, N, FRAMES_ROOT, REP] = process.argv.slice(2)

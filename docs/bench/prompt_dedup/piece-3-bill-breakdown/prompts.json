@@ -1,7 +1,7 @@
 [
  {
   "name": "standard",
-  "project": "/Users/asjadahmad/Desktop/mesh-code-prompt-dedup/piece-3-bill-breakdown/0-projects-before/standard",
+  "project": "~/Desktop/mesh-code-prompt-dedup/piece-3-bill-breakdown/0-projects-before/standard",
   "prompt": "Add coupon codes to the shop. Add apply_coupon(amount, code) to shop/price.py: SAVE10 takes 10% off, FLAT5 takes 5.00 off but never below zero, and any other code raises ValueError. Update place_order in shop/orders.py to take an optional coupon keyword argument, applied to the subtotal before tax. Write tests for both and run the full test suite.",
   "cap": 0.1,
   "max_minutes": 8

@@ -13,7 +13,7 @@
    Every call into the window has a time limit, so a window that stops
    answering ends the run with an error instead of hanging. */
 const fs = require('fs'), path = require('path')
-const { chromium } = require('/Users/asjadahmad/.npm/_npx/e41f203b7505f1fb/node_modules/playwright-core')
+const { chromium } = require(require('path').join(process.env.HOME, '.npm/_npx/e41f203b7505f1fb/node_modules/playwright-core'))
 const { makeVideo } = require('../../scripts/video.js')
 const ROOT = path.resolve(__dirname, '..')
 const [SIDE, CASE, REP, FRAMES_ROOT] = process.argv.slice(2)
@@ -35,7 +35,7 @@ const within = (p, ms, what) => Promise.race([p, new Promise((_, rej) => setTime
 
 ;(async () => {
   fs.mkdirSync(OUT, { recursive: true })
-  if (!fs.existsSync(PROJECT)) fs.cpSync(task.project, PROJECT, { recursive: true })
+  if (!fs.existsSync(PROJECT)) fs.cpSync(task.project.replace(/^~/, process.env.HOME), PROJECT, { recursive: true })
   const browser = await chromium.connectOverCDP('http://127.0.0.1:' + PORT)
   const page = browser.contexts()[0].pages()[0]
   const u = new URL(page.url())

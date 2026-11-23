@@ -3,7 +3,7 @@
 
      node shots.js PORT OUT_DIR */
 const path = require('path')
-const { chromium } = require('/Users/asjadahmad/.npm/_npx/e41f203b7505f1fb/node_modules/playwright-core')
+const { chromium } = require(require('path').join(process.env.HOME, '.npm/_npx/e41f203b7505f1fb/node_modules/playwright-core'))
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const within = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('the window did not answer in time')), ms))])
 ;(async () => {
