@@ -13,10 +13,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from . import config as config_mod
 from . import pricing
-from .config import CONFIG_DIR
 
-LEDGER = CONFIG_DIR / "budget.json"
 WARN_STEPS = (50, 80, 100)
 KINDS = ("escalate", "audit", "auto", "pinned", "fallback", "other")
 
@@ -28,9 +27,9 @@ class Hold:
 
 
 class Budget:
-    def __init__(self, cfg: dict, path: Path = LEDGER, *, now=None):
+    def __init__(self, cfg: dict, path: "Path | None" = None, *, now=None):
         self.cfg = cfg
-        self.path = path
+        self.path = path or config_mod.CONFIG_DIR / "budget.json"
         self._now = now or time.time
         self._lock = threading.RLock()
         self.data = self._load()

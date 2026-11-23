@@ -132,3 +132,7 @@ def test_a_passing_check_clears_the_hold(tmp_path):
     assert b.check("pinned", 5).scope == "day" and b.snapshot()["held"] == "day"
     b.cfg["monthly_budget_usd"] = 1000
     assert b.check("pinned", 5) is None and b.snapshot()["held"] is None
+
+
+def test_the_default_ledger_lives_in_the_config_home(isolate_config_home):
+    assert Budget({}).path == isolate_config_home / "budget.json"
