@@ -14,31 +14,35 @@ import httpx
 BASH_TIMEOUT = 120  # seconds — matches Claude Code's default
 
 
-def build_system_prompt(cfg: dict, cwd: "str | Path | None" = None) -> str:
-    """Append working-dir + tool guidance to the user's base system prompt.
+# The system prompt is sent as TWO system messages, and the order matters for
+# money. Providers that cache by themselves (DeepSeek does) bill a request's
+# opening at a few percent of the normal price when an earlier request began
+# with the same text. The first step of a chat has no earlier request of its
+# own, so it can only match another chat's — and with the working directory
+# on line two of the prompt, no two projects ever began alike: that step was
+# billed in full, 44% of a small task's bill. So:
+#
+#   message 1  stable_system_prompt   identical for every chat and project
+#              (the tool definitions follow it in the provider's own layout)
+#   message 2  project_system_prompt  the working directory, repo memory, the
+#              journal, the output style — everything that differs
+#
+# Measured live: another project's first step went from 0 to 3,200 of 3,389
+# input tokens cached, $0.00048 to $0.00004. Nothing that varies by project,
+# chat or day may be added to message 1.
+
+
+def stable_system_prompt(cfg: dict) -> str:
+    """The part of the system prompt that is the same for every chat: the
+    user's base prompt and the engine's standing rules.
 
     Naming tools in prose (read_file/write_file/run_bash) makes Anthropic
     models drop into XML tool-use mode and emit `<function_calls>` as
     text — keep this section deliberately tool-name-free.
     """
     base = cfg.get("system") or ""
-    cwd = str(Path(cwd).expanduser().resolve()) if cwd else str(Path.cwd())
-    prompt = (
+    return (
         f"{base}\n\n"
-        f"Working directory: {cwd}\n"
-        "Resolve any relative path the user gives against this working "
-        "directory. When you create or edit files without an explicit "
-        "absolute path, place them inside this working directory. Use "
-        "the available tools to inspect and modify the filesystem and "
-        "run shell commands — do not ask the user to run commands.\n\n"
-        "MEMORY — this session may start with a REPO MEMORY section of "
-        "notes and known files from earlier sessions in this directory. "
-        "When the user states a lasting preference or you discover a "
-        "durable fact about this project (build tool, test command, "
-        "conventions, architecture decisions), call remember with one "
-        "short factual sentence so future sessions know it. Do not use "
-        "remember for transient task state, file contents, or anything "
-        "secret.\n\n"
         "ASK WHEN GENUINELY FORKED. If a request has two or more "
         "defensible interpretations that would lead to materially different "
         "work — which stack, which of several designs, how big a scope — "
@@ -51,21 +55,13 @@ def build_system_prompt(cfg: dict, cwd: "str | Path | None" = None) -> str:
         "and why, and keep going.\n\n"
         "PLAN BEFORE ACTING. For any request that will need more than ~3 "
         "tool calls (building features, multi-file edits, scaffolding a "
-        "project), FIRST call create_plan with a numbered list of small, "
-        "focused steps. Each step should be completable in one or two "
-        "tool calls and finish in under 30 seconds. Then for each step "
-        "call update_step(i, \"in_progress\"), do the work, and call "
-        "update_step(i, \"completed\"). Send plan updates IN THE SAME "
-        "RESPONSE as the tool call that does the step's work — a response "
-        "containing only update_step costs a full round trip and does "
-        "nothing. If a step turns out to be wrong "
-        "or impossible, mark it \"blocked\" and call create_plan again "
-        "with a revised plan. For simple one-shot requests (read a file, "
-        "answer a question, run one command), skip the plan and act "
-        "directly. NEVER tell the user the task is finished — and do not "
+        "project), FIRST make a plan: a numbered list of small, focused "
+        "steps. For simple one-shot requests (read a file, answer a "
+        "question, run one command), skip the plan and act directly. "
+        "NEVER tell the user the task is finished — and do not "
         "treat starting a server as the final step — while any plan step is "
-        "still pending or in progress. Either finish every remaining step "
-        "first, or clearly tell the user which steps are not done and why.\n\n"
+        "still undone. Either finish every remaining step first, or clearly "
+        "tell the user which steps are not done and why.\n\n"
         "COMPLETENESS — deliver working code, not scaffolding. Everything "
         "you write is the FULL implementation: every function body filled "
         "in with real logic. Never leave placeholder comments like 'TODO', "
@@ -117,29 +113,32 @@ def build_system_prompt(cfg: dict, cwd: "str | Path | None" = None) -> str:
         "check a page or script, prefer one short command whose output "
         "answers the question (grep, a node/python one-liner against the "
         "file) over building a test harness.\n\n"
-        "Shell commands run non-interactively — stdin is /dev/null. Always "
-        "pass flags like --yes, -y, or --no-input; interactive prompts will "
-        "hang and time out. The shell timeout is 120s; if a command would "
-        "take longer, break it into smaller pieces.\n\n"
         "User messages may include images attached as multimodal content "
         "parts (image_url with a data: or https: URL). Look at them carefully "
         "and reference what you see when relevant.\n\n"
-        "For long-running servers (dev servers like `npm run dev` / `vite` / "
-        "`next dev`, `flask run`, `python -m http.server`, file watchers, etc.) "
-        "use the start_server tool — NOT run_bash. run_bash will kill the "
-        "server at 120s and you'll never see the URL. start_server picks a "
-        "free port, runs the command detached, waits for the port to open, "
-        "and returns the URL. BEFORE starting a server, bring the plan up "
-        "to date — mark every already-finished step completed. After a "
-        "successful start, mark the server step completed too (plan "
-        "bookkeeping is always allowed), then END THE TURN with a brief "
-        "one-line acknowledgment to the user — do not curl the URL to "
-        "verify it, do not re-read the files, do not run any more tools. "
-        "The CLI has already shown the URL to the user in a panel; the "
-        "server runs in the background and the user will open it in their "
-        "own browser. Don't try shell workarounds like `nohup &`, "
-        "`disown`, `setsid`, or `timeout N npm run dev` — `timeout` doesn't "
-        "exist on macOS and backgrounding via shell loses output capture."
+        # What a tool is for, and how to call it, is said ONCE, in that
+        # tool's definition (and, for what to do after a server starts, in
+        # the tool's result). Only what no tool definition says stays here.
+        "Don't keep a long-running server alive with shell workarounds like "
+        "`nohup &`, `disown`, `setsid`, or `timeout N npm run dev` — "
+        "`timeout` doesn't exist on macOS and backgrounding via shell loses "
+        "output capture."
+    )
+
+
+def project_system_prompt(cfg: dict, cwd: "str | Path | None" = None,
+                          extra: str = "") -> str:
+    """The part of the system prompt that belongs to ONE project and chat:
+    where the work happens, what earlier sessions left behind (`extra` is the
+    project journal), and how the user wants replies written."""
+    cwd = str(Path(cwd).expanduser().resolve()) if cwd else str(Path.cwd())
+    prompt = (
+        f"Working directory: {cwd}\n"
+        "Resolve any relative path the user gives against this working "
+        "directory. When you create or edit files without an explicit "
+        "absolute path, place them inside this working directory. Use "
+        "the available tools to inspect and modify the filesystem and "
+        "run shell commands — do not ask the user to run commands."
     )
     # Warm start: REPO MEMORY block from previous sessions in this cwd
     # (best-effort — a memory bug must never break session start).
@@ -151,6 +150,7 @@ def build_system_prompt(cfg: dict, cwd: "str | Path | None" = None) -> str:
     except Exception:
         block = ""
     prompt = prompt + (("\n\n" + block) if block else "")
+    prompt = prompt + (("\n\n" + extra) if extra else "")
     # Output style LAST: it is an instruction about prose, and recency wins
     # on cheap models (the same reason the stub-guard nudge rides last).
     try:
@@ -159,6 +159,22 @@ def build_system_prompt(cfg: dict, cwd: "str | Path | None" = None) -> str:
     except Exception:
         style = ""
     return prompt + (("\n\n" + style) if style else "")
+
+
+def build_system_messages(cfg: dict, cwd: "str | Path | None" = None,
+                          extra: str = "") -> list:
+    """The two system messages a chat starts with: stable first."""
+    return [
+        {"role": "system", "content": stable_system_prompt(cfg)},
+        {"role": "system", "content": project_system_prompt(cfg, cwd, extra)},
+    ]
+
+
+def build_system_prompt(cfg: dict, cwd: "str | Path | None" = None) -> str:
+    """Both parts as one text, stable part first. For callers that want to
+    read the whole prompt; the engine sends build_system_messages."""
+    return stable_system_prompt(cfg) + "\n\n" + project_system_prompt(cfg, cwd)
+
 
 # OpenAI-compatible tool spec — Mesh API forwards these to the underlying provider.
 TOOLS = [
@@ -190,6 +206,10 @@ TOOLS = [
                         "type": "integer",
                         "description": "How many lines to read from offset.",
                     },
+                    "step": {
+                        "type": "integer",
+                        "description": "Plan step this call works on (not needed for step 1).",
+                    },
                 },
                 "required": ["path"],
             },
@@ -209,6 +229,10 @@ TOOLS = [
                 "properties": {
                     "path": {"type": "string", "description": "File path to write"},
                     "content": {"type": "string", "description": "Full file contents"},
+                    "step": {
+                        "type": "integer",
+                        "description": "Plan step this call works on (not needed for step 1).",
+                    },
                 },
                 "required": ["path", "content"],
             },
@@ -241,6 +265,10 @@ TOOLS = [
                         "type": "boolean",
                         "description": "Replace every match instead of requiring exactly one",
                     },
+                    "step": {
+                        "type": "integer",
+                        "description": "Plan step this call works on (not needed for step 1).",
+                    },
                 },
                 "required": ["path", "old_text", "new_text"],
             },
@@ -269,6 +297,10 @@ TOOLS = [
                             f"(default {BASH_TIMEOUT}, max 600). Use for "
                             "known-slow builds or test suites."
                         ),
+                    },
+                    "step": {
+                        "type": "integer",
+                        "description": "Plan step this call works on (not needed for step 1).",
                     },
                 },
                 "required": ["command"],
@@ -367,11 +399,16 @@ TOOLS = [
             "name": "create_plan",
             "description": (
                 "Create or replace the numbered plan for a multi-step task. CALL "
-                "THIS FIRST for any request that needs more than ~3 tool calls. "
-                "Each step should be small, action-oriented, and finishable in one "
-                "or two tool calls (under ~30s). After this, call update_step for "
-                "each step as you work through it. Skip create_plan entirely for "
-                "simple one-shot requests."
+                "THIS FIRST for any request that needs more than ~3 tool calls "
+                "(building features, multi-file edits, scaffolding); skip it for "
+                "simple one-shot requests. Each step should be small, "
+                "action-oriented, and finishable in one or two tool calls. "
+                "Then just work. Step 1 is in progress already; from step 2 "
+                "on, put the step's number in `step` on the tool calls that do "
+                "that step, and the checklist is ticked for you. Never make a "
+                "call only to report progress: there is no tool for ticking, "
+                "and nothing to send besides the work itself. If the plan "
+                "turns out wrong, call this again with the revised steps."
             ),
             "parameters": {
                 "type": "object",
@@ -434,6 +471,10 @@ TOOLS = [
                         "type": "integer",
                         "description": "Max seconds to wait for the port to open. Default 30; bump for slow installs.",
                     },
+                    "step": {
+                        "type": "integer",
+                        "description": "Plan step this call works on (not needed for step 1).",
+                    },
                 },
                 "required": ["command"],
             },
@@ -446,8 +487,9 @@ TOOLS = [
             "description": (
                 "Save a short durable note about THIS project that future "
                 "sessions in this directory will see at startup (stored "
-                "outside the repo). Use for lasting decisions, conventions, "
-                "and gotchas — 'uses pnpm', 'tests run with pytest -q', "
+                "outside the repo). Call it when the user states a lasting "
+                "preference or you discover a durable fact: decisions, "
+                "conventions, gotchas — 'uses pnpm', 'tests run with pytest -q', "
                 "'the API base path is /v2'. One factual sentence per call. "
                 "Do NOT store secrets, file contents, or transient task "
                 "state."
@@ -464,35 +506,6 @@ TOOLS = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "update_step",
-            "description": (
-                "Update a step's status in the current plan. Call with "
-                "status='in_progress' when starting step i, then status='completed' "
-                "when done. ALWAYS send these alongside the tool call that does the "
-                "work, in the same response — e.g. update_step(2,'completed') + "
-                "update_step(3,'in_progress') + the first call of step 3 together. "
-                "Never reply with only update_step calls. Use 'blocked' if the step "
-                "can't be done — then call create_plan again with a revised plan."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "index": {
-                        "type": "integer",
-                        "description": "1-based step number from the current plan.",
-                    },
-                    "status": {
-                        "type": "string",
-                        "enum": ["in_progress", "completed", "blocked"],
-                    },
-                },
-                "required": ["index", "status"],
-            },
-        },
-    },
 ]
 
 OUTPUT_LIMIT = 8000
@@ -502,6 +515,8 @@ OUTPUT_LIMIT = 8000
 # (~20k tokens) is plenty for any file a model should read in one piece.
 READ_LIMIT = 80_000
 MAX_BASH_TIMEOUT = 600  # model-requested run_bash timeout ceiling (seconds)
+# update_step is retired (the engine ticks the plan) but stays here so an old
+# chat that still calls it is answered without an approval prompt.
 PLAN_TOOLS = ("create_plan", "update_step")  # meta — auto-approved, no side effects
 # Asking the user a question has no side effects and is answered by the user
 # in person — gating it behind a y/n approval would be absurd.

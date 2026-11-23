@@ -2,6 +2,7 @@ import { useMemo, useState, useRef, useEffect } from 'react'
 import { fuzzyFilter, type Match } from '../fuzzy'
 import { fmtCtx, fmtUsd, pricePerM, type CatalogModel } from '../types'
 import { Highlight } from './Highlight'
+import { useMoney } from '../money'
 
 type Sort = 'name' | 'cheapest' | 'context'
 
@@ -30,6 +31,7 @@ export function ModelBrowser({ catalog, current, excluded, onPick, onExclude, on
   /** Ask the engine to refetch the gateway's list (new models, new prices). */
   onRefresh: () => void
 }) {
+  const { fx, price } = useMoney()
   const [q, setQ] = useState('')
   const [refreshing, setRefreshing] = useState(false)
   const [refreshedAt, setRefreshedAt] = useState<number | null>(null)
@@ -118,8 +120,8 @@ export function ModelBrowser({ catalog, current, excluded, onPick, onExclude, on
       )}
 
       <div className="browser-head">
-        <span>Model</span><span className="num">Context</span><span className="num">$/1M in</span>
-        <span className="num">$/1M out</span><span />
+        <span>Model</span><span className="num">Context</span><span className="num">{fx.symbol}/1M in</span>
+        <span className="num">{fx.symbol}/1M out</span><span />
       </div>
       <div className="browser-rows">
         {rows.slice(0, RENDER_CAP).map(({ item: m, match }: { item: CatalogModel; match: Match }) => {
@@ -134,8 +136,8 @@ export function ModelBrowser({ catalog, current, excluded, onPick, onExclude, on
                 {off && <span className="tag never">never</span>}
               </span>
               <span className="m-ctx num">{fmtCtx(m.context_length)}</span>
-              <span className="num">{fmtUsd(pricePerM(m, 'prompt'))}</span>
-              <span className="num">{fmtUsd(pricePerM(m, 'completion'))}</span>
+              <span className="num">{price(pricePerM(m, 'prompt'), fmtUsd)}</span>
+              <span className="num">{price(pricePerM(m, 'completion'), fmtUsd)}</span>
               <span className="m-actions">
                 {id !== current && <button className="use" onClick={() => onPick(id)}>Use</button>}
                 {off

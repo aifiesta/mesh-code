@@ -106,8 +106,7 @@ Kept deliberately small, so fixes can still flow between the CLI and here:
 | `plan.py` | `to_dict()` replaces `render()` | The plan used to draw itself with `rich` markup — precisely the coupling that made a second frontend impossible. |
 
 Everything else — `client.py`, `router.py`, `memory.py`, `compact.py`,
-`optimize.py`, `loopguard.py`, `pricing.py`, `styles.py` — is byte-for-byte
-the CLI's.
+`loopguard.py`, `pricing.py`, `styles.py` — is byte-for-byte the CLI's.
 
 ## What was rebuilt rather than ported
 

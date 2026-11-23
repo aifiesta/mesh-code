@@ -47,6 +47,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import files as files_mod
 from . import settings as settings_mod
+from .core import fx as fx_mod
 from .core import __version__
 from .core import config as config_mod
 from .core.permissions import Mode, from_str as mode_from_str
@@ -99,6 +100,8 @@ class Engine:
         self.cfg = config_mod.load_config()
         self._catalog: list | None = None
         self.usage = config_mod.load_usage()
+        # Display-only exchange rate. Fetched in the background, never in a turn.
+        self.fx = fx_mod.RateKeeper()
         # Browsable roots for the explorer, keyed by absolute path. The
         # ACTIVE one is the session's workspace — the only place the agent
         # reads, writes or runs commands. Extra folders are for looking at
@@ -348,6 +351,30 @@ class Engine:
             "account_url": "https://app.meshapi.ai",
         }
 
+    # -- display currency ---------------------------------------------------
+    def fx_info(self) -> dict:
+        return self.fx.current(self.cfg.get("currency") or "USD")
+
+    async def refresh_fx(self) -> None:
+        """Fetch a rate if one is due; tell every window if it changed.
+
+        Dollars (the default) never makes a request: due() is False for USD.
+        """
+        code = self.cfg.get("currency") or "USD"
+        try:
+            fresh = await self.fx.refresh(code)
+        except Exception:
+            return
+        if fresh is not None and (self.cfg.get("currency") or "USD") == code:
+            self.emit(event(Event.FX, None, **fresh))
+
+    async def fx_loop(self) -> None:
+        # Cheap check (reads one small file); a fetch happens only when the
+        # saved rate is a day old, or 15 minutes after every service failed.
+        while True:
+            await self.refresh_fx()
+            await asyncio.sleep(fx_mod.RETRY_AFTER)
+
     def shutdown(self) -> None:
         for s in list(self.sessions.values()):
             s.close()
@@ -361,6 +388,7 @@ def create_app(engine: Engine, ui_dir: Path | None = None) -> FastAPI:
         engine.loop = asyncio.get_running_loop()
         engine.spawn(engine.pump())
         engine.spawn(engine.catalog())
+        engine.spawn(engine.fx_loop())
         try:
             yield
         finally:
@@ -466,6 +494,7 @@ def create_app(engine: Engine, ui_dir: Path | None = None) -> FastAPI:
             settings=settings_mod.describe(engine.cfg),
             catalog=engine._catalog or [],
             profile=engine.profile(),
+            fx=engine.fx_info(),
         )))
         try:
             while True:
@@ -594,6 +623,10 @@ async def handle_request(engine: Engine, msg: dict) -> None:
                 pass                          # a failed persist must not block the change
             engine.emit(event(Event.SETTINGS, sid,
                               **settings_mod.describe(engine.cfg)))
+            if key == "currency":
+                # Show the saved rate at once (or dollars), then fetch if due.
+                engine.emit(event(Event.FX, None, **engine.fx_info()))
+                engine.spawn(engine.refresh_fx())
             return
 
         if kind == Request.LIST_MODELS:

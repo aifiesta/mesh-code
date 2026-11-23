@@ -20,8 +20,8 @@ export type Action = {
  * First, every enum setting is expanded into one action PER OPTION —
  * "Routing: Smart (local)" is directly runnable, so you never have to learn
  * that routing has three values before you can change it. Second, matching
- * runs over the engine's own help text, so typing "cheap" finds token
- * savings and smart routing without either of them containing the word.
+ * runs over the engine's own help text, so typing "spend" finds smart
+ * routing without its name containing the word.
  */
 export function CommandPalette({ settings, extra, onSet, onClose }: {
   settings: SettingsDoc | null

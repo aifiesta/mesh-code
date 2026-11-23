@@ -38,6 +38,8 @@ def isolate_config_home(tmp_path_factory, monkeypatch):
     # every test's repo-memory folder landing in the real ~/.mesh-code/context.
     from meshharness.core import memory as mem
     monkeypatch.setattr(mem, "CONFIG_DIR", home)
+    # A developer's shell may carry the caching off switch.
+    monkeypatch.delenv("MESH_CODE_PROMPT_CACHING", raising=False)
     yield home
 
 
@@ -91,7 +93,7 @@ def harness(gateway, tmp_path):
             "model": "test/model",
             "system": "test",
             "auto_route": False, "repo_memory": False, "fallback_models": [],
-            "reasoning_effort": None, "optimize": 0.0, "max_hops": 0,
+            "reasoning_effort": None, "max_hops": 0,
             "auto_compact": False, "stall_policy": "pause", "route_mode": "off",
             "output_style": "default",
         }

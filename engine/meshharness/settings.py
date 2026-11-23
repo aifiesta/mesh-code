@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .core import fx
+
 # Categories, in the order a settings screen should show them.
 CATEGORIES = [
     ("model", "Model", "Which model answers, and what it costs"),
@@ -136,15 +138,17 @@ SCHEMA: list[dict] = [
         "why": "Concise is good once you trust it; explanatory is good when reviewing unfamiliar code.",
     },
     {
-        "key": "optimize",
+        "key": "currency",
         "category": "behaviour",
-        "type": "dial",
-        "label": "Token savings",
-        "default": 0.0,
-        "min": 0.0, "max": 0.95, "step": 0.05,
-        "beta": True,
-        "help": "How aggressively to trim what gets re-sent each turn.",
-        "why": "Cuts spend on long sessions. Higher values prune more context, so raise it gradually and watch quality.",
+        "type": "enum",
+        "label": "Currency",
+        "default": "USD",
+        "options": [
+            _opt(code, f"{c['label']} ({c['symbol']})")
+            for code, c in fx.CURRENCIES.items()
+        ],
+        "help": "Which currency costs are shown in. Mesh bills in US dollars; other currencies are converted for display.",
+        "why": "The rate comes from Frankfurter, or fawazahmed0's currency API if that fails, at most once a day. Saved chats and totals stay in dollars.",
     },
     {
         "key": "system",
@@ -239,16 +243,6 @@ def coerce(key: str, value: Any) -> Any:
         if not lo <= n <= hi:
             raise InvalidSetting(f"{key} must be between {lo} and {hi}")
         return n
-
-    if kind == "dial":
-        try:
-            f = float(value)
-        except (TypeError, ValueError):
-            raise InvalidSetting(f"{key} must be a number")
-        lo, hi = spec.get("min", 0.0), spec.get("max", 1.0)
-        if not lo <= f <= hi:
-            raise InvalidSetting(f"{key} must be between {lo} and {hi}")
-        return round(f, 4)
 
     if kind == "weights":
         if not isinstance(value, dict):

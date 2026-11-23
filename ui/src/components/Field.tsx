@@ -5,7 +5,7 @@ import type { SettingSpec } from '../types'
 /**
  * Renders ONE setting from the engine's schema.
  *
- * Nothing here knows what "route_mode" or "optimize" mean — it dispatches on
+ * Nothing here knows what "route_mode" or "output_style" mean — it dispatches on
  * `type` and shows the label, help and rationale the engine supplied. That
  * is what keeps three separate surfaces (control bar, palette, settings
  * sheet) consistent, and what lets a new engine setting appear in the UI
@@ -30,7 +30,6 @@ export function Field({ spec, onChange, compact, label }: {
           <label htmlFor={`f-${spec.key}`} title={[spec.help, spec.why].filter(Boolean).join('\n\n')}>
             {label ?? spec.label}
           </label>
-          {spec.beta && <span className="tag beta">beta</span>}
         </div>
         <div className="field-control">{control(spec, set)}</div>
       </div>
@@ -41,7 +40,6 @@ export function Field({ spec, onChange, compact, label }: {
     <div className="field">
       <div className="field-head">
         <label htmlFor={`f-${spec.key}`}>{spec.label}</label>
-        {spec.beta && <span className="tag beta">beta</span>}
       </div>
       {spec.help && <p className="field-help">{spec.help}</p>}
       <div className="field-control">{control(spec, set)}</div>
@@ -83,22 +81,6 @@ function control(spec: SettingSpec, set: (v: any) => void) {
           <span className="knob" />
           <span className="toggle-text">{v ? 'On' : 'Off'}</span>
         </button>
-      )
-
-    case 'dial':
-      return (
-        <div className="dial">
-          <input
-            id={`f-${spec.key}`}
-            type="range"
-            min={spec.min ?? 0} max={spec.max ?? 1} step={spec.step ?? 0.05}
-            value={Number(v) || 0}
-            onChange={(e) => set(Number(e.target.value))}
-          />
-          <span className="dial-value">
-            {Number(v) > 0 ? `${Math.round(Number(v) * 100)}%` : 'Off'}
-          </span>
-        </div>
       )
 
     case 'int':

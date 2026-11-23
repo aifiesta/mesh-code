@@ -40,16 +40,20 @@ import httpx
 from .bridge import Cancelled, Pending
 from .core import compact, loopguard, memory, router
 from .core import journal, safety
+from .core import pricing as _pricing
 from .core import tools as tools_mod
 from .core.client import (complete_chat, nearest_level, reasoning_refusal,
                           stream_chat)
 from .core.permissions import AUTO_APPROVE, Mode
 from .core.plan import Plan
-from .core.tools import TOOLS, build_system_prompt, find_stub_markers, summarize_call
+from .core.tools import TOOLS, build_system_messages, find_stub_markers, summarize_call
 from .terminal import Terminal
 from .protocol import Decision, Event, event
 
 PLAN_TOOLS = {"create_plan", "update_step"}
+# Batches of work with no `step` named before the engine says, once, that the
+# checklist is standing still.
+PLAN_QUIET_BATCHES = 3
 INTERACTIVE_TOOLS = {"ask_user"}
 UNGATED_TOOLS = PLAN_TOOLS | INTERACTIVE_TOOLS | {"remember"}
 
@@ -91,6 +95,11 @@ class Session:
         self.turn_cost = 0.0
         self.turn_tokens = 0
         self.turn_estimated = False
+        # Where the money went: fresh input, cached input, cache writes,
+        # output, thinking (see pricing.empty_bill). Same lifetimes as the
+        # totals above — the turn's bill folds into the session's at turn end.
+        self.turn_bill = _pricing.empty_bill()
+        self.session_bill = _pricing.empty_bill()
         self.servers: list[dict] = []
         self.catalog: list | None = None
         # The user's own shell, created on first use. Not gated by permission
@@ -147,7 +156,6 @@ class Session:
             route_weights=self.cfg.get("route_weights"),
             reasoning_effort=self.cfg.get("reasoning_effort"),
             output_style=self.cfg.get("output_style", "default"),
-            optimize=self.cfg.get("optimize", 0.0),
             max_hops=self.cfg.get("max_hops", 0),
             stall_policy=self.cfg.get("stall_policy", "pause"),
             auto_compact=self.cfg.get("auto_compact", True),
@@ -163,6 +171,8 @@ class Session:
             turn_cost=round(self.turn_cost, 6),
             turn_tokens=self.turn_tokens,
             turn_estimated=self.turn_estimated,
+            turn_bill=_pricing.round_bill(self.turn_bill),
+            session_bill=_pricing.round_bill(self.session_bill),
             workspace=str(self.workspace),
             busy=self._busy.is_set(),
             servers=[{k: s.get(k) for k in ("pid", "port", "url", "cmd")}
@@ -187,23 +197,20 @@ class Session:
     # ------------------------------------------------------------------
     # public API — called from the transport thread
     # ------------------------------------------------------------------
-    def _system_prompt(self) -> str:
-        prompt = build_system_prompt(self.cfg, cwd=self.workspace)
+    def _system_messages(self) -> list:
+        """What a chat starts with: the stable system message, then this
+        project's (see core.tools for why there are two)."""
         # The project journal rides in the system prompt so even a fresh
         # session (or a small model) opens knowing how this project runs
         # and what is already built — instead of rediscovering it by
         # re-doing it. Gated by the same privacy toggle as repo memory.
+        block = ""
         if self.cfg.get("repo_memory", True):
-            block = journal.prompt_block(self.workspace)
-            if block:
-                prompt += "\n\n" + block
-        return prompt
+            block = journal.prompt_block(self.workspace) or ""
+        return build_system_messages(self.cfg, cwd=self.workspace, extra=block)
 
     def start(self) -> None:
-        self.state["messages"] = [{
-            "role": "system",
-            "content": self._system_prompt(),
-        }]
+        self.state["messages"] = self._system_messages()
         self.emit(
             Event.SESSION_STARTED,
             workspace=str(self.workspace),
@@ -251,7 +258,7 @@ class Session:
                 append_transcript(self.id, old)
         except Exception:
             pass
-        self.state["messages"] = [{"role": "system", "content": self._system_prompt()}]
+        self.state["messages"] = self._system_messages()
         self.chat_label = ""
         self.state["plan"] = None
         self.state["session_reads"] = {}
@@ -282,6 +289,7 @@ class Session:
                 "model": self.cfg.get("model"),
                 "session_cost": self.session_cost,
                 "session_tokens": self.session_tokens,
+                "session_bill": self.session_bill,
                 "messages": self.state.get("messages") or [],
                 "plan": self.state["plan"].to_dict() if self.state.get("plan") else None,
             })
@@ -301,13 +309,17 @@ class Session:
         s.chat_label = data.get("label") or ""
         s.session_cost = float(data.get("session_cost") or 0)
         s.session_tokens = int(data.get("session_tokens") or 0)
+        if isinstance(data.get("session_bill"), dict):
+            # A chat saved before the split existed has none: its earlier
+            # spend stays in the totals and is simply not broken down.
+            _pricing.add_bill(s.session_bill, data["session_bill"])
         if data.get("model"):
             s.cfg["model"] = data["model"]
         msgs = data.get("messages") or []
         if msgs:
             s.state["messages"] = msgs
         else:
-            s.state["messages"] = [{"role": "system", "content": s._system_prompt()}]
+            s.state["messages"] = s._system_messages()
         try:
             if data.get("plan"):
                 s.state["plan"] = Plan.from_dict(data["plan"])
@@ -486,6 +498,9 @@ class Session:
         self.state["_turn_tool_calls"] = 0
         self.state["_turn_files"] = []
         self.state.pop("_verify_fired", None)
+        # Which turn this is, so a plan revised inside it can keep its ticks
+        # while a plan made in a later turn starts clean (see _plan_tool).
+        self.state["_turn_id"] = turn_id
 
         # Held on the session (not as locals) so _status() can publish the
         # running totals mid-turn. turn_model starts EMPTY on purpose: under
@@ -496,6 +511,7 @@ class Session:
         self.turn_estimated = False
         self.turn_tokens = 0
         self.turn_model = None
+        self.turn_bill = _pricing.empty_bill()
 
         # Smart routing resolves locally and stores its pick in
         # _smart_pick (NOT cfg["model"], which stays the user's pin). After
@@ -572,14 +588,16 @@ class Session:
             # Billed figure by request id first (settles ~250ms after the
             # stream), then an in-body cost, then the catalog estimate.
             hop_cost, estimated = 0.0, False
+            hop_bill, priced_as = None, self._effective_model()
             rids = meta.get("request_ids") or (
                 [meta["request_id"]] if meta.get("request_id") else [])
             if rids and usage:
                 try:
                     from .core import pricing
-                    billed = pricing.fetch_request_cost(self.cfg, rids)
+                    billed, hop_bill = pricing.fetch_request_bill(
+                        self.cfg, rids, usage)
                 except Exception:
-                    billed = None
+                    billed, hop_bill = None, None
                 if billed is not None:
                     hop_cost = float(billed)
             if hop_cost <= 0:
@@ -602,6 +620,7 @@ class Session:
                             continue
                         guess = pricing.estimate_cost(candidate, usage, self.catalog)
                         if guess is not None:
+                            priced_as = candidate
                             break
                     if guess:
                         hop_cost, estimated = float(guess), True
@@ -610,6 +629,24 @@ class Session:
             self.turn_cost += hop_cost
             if estimated:
                 self.turn_estimated = True
+            # The split. From the gateway's own bill when it sent one;
+            # otherwise worked out from the token counts and the catalog's
+            # rates, scaled to this step's total, and marked estimated.
+            if usage:
+                try:
+                    if hop_bill is None:
+                        hop_bill = _pricing.bill_from_usage(
+                            priced_as or model_used, usage, self.catalog,
+                            cost=hop_cost)
+                    _pricing.add_bill(self.turn_bill, hop_bill)
+                    self.emit(Event.HOP_USAGE, turn_id=turn_id, hop=hop,
+                              model=model_used,
+                              tokens=int(usage.get("total_tokens") or 0),
+                              cost=round(hop_cost, 8),
+                              cost_estimated=estimated,
+                              bill=_pricing.round_bill(hop_bill))
+                except Exception:
+                    pass        # the split is reporting; it must never break a turn
             # Publish the running tally now, while the turn is still going.
             self._status()
 
@@ -635,6 +672,7 @@ class Session:
                               text=reply, model=model_used)
                     self.state["messages"].append(
                         {"role": "assistant", "content": reply})
+                    self._plan_finish()
                 break
 
             if has_reply:
@@ -697,6 +735,8 @@ class Session:
 
         self.session_cost += self.turn_cost
         self.session_tokens += self.turn_tokens
+        _pricing.add_bill(self.session_bill, self.turn_bill)
+        turn_bill = _pricing.round_bill(self.turn_bill)
         elapsed = time.time() - started
         turn_cost, turn_tokens, turn_estimated = (
             self.turn_cost, self.turn_tokens, self.turn_estimated)
@@ -710,12 +750,14 @@ class Session:
                       sealed=sealed, elapsed=round(elapsed, 2),
                       model=model_used, cost=round(turn_cost, 6),
                       cost_estimated=turn_estimated, tokens=turn_tokens,
+                      bill=turn_bill,
                       session_cost=round(self.session_cost, 6))
         else:
             self.emit(Event.TURN_FINISHED, turn_id=turn_id, hops=hop,
                       model=model_used, cost=round(turn_cost, 6),
                       cost_estimated=turn_estimated,
                       tokens=turn_tokens, elapsed=round(elapsed, 2),
+                      bill=turn_bill,
                       session_cost=round(self.session_cost, 6),
                       plan=self.state["plan"].to_dict() if self.state["plan"] else None,
                       stubs=sorted(self.state.get("stub_files") or {}))
@@ -736,6 +778,7 @@ class Session:
         self.turn_tokens = 0
         self.turn_estimated = False
         self.turn_model = None
+        self.turn_bill = _pricing.empty_bill()
         # A max_tokens shrink was derived from one over-long request's input.
         # Left set, it clips output for every later (now shorter) turn. Clear
         # it at turn end so the next turn re-derives from its own input.
@@ -885,7 +928,7 @@ class Session:
                               chars=p.get("chars", 0))
                     continue
                 if ev.get("stream_reset"):
-                    # The optimized attempt aborted in-band and the raw retry
+                    # The marked attempt aborted in-band and the raw retry
                     # is starting over: drop its partial text so the stored
                     # reply isn't the two attempts concatenated.
                     buf.clear()
@@ -1023,14 +1066,6 @@ class Session:
         self.state["_smart_effort"] = info.get("effort") if info.get("scored") else None
         self.turn_model = info["model"]
 
-    def _asks_for_caching(self) -> bool:
-        """Does this session mark its requests for caching? (The Optimize
-        setting does; without it Anthropic models bill every token in full.)"""
-        try:
-            return float(self.cfg.get("optimize") or 0) > 0
-        except (TypeError, ValueError):
-            return False
-
     def _serving(self) -> tuple:
         """(model, thinking level) of the pick serving right now."""
         return (self.state.get("_smart_pick"), self.state.get("_smart_level"))
@@ -1082,8 +1117,7 @@ class Session:
                                 needs_tools=True, needs_ctx=self._needs_ctx(),
                                 incumbent=self.state.get("_smart_last"),
                                 exclude=exclude,
-                                level=self.cfg.get("reasoning_effort"),
-                                asks_for_caching=self._asks_for_caching())
+                                level=self.cfg.get("reasoning_effort"))
             if got and got.get("model"):
                 self._apply_pick(got, difficulty)
                 self.emit(Event.ROUTED, model=got["model"], cohort=cohort,
@@ -1122,8 +1156,7 @@ class Session:
                                 exclude=set(self.state.get("_smart_bad") or set()),
                                 # only something clearly stronger than what just struggled
                                 failed=prev if self.state.get("_smart_scored") else None,
-                                level=self.cfg.get("reasoning_effort"),
-                                asks_for_caching=self._asks_for_caching())
+                                level=self.cfg.get("reasoning_effort"))
             if not got or not got.get("model"):
                 return False
             self.state["_smart_escalations"] = self.state.get("_smart_escalations", 0) + 1
@@ -1167,8 +1200,7 @@ class Session:
                                 incumbent=self.state.get("_smart_last"),
                                 exclude=set(self.state.get("_smart_bad") or set()),
                                 incumbent_bonus=self._switch_cost_bonus(),
-                                level=self.cfg.get("reasoning_effort"),
-                                asks_for_caching=self._asks_for_caching())
+                                level=self.cfg.get("reasoning_effort"))
             if not got or not got.get("model"):
                 return
             prev = self._serving()
@@ -1237,8 +1269,7 @@ class Session:
                                 self.cfg.get("route_weights"), table, self.catalog,
                                 needs_tools=True, incumbent=self.cfg.get("model"),
                                 exclude=set(self.cfg.get("exclude_models") or []),
-                                level=self.cfg.get("reasoning_effort"),
-                                asks_for_caching=self._asks_for_caching())
+                                level=self.cfg.get("reasoning_effort"))
             out.update({
                 "available": bool(got),
                 "pick": (got or {}).get("model"),
@@ -1310,11 +1341,35 @@ class Session:
         self.state["_batch_assistant_idx"] = len(self.state["messages"]) - 1
 
         doomed = 0
+        worked = stepped = False
         for p in prepared:
             if self._interrupt.is_set():
                 return {"total": len(prepared), "doomed": doomed, "interrupted": True}
 
             name, args = p["name"], p["args"]
+            # `step` is the model telling the ENGINE which plan step this
+            # call belongs to. It is not the tool's argument: taken off here,
+            # before anything validates, previews or runs the call.
+            step = args.pop("step", None) if isinstance(args, dict) else None
+
+            if (p["kind"] == "invalid" and name == "edit_file" and step is not None
+                    and isinstance(args.get("old_text"), str) and args.get("old_text")
+                    and args.get("old_text") == args.get("new_text")):
+                # An edit that changes nothing, carrying a step number: a
+                # model announcing "I am on step N" the only way it found.
+                # It is not a broken call — counting it as one made the
+                # router step up to a model 10x the price (seen live). Take
+                # the step, say there is nothing to announce, move on.
+                worked = True
+                stepped = self._plan_follow(step) or stepped
+                result = ("Nothing changed: old_text and new_text are the same. "
+                          "There is no need to announce a plan step — just do "
+                          "the work, with `step` on the calls that do it.")
+                self.emit(Event.TOOL_SKIPPED, call_id=p["id"], name=name,
+                          kind="noop", reason=result.split(".")[0] + ".",
+                          turn_id=turn_id, hop=hop)
+                self._append_tool_result(p["id"], result)
+                continue
 
             if p["kind"] in ("invalid", "truncated", "unparseable") and name not in PLAN_TOOLS:
                 doomed += 1
@@ -1331,6 +1386,10 @@ class Session:
                 self.emit(Event.TOOL_REPAIRED, call_id=p["id"], name=name,
                           kind=p["kind"])
 
+            if name not in UNGATED_TOOLS:
+                worked = True
+                stepped = self._plan_follow(step) or stepped
+
             try:
                 result = self._execute_one(p, turn_id, hop)
             except KeyboardInterrupt:
@@ -1343,6 +1402,8 @@ class Session:
 
             self._append_tool_result(p["id"], result)
 
+        if worked:
+            self._plan_nudge(stepped)
         return {"total": len(prepared), "doomed": doomed, "interrupted": False}
 
     def _append_tool_result(self, call_id: str, result: str) -> None:
@@ -1704,8 +1765,7 @@ class Session:
         stub = None
         if not ranged:
             try:
-                stub = memory.dedupe_read(self.state, abspath,
-                                          float(self.cfg.get("optimize") or 0))
+                stub = memory.dedupe_read(self.state, abspath)
             except Exception:
                 stub = None
         if stub is not None:
@@ -1737,13 +1797,30 @@ class Session:
             steps = args.get("steps")
             if not isinstance(steps, list) or not steps:
                 return "Error: create_plan requires a non-empty `steps` list."
-            plan = Plan(steps)
+            # Ticks carry over only when the model REVISES a plan it made in
+            # this same turn. A plan made in a later turn is a new task: a step
+            # that shares a title with a finished one ("Run the tests") has
+            # not been done again, and pre-ticking it let the turn end with
+            # the checklist, and the project journal, claiming work nobody did.
+            prev = self.state.get("plan")
+            turn = self.state.get("_turn_id")
+            same_turn = (prev is not None and turn is not None
+                         and self.state.get("_plan_turn") == turn)
+            plan = Plan(steps, previous=prev if same_turn else None)
             if not plan.steps:
                 return "Error: all steps were empty after trimming whitespace."
+            plan.begin()
             self.state["plan"] = plan
+            self.state["_plan_turn"] = turn
+            self.state["_plan_nudged"] = False
+            self.state["_plan_quiet"] = 0
             self.emit(Event.PLAN_UPDATED, **plan.to_dict())
-            return (f"Plan created with {len(plan.steps)} step(s). Now call "
-                    "update_step(1, 'in_progress') and start work.")
+            now = plan.current()
+            # No "now call ..." here: the old wording asked for a tick and
+            # got a round trip that did nothing else.
+            return (f"Plan created with {len(plan.steps)} step(s)"
+                    + (f"; step {now[0]} is in progress" if now else "")
+                    + ". Start the work now.")
 
         if name == "update_step":
             plan = self.state.get("plan")
@@ -1753,9 +1830,57 @@ class Session:
             if err:
                 return f"Error: {err}"
             self.emit(Event.PLAN_UPDATED, **plan.to_dict())
-            return f"Step {args['index']} → {args['status']}. {plan.summary()}"
+            # A retired tool (old chats still call it from habit). Honour
+            # the call, and say how it works now.
+            return (f"Step {args['index']} → {args['status']}. {plan.summary()} "
+                    "Steps are ticked for you now: put `step` on your tool "
+                    "calls instead of calling this.")
 
         return f"Error: unknown plan tool `{name}`"
+
+    # -- the engine keeps the checklist ---------------------------------
+    def _plan_follow(self, step) -> bool:
+        """A work call carried `step`. True when it named a real step."""
+        plan = self.state.get("plan")
+        if plan is None:
+            return False
+        changed = plan.follow(step)
+        if changed:
+            self.emit(Event.PLAN_UPDATED, **plan.to_dict())
+        return changed is not None
+
+    def _plan_nudge(self, stepped: bool) -> None:
+        """Once per plan: several batches of work went by and none named a
+        step, so the checklist may be standing still. Said at the point of
+        action (on the result the model reads next), because advice in the
+        prompt is what cheap models skip. Step 1 needs no number, so the
+        first batches after a plan are expected to be quiet."""
+        plan = self.state.get("plan")
+        if plan is None or plan.is_complete():
+            return
+        if stepped:
+            self.state["_plan_quiet"] = 0
+            return
+        self.state["_plan_quiet"] = self.state.get("_plan_quiet", 0) + 1
+        if self.state["_plan_quiet"] < PLAN_QUIET_BATCHES or self.state.get("_plan_nudged"):
+            return
+        now = plan.current()
+        last = self.state["messages"][-1] if self.state["messages"] else None
+        if not now or len(plan.steps) < 2 or not last or last.get("role") != "tool" \
+                or not isinstance(last.get("content"), str):
+            return
+        self.state["_plan_nudged"] = True
+        last["content"] += (
+            f"\n\n[plan] The checklist still shows step {now[0]} of "
+            f"{len(plan.steps)} ({now[1].title}). If you are past it, put the "
+            "current step's number in `step` on your next tool call.")
+
+    def _plan_finish(self) -> None:
+        """The turn ended with an answer: tick the last step if it was the
+        one in progress."""
+        plan = self.state.get("plan")
+        if plan is not None and plan.finish():
+            self.emit(Event.PLAN_UPDATED, **plan.to_dict())
 
     def _ask_user(self, args: dict, turn_id: str) -> str:
         """The model's mid-task question — a dialog, not a curses picker."""
@@ -1901,9 +2026,8 @@ class Session:
                          if appended else "")
                 return (f"Server started: {url} (pid {proc.pid}). It runs in "
                         "the background and the user can already see it. Do "
-                        "not curl it, do not re-read the files — mark the "
-                        "plan step completed and end your turn with a brief "
-                        "acknowledgment." + extra)
+                        "not curl it, do not re-read the files — end your "
+                        "turn with a brief acknowledgment." + extra)
             time.sleep(0.25)
 
         _kill(proc.pid)

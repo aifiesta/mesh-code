@@ -240,7 +240,7 @@ def test_a_file_map_is_not_recorded_as_the_file(gateway, harness, tmp_path, monk
         _call("read_file", "c1", path="views.py"),
         _call("read_file", "c2", path="views.py"),
         sse_turn("done"))
-    h = harness(mode=Mode.BYPASS, optimize=0.0)
+    h = harness(mode=Mode.BYPASS)
     h.session.submit("read views.py")
     h.wait_for(Event.TURN_FINISHED)
 
@@ -338,7 +338,7 @@ def test_a_ranged_read_is_not_recorded_as_the_full_file(gateway, harness, tmp_pa
         _call("read_file", "c1", path="big.py", offset=10, limit=5),
         _call("read_file", "c2", path="big.py"),
         sse_turn("done"))
-    h = harness(mode=Mode.BYPASS, optimize=0.0)
+    h = harness(mode=Mode.BYPASS)
     h.session.submit("look at big.py")
     h.wait_for(Event.TURN_FINISHED)
 
@@ -358,7 +358,7 @@ def test_a_whole_read_is_still_deduped_but_a_range_after_it_is_answered(
         _call("read_file", "c2", path="mod.py"),
         _call("read_file", "c3", path="mod.py", offset=50, limit=2),
         sse_turn("done"))
-    h = harness(mode=Mode.BYPASS, optimize=0.0)
+    h = harness(mode=Mode.BYPASS)
     h.session.submit("read it")
     h.wait_for(Event.TURN_FINISHED)
 
@@ -374,7 +374,7 @@ def test_a_generated_file_note_is_not_recorded_as_the_file(gateway, harness, tmp
         _call("read_file", "c1", path="package-lock.json"),
         _call("read_file", "c2", path="package-lock.json"),
         sse_turn("done"))
-    h = harness(mode=Mode.BYPASS, optimize=0.0)
+    h = harness(mode=Mode.BYPASS)
     h.session.submit("check the lockfile")
     h.wait_for(Event.TURN_FINISHED)
 
@@ -788,7 +788,7 @@ def test_after_an_edit_the_file_is_not_claimed_to_be_in_context(gateway, harness
         _call("edit_file", "c2", path="mod.py", old_text="line 50\n", new_text="line fifty\n"),
         _call("read_file", "c3", path="mod.py"),
         sse_turn("done"))
-    h = harness(mode=Mode.BYPASS, optimize=0.0)
+    h = harness(mode=Mode.BYPASS)
     h.session.submit("edit then re-read")
     h.wait_for(Event.TURN_FINISHED)
 
@@ -808,7 +808,7 @@ def test_edit_drops_the_dedupe_entry_even_when_bytes_are_restored(
         _call("edit_file", "c2", path="mod.py", old_text="line 50\n", new_text="line fifty\n"),
         _call("edit_file", "c3", path="mod.py", old_text="line fifty\n", new_text="line 50\n"),
         sse_turn("done"))
-    h = harness(mode=Mode.BYPASS, optimize=0.0)
+    h = harness(mode=Mode.BYPASS)
     h.session.submit("edit twice")
     h.wait_for(Event.TURN_FINISHED)
     assert h.session.state["session_reads"] == {}

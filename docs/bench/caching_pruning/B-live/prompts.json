@@ -1,0 +1,17 @@
+[
+ {
+  "name": "review",
+  "prompt": "Go through every Python file in lib/ and tell me which functions have no docstring. Give me one list per file. Do not change any file.",
+  "max_minutes": 8
+ },
+ {
+  "name": "explain",
+  "prompt": "Explain what each module in lib/ does, two sentences per module, and for each one name the function you would rewrite first and say why. Then tell me which two modules are most alike. Do not change any file.",
+  "max_minutes": 8
+ },
+ {
+  "name": "standard",
+  "prompt": "Add coupon codes to the shop. Add apply_coupon(amount, code) to shop/price.py: SAVE10 takes 10% off, FLAT5 takes 5.00 off but never below zero, and any other code raises ValueError. Update place_order in shop/orders.py to take an optional coupon keyword argument, applied to the subtotal before tax. Write tests for both and run the full test suite.",
+  "max_minutes": 10
+ }
+]

@@ -97,7 +97,7 @@ it. Your API key lives in the system keychain; the UI only ever sees a hint
 
 CLI agents hide two dozen slash commands behind `/help`. Here the same power
 is layered: clickable pills for what you change often, **⌘K** for everything
-by name *or* by what it does (typing "cheap" finds token savings, `rtsm`
+by name *or* by what it does (typing "spend" finds smart routing, `rtsm`
 matches Routing: Smart), and **⌘,** for grouped settings. A guided tour is
 offered — never forced.
 

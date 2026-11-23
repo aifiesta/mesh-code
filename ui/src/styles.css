@@ -649,6 +649,21 @@ body.resizing .side-resize { pointer-events: auto; }
   font-size: var(--t-xs); color: var(--ink-3); font-family: var(--sans);
   padding: 0 0 22px; letter-spacing: -.01em;
 }
+/* where the turn's tokens and money went */
+.turn-split { margin-top: 3px; opacity: .85; }
+.bill-table {
+  width: 100%; border-collapse: collapse; margin: 2px 0 10px;
+  font-family: var(--sans); font-size: var(--t-sm); font-variant-numeric: tabular-nums;
+}
+.bill-table th {
+  font-size: var(--t-2xs); color: var(--ink-3); text-transform: uppercase;
+  letter-spacing: .08em; font-weight: 400;
+}
+.bill-table th, .bill-table td { text-align: right; padding: 2px 0 2px 12px; white-space: nowrap; }
+.bill-table th:first-child, .bill-table td:first-child { text-align: left; padding-left: 0; }
+.bill-table td { color: var(--ink-2); border-top: 1px solid var(--hair); }
+.bill-table tr.sub td { color: var(--ink-3); border-top: 0; }
+.bill-table tr.sub td:first-child { padding-left: 10px; }
 
 /* thinking ---------------------------------------------------------------- */
 .thinking {
@@ -1254,7 +1269,6 @@ kbd {
   font-size: var(--t-2xs); text-transform: uppercase; letter-spacing: .08em;
   padding: 2px 6px; border-radius: var(--r-xs); font-weight: 650;
 }
-.tag.beta { background: var(--warn-film); color: var(--warn); }
 .tag.now { background: var(--brand-film); color: var(--brand); }
 .tag.never { background: var(--danger-film); color: var(--danger); }
 .tag.think { background: var(--film-3); color: var(--ink-3); }
@@ -1290,9 +1304,7 @@ kbd {
 .toggle.on::before { background: linear-gradient(135deg, var(--brand), var(--brand-2)); box-shadow: none; }
 .toggle.on .knob { transform: translateX(14px); background: #ffffff; }
 
-.dial { display: flex; align-items: center; gap: 14px; }
 input[type=range] { accent-color: var(--brand); flex: 1; max-width: 270px; }
-.dial-value { font-family: var(--sans); font-size: var(--t-sm); color: var(--ink-2); min-width: 36px; }
 .stepper { display: flex; align-items: center; gap: 11px; }
 .stepper input { width: 84px; font-family: var(--sans); }
 .stepper-note { font-size: var(--t-sm); color: var(--ink-3); }

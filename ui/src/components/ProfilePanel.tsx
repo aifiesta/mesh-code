@@ -1,5 +1,6 @@
 import { IconExternal } from './Chevron'
 import type { Profile } from '../types'
+import { useMoney } from '../money'
 
 /** Account and session state. Never renders the API key itself — see
  *  Engine.profile() for why a hint is the whole point. */
@@ -9,6 +10,7 @@ export function ProfilePanel({ profile, sessionCost, sessionTokens, onManageKey 
   sessionTokens: number
   onManageKey: () => void
 }) {
+  const { money } = useMoney()
   if (!profile) {
     return <div className="profile"><div className="profile-empty">Waiting for the engine…</div></div>
   }
@@ -30,7 +32,7 @@ export function ProfilePanel({ profile, sessionCost, sessionTokens, onManageKey 
       </button>
 
       <div className="profile-head">This session</div>
-      <Row label="Spent" value={`$${sessionCost.toFixed(4)}`} mono accent />
+      <Row label="Spent" value={money(sessionCost, (n) => '$' + n.toFixed(4))} mono accent />
       <Row label="Tokens" value={sessionTokens.toLocaleString()} mono />
 
       {profile.lifetime && (
@@ -41,7 +43,7 @@ export function ProfilePanel({ profile, sessionCost, sessionTokens, onManageKey 
               ⓘ
             </span>
           </div>
-          <Row label="Spent" value={`$${profile.lifetime.cost.toFixed(4)}`} mono accent />
+          <Row label="Spent" value={money(profile.lifetime.cost, (n) => '$' + n.toFixed(4))} mono accent />
           <Row label="Tokens" value={profile.lifetime.tokens.toLocaleString()} mono />
           <Row label="Turns" value={profile.lifetime.turns.toLocaleString()} mono />
         </>
