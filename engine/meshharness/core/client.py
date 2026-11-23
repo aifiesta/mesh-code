@@ -143,10 +143,6 @@ def with_cache_markers(messages: list) -> list:
     return out
 
 
-# llama-server reads only the flat field, which stops at "high".
-_FLAT_LEVELS = ("none", "low", "medium", "high")
-
-
 def build_payload(messages: list, cfg: dict, tools: Optional[list] = None,
                   target=None) -> dict:
     """Build the /chat/completions request body from session config.
@@ -157,9 +153,9 @@ def build_payload(messages: list, cfg: dict, tools: Optional[list] = None,
       - models / fallback_models -> `models` ordered fallback list (a
         policy tier's own chain wins over the user's list)
       - weight_profile -> sent with model:"auto"
-      - reasoning_effort -> `reasoning: {"effort": …}` for Mesh, whose flat
-        `reasoning_effort` field is deprecated and stops at "high"; a local
-        server still gets the flat field. None means "don't send".
+      - reasoning_effort -> `reasoning: {"effort": …}`; Mesh's flat
+        `reasoning_effort` field is deprecated and stops at "high". None
+        means "don't send".
     """
     local = bool(target and target.local)
     payload: dict = {
@@ -175,12 +171,8 @@ def build_payload(messages: list, cfg: dict, tools: Optional[list] = None,
             payload["exclude_models"] = list(cfg["exclude_models"])
         if cfg.get("weight_profile"):
             payload["weight_profile"] = cfg["weight_profile"]
-    level = cfg.get("reasoning_effort")
-    if level and (target is None or target.supports_reasoning_effort):
-        if local:
-            payload["reasoning_effort"] = level if level in _FLAT_LEVELS else "high"
-        else:
-            payload["reasoning"] = {"effort": level}
+    if cfg.get("reasoning_effort") and (target is None or target.supports_reasoning_effort):
+        payload["reasoning"] = {"effort": cfg["reasoning_effort"]}
     if target:
         for k, v in target.request_defaults.items():
             payload.setdefault(k, v)
