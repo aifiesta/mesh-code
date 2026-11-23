@@ -498,6 +498,9 @@ class Session:
         self.state["_turn_tool_calls"] = 0
         self.state["_turn_files"] = []
         self.state.pop("_verify_fired", None)
+        # Which turn this is, so a plan revised inside it can keep its ticks
+        # while a plan made in a later turn starts clean (see _plan_tool).
+        self.state["_turn_id"] = turn_id
 
         # Held on the session (not as locals) so _status() can publish the
         # running totals mid-turn. turn_model starts EMPTY on purpose: under
@@ -1794,11 +1797,21 @@ class Session:
             steps = args.get("steps")
             if not isinstance(steps, list) or not steps:
                 return "Error: create_plan requires a non-empty `steps` list."
-            plan = Plan(steps, previous=self.state.get("plan"))
+            # Ticks carry over only when the model REVISES a plan it made in
+            # this same turn. A plan made in a later turn is a new task: a step
+            # that shares a title with a finished one ("Run the tests") has
+            # not been done again, and pre-ticking it let the turn end with
+            # the checklist, and the project journal, claiming work nobody did.
+            prev = self.state.get("plan")
+            turn = self.state.get("_turn_id")
+            same_turn = (prev is not None and turn is not None
+                         and self.state.get("_plan_turn") == turn)
+            plan = Plan(steps, previous=prev if same_turn else None)
             if not plan.steps:
                 return "Error: all steps were empty after trimming whitespace."
             plan.begin()
             self.state["plan"] = plan
+            self.state["_plan_turn"] = turn
             self.state["_plan_nudged"] = False
             self.state["_plan_quiet"] = 0
             self.emit(Event.PLAN_UPDATED, **plan.to_dict())

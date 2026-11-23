@@ -267,3 +267,41 @@ def test_an_old_chat_that_still_calls_the_tick_tool_is_answered(gateway, harness
     result = [m["content"] for m in gateway.requests[-1]["messages"] if m.get("role") == "tool"][-1]
     assert result.startswith("Step 1 → completed.")
     assert "put `step` on your tool calls" in result
+
+
+def _make_plan_then_work(steps, step_done):
+    return [sse_turn(tool_calls=[_call("create_plan", steps=steps)]),
+            sse_turn(tool_calls=[_call("run_bash", command="true", step=step_done)])]
+
+
+def test_a_plan_revised_in_the_same_turn_keeps_its_ticks(gateway, harness):
+    gateway.script(
+        *_make_plan_then_work(["read the code", "fix the bug", "run the tests"], 2),
+        sse_turn(tool_calls=[_call("create_plan", steps=["read the code", "fix the bug properly", "run the tests"])]),
+        sse_turn("Stopping here for now."))
+    h = harness(mode=Mode.BYPASS)
+    h.session.submit("fix the bug")
+    h.wait_for(Event.TURN_FINISHED)
+    assert _statuses(h.session.state["plan"]) == ["completed", "in_progress", "pending"]
+
+
+def test_a_plan_made_in_a_later_turn_does_not_inherit_ticks(gateway, harness):
+    gateway.script(
+        *_make_plan_then_work(["read the code", "fix the bug", "run the tests"], 3),
+        sse_turn("Fixed, and the tests pass."),
+        # Turn 2, a new task whose plan reuses two finished titles. The model
+        # does step 2 and stops: "run the tests" was never run in this turn.
+        *_make_plan_then_work(["read the code", "add the feature", "run the tests"], 2),
+        sse_turn("Added the feature."))
+    h = harness(mode=Mode.BYPASS)
+    h.session.submit("fix the bug")
+    first = h.wait_for(Event.TURN_FINISHED)
+    assert first["data"]["plan"]["complete"]
+    h.session.submit("now add the feature")
+    second = h.wait_for(Event.TURN_FINISHED, min_count=2)
+
+    new_plan = [p for p in _plans(h) if "add the feature" in [s["title"] for s in p["steps"]]][0]
+    assert [s["status"] for s in new_plan["steps"]] == ["in_progress", "pending", "pending"], \
+        "a new task's plan starts clean, whatever the old plan's titles"
+    assert [s["status"] for s in second["data"]["plan"]["steps"]] == ["completed", "in_progress", "pending"]
+    assert not second["data"]["plan"]["complete"], "the turn must not claim the tests were run"
