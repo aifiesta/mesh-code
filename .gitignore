@@ -7,6 +7,8 @@ __pycache__/
 packaging/out/
 packaging/build/
 packaging/engine-dist/
+packaging/llama-dist/
+packaging/llama-cache/
 .pytest_cache/
 .DS_Store
 *.egg-info/

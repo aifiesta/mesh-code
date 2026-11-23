@@ -7,15 +7,16 @@
 # Three stages, in order — each depends on the one before it:
 #   1. the UI compiles to static assets
 #   2. the engine freezes into a binary that carries its own Python
-#   3. electron-builder wraps both into a native installer
+#   3. the llama-server build for local models is fetched and checked
+#   4. electron-builder wraps them into a native installer
 set -euo pipefail
 cd "$(dirname "$0")/.."
 TARGET="${1:-}"
 
-echo "==> 1/3  building the UI"
+echo "==> 1/4  building the UI"
 ( cd ui && npm ci --silent && npm run build )
 
-echo "==> 2/3  freezing the engine (this is what makes the app standalone)"
+echo "==> 2/4  freezing the engine (this is what makes the app standalone)"
 PY=python3; command -v python3 >/dev/null 2>&1 || PY=python
 "$PY" -m venv .build-venv
 # Windows venvs put activate under Scripts/.
@@ -66,7 +67,14 @@ fi
 kill "$CHECK_PID" 2>/dev/null || true
 wait "$CHECK_PID" 2>/dev/null || true
 
-echo "==> 3/3  packaging the app"
+echo "==> 3/4  fetching the local model runtime"
+FETCH_TARGET="$TARGET"
+if [ -z "$FETCH_TARGET" ]; then
+  case "$(uname -s)" in Darwin) FETCH_TARGET=mac ;; MINGW*|MSYS*|CYGWIN*) FETCH_TARGET=win ;; *) FETCH_TARGET=linux ;; esac
+fi
+./packaging/fetch-llama.sh "$FETCH_TARGET"
+
+echo "==> 4/4  packaging the app"
 ( cd desktop
   npm ci --no-audit --no-fund
   # --publish never: with GH_TOKEN in the environment electron-builder would
