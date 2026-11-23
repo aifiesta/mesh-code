@@ -144,9 +144,12 @@ class FakeGateway:
                     outer.requests.append(payload)
                     outer.headers.append({k.lower(): v for k, v in self.headers.items()})
                     lines = outer._turns.pop(0) if outer._turns else sse_turn("(no script)")
+                # "__status__:CODE[:BODY]" answers with a plain HTTP error.
                 if lines and lines[0].startswith("__status__:"):
-                    code = int(lines[0].split(":", 1)[1])
-                    body = json.dumps({"error": {"message": f"scripted {code}"}}).encode()
+                    _, code, *text = lines[0].split(":", 2)
+                    code = int(code)
+                    body = (text[0].encode() if text else
+                            json.dumps({"error": {"message": f"scripted {code}"}}).encode())
                     self.send_response(code)
                     self.send_header("content-type", "application/json")
                     self.send_header("content-length", str(len(body)))
@@ -177,17 +180,6 @@ class FakeGateway:
                     self.send_header("content-type", "application/json")
                     self.end_headers()
                     self.wfile.write(json.dumps({"results": []}).encode())
-                    return
-                # "__status__:422:<body>" as the only line answers with a
-                # plain HTTP error instead of a stream.
-                if lines and lines[0].startswith("__status__:"):
-                    _, code, text = lines[0].split(":", 2)
-                    raw = text.encode()
-                    self.send_response(int(code))
-                    self.send_header("content-type", "application/json")
-                    self.send_header("content-length", str(len(raw)))
-                    self.end_headers()
-                    self.wfile.write(raw)
                     return
                 self.send_response(200)
                 self.send_header("content-type", "text/event-stream")

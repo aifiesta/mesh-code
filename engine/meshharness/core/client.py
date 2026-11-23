@@ -245,10 +245,6 @@ def reasoning_refusal(err) -> "dict | None":
     return {"accepted": [lv for lv in REASONING_LEVELS if lv in accepted]}
 
 
-def is_reasoning_rejection(err) -> bool:
-    return reasoning_refusal(err) is not None
-
-
 def nearest_level(wanted: str, accepted, refused=()) -> "str | None":
     """The accepted level closest to the one asked for, or None.
 
