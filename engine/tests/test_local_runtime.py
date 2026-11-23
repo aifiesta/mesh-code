@@ -31,7 +31,7 @@ def test_tar_extract_keeps_only_the_server_and_libraries_and_refuses_escapes(tmp
     })
     into = tmp_path / "rt"
     server = runtime.install_from_archive(archive, into)
-    names = sorted(p.name for p in into.iterdir())
+    names = sorted(p.name for p in into.iterdir() if p.name != runtime.COMPLETE)
     assert server.name == runtime.SERVER
     assert names == sorted(["LICENSE", "libggml.0.dylib", "libllama.so.0.7.0", runtime.SERVER]) or \
         sys.platform == "win32"
@@ -84,6 +84,7 @@ def test_locate_prefers_env_then_a_downloaded_variant_then_a_matching_bundle(tmp
     downloaded = rt / "b1" / "darwin-arm64-metal" / runtime.SERVER
     downloaded.parent.mkdir(parents=True)
     downloaded.write_text("x")
+    (downloaded.parent / runtime.COMPLETE).write_text("ok")
     monkeypatch.delenv("MESH_LLAMA_SERVER", raising=False)
     monkeypatch.delenv("MESH_LLAMA_DIR", raising=False)
     monkeypatch.delenv("MESH_LLAMA_VARIANT", raising=False)
@@ -109,3 +110,21 @@ def test_locate_prefers_env_then_a_downloaded_variant_then_a_matching_bundle(tmp
     monkeypatch.setenv("MESH_LLAMA_SERVER", str(tmp_path / "missing"))
     monkeypatch.delenv("MESH_LLAMA_DIR")
     assert runtime.locate(rt, "b1", "linux-x64-cpu") is None
+
+
+def test_a_half_extracted_build_is_not_installed(tmp_path, monkeypatch):
+    """An extraction cut short (app quit, disk full) left a server binary
+    with missing libraries that counted as installed forever."""
+    for var in ("MESH_LLAMA_SERVER", "MESH_LLAMA_DIR", "MESH_LLAMA_VARIANT", "MESH_LLAMA_TAG"):
+        monkeypatch.delenv(var, raising=False)
+    rt = tmp_path / "runtime"
+    half = rt / "b1" / "darwin-arm64-metal"
+    half.mkdir(parents=True)
+    (half / runtime.SERVER).write_text("x")             # no marker: extraction never finished
+    assert runtime.locate(rt, "b1", "darwin-arm64-metal") is None
+
+    archive = tmp_path / "llama.tar.gz"
+    _tar(archive, {"llama-b1/llama-server": b"bin", "llama-b1/libggml.dylib": b"lib"})
+    runtime.install_from_archive(archive, half)
+    assert runtime.locate(rt, "b1", "darwin-arm64-metal") == half / runtime.SERVER
+    assert not half.with_name(half.name + ".partial").exists()

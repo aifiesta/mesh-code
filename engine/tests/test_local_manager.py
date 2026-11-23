@@ -209,3 +209,65 @@ def test_a_comfortable_installed_model_beats_downloading_the_recommendation(laye
     assert layer.default_id() == "local/big", "a tight install does not stand in for the recommendation"
     layer.state["installed"] = {"local/huge": "x", "local/mid": "y"}
     assert layer.default_id() == "local/mid"
+
+
+def test_ready_target_never_blocks_and_loads_in_the_background(layer):
+    """While the model is downloaded but not loaded, Smart routing gets None
+    (the turn goes to the cloud) and the load starts behind it."""
+    layer.boot()
+    assert _wait(lambda: "local/tiny" in layer.installed_ids())
+    assert layer.server.state == "stopped"
+    t0 = time.time()
+    assert layer.ready_target() is None
+    assert time.time() - t0 < 1.0
+    assert _wait(lambda: layer.server.state == "ready")
+    target = layer.ready_target()
+    assert target is not None and target.local and target.context_limit == 32768
+    assert layer.context_window() == 32768
+
+
+def test_a_stop_from_the_app_holds_and_start_loads_again(layer):
+    layer.boot()
+    assert _wait(lambda: "local/tiny" in layer.installed_ids())
+    layer.target_for("local/tiny")
+    layer.server_action("stop")
+    assert layer.server.state == "stopped" and layer.status()["server"]["held"]
+    assert layer.ready_target() is None
+    time.sleep(0.5)
+    assert layer.server.state == "stopped", "a stop must stay a stop"
+    layer.server_action("start")
+    assert layer.server.state == "ready" and not layer.server.held
+
+
+def test_the_idle_unload_frees_the_process_and_the_next_use_reloads(layer, monkeypatch):
+    layer.boot()
+    assert _wait(lambda: "local/tiny" in layer.installed_ids())
+    layer.target_for("local/tiny")
+    proc = layer.server._proc
+    layer.cfg["local_idle_unload_min"] = 1
+    layer.server.last_used -= 120
+    assert layer.server.unload_if_idle(60)
+    assert proc.poll() is not None and layer.server.state == "stopped" and not layer.server.held
+    assert layer.ready_target() is None                      # loads again in the background
+    assert _wait(lambda: layer.server.state == "ready")
+
+
+def test_no_download_without_a_yes_and_none_when_off(layer):
+    layer.cfg["local_auto_setup"] = False
+    layer.boot()
+    st = layer.status()
+    assert st["offer"] and st["offer"]["model"] == "local/tiny" and st["jobs"] == []
+    layer.on_setting("local_enabled", False)
+    assert layer.status()["offer"] is None
+    with pytest.raises(ValueError, match="turned off"):
+        layer.install("local/tiny")
+
+
+def test_a_download_that_would_fill_the_disk_is_refused(layer, monkeypatch):
+    layer.cfg["local_auto_setup"] = False
+    layer.boot()
+    from collections import namedtuple
+    Usage = namedtuple("Usage", "total used free")
+    monkeypatch.setattr(manager_mod.shutil, "disk_usage", lambda p: Usage(10, 10, 100))
+    with pytest.raises(ValueError, match="free some space"):
+        layer.install("local/tiny")

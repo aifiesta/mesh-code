@@ -92,49 +92,68 @@ def test_ensure_after_a_cancelled_load_waits_for_the_same_process(local_dir, fak
     s.stop()
 
 
-def test_crash_triggers_a_restart_then_gives_up_after_the_budget(local_dir, fake_bin, monkeypatch):
-    monkeypatch.setenv("FAKE_LLAMA_CRASH_AFTER_S", "2")
-    monkeypatch.setattr(srv_mod, "RESTART_DELAYS_S", (0.1, 0.1))
+def test_a_process_that_exits_on_its_own_is_not_restarted(local_dir, fake_bin, monkeypatch):
+    """A crash, or the user killing it to get the memory back: it stays
+    stopped until Start, instead of being started again at once."""
     monkeypatch.setattr(srv_mod, "WATCH_INTERVAL_S", 0.1)
     states = []
     s = srv_mod.LocalServer(local_dir, on_state=lambda d: states.append(d["state"]))
     _ensure(s, fake_bin)
-    deadline = time.time() + 15
-    while s.state != "failed" and time.time() < deadline:
-        time.sleep(0.1)
-    assert s.state == "failed", states
-    assert states.count("restarting") == 2 and "keeps crashing" in (s.error or "")
-    assert "stopped" not in states[:-1]           # restarts never announce a stop
+    os.kill(s._proc.pid, 9)
+    deadline = time.time() + 5
+    while s.state != "crashed" and time.time() < deadline:
+        time.sleep(0.05)
+    time.sleep(0.5)
+    assert s.state == "crashed" and s._proc is None and s.held
+    assert "starting" not in states[states.index("crashed"):]
+    with pytest.raises(srv_mod.LocalServerError, match="Start"):
+        _ensure(s, fake_bin)
+    s.release()
+    _ensure(s, fake_bin)
+    assert s.state == "ready"
     s.stop()
 
 
-def test_stop_during_a_restart_is_not_blocked_by_the_load(local_dir, fake_bin, monkeypatch):
-    monkeypatch.setenv("FAKE_LLAMA_CRASH_AFTER_S", "2")   # past the first ready, even on a slow runner
-    monkeypatch.setenv("FAKE_LLAMA_LOAD_S", "0")
-    monkeypatch.setattr(srv_mod, "RESTART_DELAYS_S", (0.2, 0.2))
-    monkeypatch.setattr(srv_mod, "WATCH_INTERVAL_S", 0.1)
+def test_a_user_stop_holds_until_start_but_an_idle_unload_does_not(local_dir, fake_bin):
     s = srv_mod.LocalServer(local_dir)
     _ensure(s, fake_bin)
-    deadline = time.time() + 5
-    while s.state != "restarting" and time.time() < deadline:
-        time.sleep(0.02)
-    assert s.state == "restarting"
-    monkeypatch.setenv("FAKE_LLAMA_LOAD_S", "20")   # the restarted process will load slowly
-    t0 = time.time()
     s.stop()
-    assert time.time() - t0 < 3
-    time.sleep(0.8)
-    assert s.state == "stopped" and s._proc is None
+    assert s.state == "stopped" and s.held
+    with pytest.raises(srv_mod.LocalServerError):
+        _ensure(s, fake_bin)
+    s.release()
+    _ensure(s, fake_bin)
+    s.stop(hold=False)
+    assert not s.held
+    _ensure(s, fake_bin)                  # the next use loads it again
+    assert s.state == "ready"
+    s.stop()
 
 
-def test_recover_forgets_a_dead_process_so_ensure_restarts(local_dir, fake_bin, monkeypatch):
+def test_idle_unload_stops_the_process_and_frees_it(local_dir, fake_bin):
+    s = srv_mod.LocalServer(local_dir)
+    _ensure(s, fake_bin)
+    proc = s._proc
+    assert not s.unload_if_idle(3600)                 # used just now
+    s.begin_use()
+    s.last_used -= 10
+    assert not s.unload_if_idle(5)                    # a hop is in flight
+    s.end_use()
+    s.last_used -= 10
+    assert s.unload_if_idle(5)
+    assert s.state == "stopped" and not s.held and proc.poll() is not None
+    assert not s.unload_if_idle(5)                    # nothing left to unload
+
+
+def test_recover_forgets_a_dead_process_and_holds_it(local_dir, fake_bin, monkeypatch):
     monkeypatch.setattr(srv_mod, "WATCH_INTERVAL_S", 30)   # keep the watchdog out of this test
     s = srv_mod.LocalServer(local_dir)
     info = _ensure(s, fake_bin)
     os.kill(s._proc.pid, 9)
     time.sleep(0.3)
     s.recover()
-    assert s.state == "crashed"
+    assert s.state == "crashed" and s.held
+    s.release()
     info2 = _ensure(s, fake_bin)
     assert s.state == "ready" and info2.port != info.port
     s.stop()

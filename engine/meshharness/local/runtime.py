@@ -11,6 +11,7 @@ import zipfile
 from pathlib import Path
 
 SERVER = "llama-server.exe" if sys.platform == "win32" else "llama-server"
+COMPLETE = ".complete"
 _LIB_SUFFIXES = (".dylib", ".so", ".dll", ".metallib")
 
 
@@ -22,7 +23,9 @@ def locate(runtime_dir: Path, tag: str, variant: str) -> Path | None:
     if override and Path(override).is_file():
         return Path(override)
     downloaded = runtime_dir / tag / variant / SERVER
-    if downloaded.is_file():
+    # The marker is written last: a build whose extraction was cut short
+    # (app quit, disk full) is not installed, and is fetched again.
+    if downloaded.is_file() and (downloaded.parent / COMPLETE).is_file():
         return downloaded
     bundled_dir = os.environ.get("MESH_LLAMA_DIR")
     if (bundled_dir and os.environ.get("MESH_LLAMA_VARIANT") == variant
@@ -35,7 +38,13 @@ def locate(runtime_dir: Path, tag: str, variant: str) -> Path | None:
 
 def install_from_archive(archive: Path, into: Path) -> Path:
     """Extract only the server and its shared libraries, refusing anything
-    that would land outside `into`. Returns the server path."""
+    that would land outside `into`. Returns the server path.
+
+    The files go to a staging folder first and are moved into place only
+    once all of them are there, with a marker `locate` looks for."""
+    final = into
+    into = final.with_name(final.name + ".partial")
+    shutil.rmtree(into, ignore_errors=True)
     into.mkdir(parents=True, exist_ok=True)
     if archive.suffix == ".zip":
         with zipfile.ZipFile(archive) as z:
@@ -73,7 +82,10 @@ def install_from_archive(archive: Path, into: Path) -> Path:
     if sys.platform == "darwin":
         subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(into)],
                        capture_output=True, check=False)
-    return server
+    (into / COMPLETE).write_text("ok\n")
+    shutil.rmtree(final, ignore_errors=True)
+    os.replace(into, final)
+    return final / SERVER
 
 
 def version(server: Path) -> str:

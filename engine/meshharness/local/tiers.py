@@ -9,7 +9,10 @@ from .hardware import HardwareProfile
 
 _GB = 1024 ** 3
 CTX_LADDER = (8192, 16384, 32768, 65536, 131072, 262144)
-CTX_MIN = 32768   # an agent loop below this re-compacts constantly
+CTX_MIN = 32768   # the automatic pick never goes below this
+# A window the user sets below CTX_MIN (16k on a low-memory Mac) is honoured:
+# it was once silently raised back to 32k. Never below this.
+CTX_FLOOR = 16384
 # Metal keeps weights in unified memory; past ~75 % the OS starts paging.
 METAL_WORKING_SET = 0.75
 VRAM_USABLE = 0.9
@@ -86,13 +89,16 @@ def choose(manifest: dict, hw: HardwareProfile, *, keep_free_gb: float = 4.0,
     candidates = sorted(
         (m for m in manifest["models"] if m.get("tool_calls", "native") != "none"),
         key=lambda m: m.get("quality_rank", 0), reverse=True)
+    least = CTX_MIN
+    if ctx_override and ctx_override < CTX_MIN:
+        least = max(CTX_FLOOR, ctx_override)
     for model in candidates:
-        tight = not fits(model, CTX_MIN, hw, keep_free_gb, conservative=True)
-        if tight and (conservative or not fits(model, CTX_MIN, hw, keep_free_gb)):
+        tight = not fits(model, least, hw, keep_free_gb, conservative=True)
+        if tight and (conservative or not fits(model, least, hw, keep_free_gb)):
             continue
-        ctx = CTX_MIN
+        ctx = least
         for step in CTX_LADDER:
-            if tight or step < CTX_MIN:
+            if tight or step < least:
                 continue
             if step > int(model.get("ctx_max") or step):
                 break

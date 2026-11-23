@@ -1,4 +1,10 @@
-"""The llama-server process: start on demand, keep alive, stop on quit."""
+"""The llama-server process: start on demand, stop when idle or asked, stop on quit.
+
+A process that exits on its own (a crash, or the user killing it to get
+memory back) is not started again behind the user's back: the server is
+held stopped until the user presses Start. A stop from the app is held the
+same way. Only an idle unload (`stop(hold=False)`) lets the next use start
+it again."""
 from __future__ import annotations
 
 import os
@@ -15,8 +21,6 @@ from pathlib import Path
 import httpx
 
 STOP_GRACE_S = 5
-RESTART_DELAYS_S = (1, 4, 16)
-RESTART_WINDOW_S = 600
 WATCH_INTERVAL_S = 1.0
 LOG_MAX_BYTES = 5 * 1024 * 1024
 _LOAD_FLOOR_S = 60
@@ -54,26 +58,29 @@ class LocalServer:
         self._model_bytes = 0
         self._lock = threading.RLock()
         self._stopping = False
-        self._restarting = False
-        self._restarts: list[float] = []
+        # Held: stopped by the user or by something outside the app; only
+        # release() (the Start button) lets ensure() start it again.
+        self.held = False
+        self.last_used = time.monotonic()
+        self._in_use = 0
         self.state = "stopped"
         self.error: str | None = None
         self.started_at: float | None = None
         self._kill_orphan()
 
     def ensure(self, server_bin: Path, argv: list[str], *, model_id: str, alias: str, ctx: int,
-               model_bytes: int = 0, cancel: threading.Event | None = None, notify=None,
-               unless_stopping: bool = False) -> ServerInfo:
+               model_bytes: int = 0, cancel: threading.Event | None = None, notify=None) -> ServerInfo:
         """Return a ready server running exactly this argv, starting or
         swapping as needed. Blocks until /health answers 200."""
         with self._lock:
-            if unless_stopping and self._stopping:
-                raise LocalServerError("stopped before the restart")
             same = (self._info and self._proc and self._proc.poll() is None and self._argv == argv)
             if same and self.state == "ready":
+                self.last_used = time.monotonic()
                 return self._info  # type: ignore[return-value]
+            if self.held and not same:
+                raise LocalServerError("the local model was stopped; press Start to load it again")
             if not same:
-                self._stop_locked(quiet=self._restarting)
+                self._stop_locked(quiet=True)
                 self._bin, self._argv, self._model_bytes = server_bin, list(argv), model_bytes
                 port = _free_port()
                 key = secrets.token_urlsafe(24)
@@ -89,15 +96,48 @@ class LocalServer:
         self._wait_ready(info, cancel)
         return info  # type: ignore[return-value]
 
-    def stop(self) -> None:
+    def stop(self, *, hold: bool = True) -> None:
+        """`hold` (the default, a user's stop) keeps it stopped until
+        release(); an idle unload passes False so the next use loads it."""
         with self._lock:
+            if hold:
+                self.held = True
             self._stop_locked()
+
+    def release(self) -> None:
+        """The user pressed Start: ensure() may start the process again."""
+        with self._lock:
+            self.held = False
+            if self.state in ("crashed", "failed"):
+                self._set("stopped")
+
+    def begin_use(self) -> None:
+        with self._lock:
+            self._in_use += 1
+            self.last_used = time.monotonic()
+
+    def end_use(self) -> None:
+        with self._lock:
+            self._in_use = max(0, self._in_use - 1)
+            self.last_used = time.monotonic()
+
+    def unload_if_idle(self, idle_s: float) -> bool:
+        """Stop a ready server nobody has used for `idle_s` seconds, giving
+        its memory back. True when it was stopped."""
+        with self._lock:
+            if (idle_s <= 0 or self.state != "ready" or self._in_use
+                    or time.monotonic() - self.last_used < idle_s):
+                return False
+            self._stop_locked()
+            self.error = "unloaded after being idle"
+            return True
 
     def recover(self) -> None:
         """After a request to the server failed: if it died, forget it so
         the next ensure() starts a fresh one."""
         with self._lock:
             if self._proc and self._proc.poll() is not None:
+                self.held = True
                 self._mark_crashed()
 
     def describe(self) -> dict:
@@ -105,7 +145,7 @@ class LocalServer:
         return {"state": self.state, "model": self._info.model_id if self._info else None,
                 "port": self._info.port if self._info and self.state == "ready" else None,
                 "ctx": self._info.ctx if self._info else None, "pid": p.pid if p else None,
-                "restarts": len(self._restarts), "error": self.error, "started_at": self.started_at}
+                "held": self.held, "error": self.error, "started_at": self.started_at}
 
     def log_tail(self, lines: int = 40) -> str:
         try:
@@ -162,41 +202,26 @@ class LocalServer:
                                f"{load_timeout_s(self._model_bytes):.0f}s:\n" + self.log_tail())
 
     def _watch(self, proc: subprocess.Popen) -> None:
+        """Notice a process that ended on its own. It is not restarted: a
+        user who killed it wanted the memory back, and a crash would only
+        repeat. Held until the user presses Start."""
         while proc.poll() is None:
             time.sleep(WATCH_INTERVAL_S)
         with self._lock:
             if proc is not self._proc or self._stopping:
                 return
+            self.held = True
             self._mark_crashed()
-            now = time.monotonic()
-            self._restarts = [t for t in self._restarts if now - t < RESTART_WINDOW_S]
-            if len(self._restarts) >= len(RESTART_DELAYS_S):
-                self._set("failed", f"llama-server keeps crashing (exit {proc.returncode}):\n" + self.log_tail())
-                return
-            delay = RESTART_DELAYS_S[len(self._restarts)]
-            self._restarts.append(now)
-            self._restarting = True
-            self._set("restarting")
-            server_bin, argv, info, model_bytes = self._bin, list(self._argv), self._info, self._model_bytes
-        time.sleep(delay)
-        try:
-            self.ensure(server_bin, argv, model_id=info.model_id, alias=info.alias, ctx=info.ctx,
-                        model_bytes=model_bytes, unless_stopping=True)
-        except Exception as e:  # the watchdog thread must never die silently
-            with self._lock:
-                if not self._stopping:       # a user stop during the restart wins
-                    self._set("failed", str(e))
-        finally:
-            self._restarting = False
 
     def _mark_crashed(self) -> None:
-        self._set("crashed", f"llama-server exited (code {self._proc.returncode if self._proc else '?'})")
-        self._proc = None
+        code = self._proc.returncode if self._proc else "?"
+        self._proc, self._info = None, None
         self.pid_file.unlink(missing_ok=True)
+        self._set("crashed", f"llama-server exited (code {code}); press Start to load it again")
 
     def _stop_locked(self, *, quiet: bool = False) -> None:
-        """`quiet` is the restart path replacing its own dead process; a user
-        stop always announces itself and cancels any pending restart."""
+        """`quiet` replaces the process with another (a new model or window)
+        without announcing a stop."""
         self._stopping = True
         p = self._proc
         self._proc, self._info = None, None

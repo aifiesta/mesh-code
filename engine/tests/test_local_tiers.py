@@ -79,9 +79,19 @@ def test_gpu_off_means_the_cpu_build_and_no_offload():
 
 def test_user_context_override_is_clamped_to_what_fits():
     plan = tiers.choose(MANIFEST, _hw(18), ctx_override=16384)
-    assert plan.ctx == 32768                       # never below the minimum
+    assert plan.ctx == 16384                       # a 16k setting really applies (was raised to 32k)
     plan = tiers.choose(MANIFEST, _hw(64), ctx_override=65536)
     assert plan.ctx == 65536                       # honoured when it fits
+    plan = tiers.choose(MANIFEST, _hw(18), ctx_override=8192)
+    assert plan.ctx == tiers.CTX_FLOOR             # never below 16k
+
+
+def test_a_16_gb_mac_runs_the_9b_model_at_32k_and_16k_when_asked():
+    real = json.loads((Path(tiers.__file__).parent / "manifest.json").read_text())
+    plan = tiers.choose(real, _hw(16))
+    assert plan.model["id"] == "local/qwen3.5-9b-q4" and plan.ctx == 32768
+    plan = tiers.choose(real, _hw(16), ctx_override=16384)
+    assert plan.model["id"] == "local/qwen3.5-9b-q4" and plan.ctx == 16384
 
 
 def test_server_args_carry_the_flags_tool_calling_depends_on():

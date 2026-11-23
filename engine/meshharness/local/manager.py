@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -15,6 +17,9 @@ from .server import LocalServer, LocalServerError
 
 AUTO_DOWNLOAD_LIMIT_GB = 8
 _GB = 1024 ** 3
+# A download leaves at least this much disk free after it lands.
+DISK_SPARE_GB = 2
+IDLE_CHECK_S = 30
 
 
 class LocalUnavailable(RuntimeError):
@@ -47,6 +52,9 @@ class LocalModels:
         self.server = LocalServer(local_dir, on_state=lambda _: self._emit_status())
         self.booted = threading.Event()
         self._booting = threading.Lock()   # one boot at a time
+        self._loading = threading.Lock()   # one background load at a time
+        self._closing = threading.Event()
+        threading.Thread(target=self._idle_watch, daemon=True, name="mesh-local-idle").start()
 
     def boot(self) -> None:
         """Runs on a thread at engine start; never raises. A disabled layer
@@ -80,8 +88,9 @@ class LocalModels:
             self._emit_status()
 
     def shutdown(self) -> None:
+        self._closing.set()
         self.downloads.shutdown()
-        self.server.stop()
+        self.server.stop(hold=False)
 
     def default_id(self) -> str | None:
         chosen = self.cfg.get("local_model") or self.state.get("default")
@@ -129,8 +138,17 @@ class LocalModels:
             if (plan and blocked and plan.model["id"] not in self.installed_ids()
                     and not self._job_for(plan.model["id"]) and not self.state.get("declined")):
                 needs_confirm = {"model": plan.model["id"], "bytes": plan.model["bytes"], "reason": blocked}
+            # The setup card asks before anything is fetched: a model that
+            # fits, is not on disk, not on its way, and not declined.
+            ask = None
+            if (plan and not blocked and plan.model["id"] not in self.installed_ids()
+                    and not self._job_for(plan.model["id"]) and not self.state.get("declined")
+                    and self.cfg.get("local_enabled", True)):
+                ask = {"model": plan.model["id"], "bytes": plan.model["bytes"],
+                       "label": plan.model["label"], "ctx": plan.ctx}
             return {
                 "enabled": bool(self.cfg.get("local_enabled", True)),
+                "offer": ask,
                 "booted": self.booted.is_set(),
                 "hardware": self.hw.to_dict() if self.hw else None,
                 "probe_failed": bool(self.hw and self.hw.probe_failed),
@@ -148,11 +166,20 @@ class LocalModels:
             }
 
     def install(self, model_id: str) -> None:
+        if not self.cfg.get("local_enabled", True):
+            raise ValueError("local models are turned off in Settings")
         entry = manifest_mod.model(self.manifest or {"models": []}, model_id)
         if not entry:
             raise ValueError(f"unknown local model {model_id}")
         if model_id in self.installed_ids() or self._job_for(model_id):
             return
+        try:
+            free = shutil.disk_usage(self.local_dir if self.local_dir.exists() else self.local_dir.parent).free
+        except OSError:
+            free = None
+        if free is not None and free < int(entry["bytes"]) + DISK_SPARE_GB * _GB:
+            raise ValueError(f"{entry['label']} needs {int(entry['bytes']) / _GB:.1f} GB and this disk has "
+                             f"{free / _GB:.1f} GB free; free some space first")
         self._ensure_runtime_download()
         dest = self.models_dir / entry["file"]
         self.downloads.enqueue(kind="model", target=model_id, url=manifest_mod.model_url(entry),
@@ -196,13 +223,71 @@ class LocalModels:
         self._emit_status()
 
     def server_action(self, action: str) -> None:
+        """stop: held stopped until start. start/restart: load it now
+        (blocks until loaded; callers run it off the event loop)."""
         if action == "stop":
-            self.server.stop()
-        elif action == "restart":
-            self.server.stop()
+            self.server.stop(hold=True)
+        elif action in ("start", "restart"):
+            if action == "restart":
+                self.server.stop(hold=False)
+            self.server.release()
             if self.plan and self.plan.model["id"] in self.installed_ids():
                 self.target_for(self.plan.model["id"])
         self._emit_status()
+
+    # -- what Smart routing asks ------------------------------------------
+    def ready_target(self) -> Target | None:
+        """The local model if it can answer right now, else None — never
+        blocks. A model that is downloaded but not loaded starts loading in
+        the background; the turn that asked goes to the cloud meanwhile."""
+        if not self.cfg.get("local_enabled", True) or not self.booted.is_set():
+            return None
+        if not (self.manifest and self.hw) or self.hw.probe_failed:
+            return None
+        model_id = self.default_id()
+        if not model_id or model_id not in self.installed_ids():
+            return None
+        srv = self.server.describe()
+        if srv["state"] == "ready" and srv.get("model") == model_id:
+            try:
+                return self.target_for(model_id)      # same argv: returns at once
+            except LocalUnavailable:
+                return None
+        if not self.server.held and srv["state"] != "starting":
+            self.load_in_background()
+        return None
+
+    def load_in_background(self) -> None:
+        def _load():
+            if not self._loading.acquire(blocking=False):
+                return
+            try:
+                self.target_for(self.default_id() or "")
+            except Exception:
+                pass                # the status already says why
+            finally:
+                self._loading.release()
+                self._emit_status()
+        threading.Thread(target=_load, daemon=True, name="mesh-local-load").start()
+
+    def context_window(self) -> int | None:
+        """The window the local model runs (or will run) at."""
+        srv = self.server.describe()
+        if srv["state"] == "ready" and srv.get("ctx"):
+            return int(srv["ctx"])
+        plan = self._plan_for(self.default_id())
+        return plan.ctx if plan else None
+
+    def _idle_watch(self) -> None:
+        """Give the memory back after the idle setting's minutes without a
+        hop. The server's own sleep switch kept the weights resident."""
+        while not self._closing.wait(IDLE_CHECK_S):
+            idle = int(self.cfg.get("local_idle_unload_min", 20) or 0) * 60
+            try:
+                if self.server.unload_if_idle(idle):
+                    self._emit_status()
+            except Exception:
+                pass
 
     def refresh(self, *, force: bool = False) -> bool:
         """Fetch the remote manifest; True when it changed what we know."""
@@ -243,17 +328,22 @@ class LocalModels:
             else:
                 # Stopping waits on the process; never do that on the event loop.
                 threading.Thread(target=self._stop_and_report, daemon=True).start()
+                for job in self.downloads.active():
+                    self.downloads.cancel(job["id"])
         elif key == "local_use_when_slow" and value:
             self._auto_install()          # the gate that blocked the download just opened
         self._on_catalog_change()
         self._emit_status()
 
     def _stop_and_report(self) -> None:
-        self.server.stop()
+        self.server.stop(hold=False)
         self._emit_status()
 
     def _auto_install(self) -> None:
-        if (self.cfg.get("local_auto_setup", True) and not self.state.get("declined")
+        """Only when the user asked for downloads without asking; otherwise
+        the setup card asks first (status()["offer"])."""
+        if (self.cfg.get("local_enabled", True) and self.cfg.get("local_auto_setup", False)
+                and not self.state.get("declined")
                 and not self._comfortable_installed() and self.plan
                 and self.plan.model["id"] not in self.installed_ids() and not self._blocked(self.plan)):
             self.install(self.plan.model["id"])
@@ -297,9 +387,10 @@ class LocalModels:
             if not self._ensure_runtime_download(plan.variant):
                 raise LocalUnavailable(f"no llama-server build is pinned for {plan.variant}", permanent=True)
             raise LocalUnavailable("the local runtime is still downloading")
-        idle = int(self.cfg.get("local_idle_unload_min", 20) or 0) * 60
+        # Idle unload is the engine's (_idle_watch): llama-server's own sleep
+        # switch left the weights in memory (seen live, 23 Nov 2026).
         argv = [a.replace("{model_path}", path)
-                for a in tiers.server_args(plan, self.manifest, alias=resolved, idle_unload_s=idle)]
+                for a in tiers.server_args(plan, self.manifest, alias=resolved, idle_unload_s=0)]
         try:
             info = self.server.ensure(server_bin, argv, model_id=resolved, alias=resolved, ctx=plan.ctx,
                                       model_bytes=int(entry["bytes"]), cancel=cancel, notify=notify)
