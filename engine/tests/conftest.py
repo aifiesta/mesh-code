@@ -33,6 +33,7 @@ def isolate_config_home(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(cfg, "LEGACY_CONFIG_DIR", home / "no-legacy")
     monkeypatch.setattr(cfg, "SESSIONS_DIR", home / "sessions")
     monkeypatch.setattr(cfg, "LOCAL_DIR", home / "local")
+    monkeypatch.setattr(cfg, "MIGRATIONS_FILE", home / "migrations.json")
     # Engines built in tests must never fetch real weights or the remote manifest.
     monkeypatch.setitem(cfg.DEFAULT_CONFIG, "local_auto_setup", False)
     from meshharness.local import manager as _manager

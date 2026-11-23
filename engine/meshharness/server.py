@@ -99,6 +99,8 @@ class Engine:
         # without a lock two turns finishing at once can lose a tally.
         self._usage_lock = threading.Lock()
         self.cfg = config_mod.load_config()
+        # Said once, to the first window that connects (see config.py).
+        self._switched_note = bool(self.cfg.pop("_switched_to_smart", False))
         self._catalog: list | None = None
         # The local model layer: one per engine, shared by every session.
         # Booted on a thread at start (lifespan); a problem there never
@@ -525,6 +527,12 @@ def create_app(engine: Engine, ui_dir: Path | None = None) -> FastAPI:
             fx=engine.fx_info(),
             local=engine.local.status(),
         )))
+        if engine._switched_note:
+            engine._switched_note = False
+            engine.emit(event(Event.NOTICE, None, level="info", app=True, message=(
+                "Smart routing is now on: each message goes to the model that fits it, and "
+                "lookups and small changes can run free on a local model. To keep one model "
+                "for everything, choose Pinned under Settings › Routing.")))
         try:
             while True:
                 raw = await ws.receive_text()
