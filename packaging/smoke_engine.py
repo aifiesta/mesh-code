@@ -1,11 +1,6 @@
-"""Boot a frozen engine binary and prove a client can talk to it.
-
-Usage: python packaging/smoke_engine.py <path-to-mesh-code-engine>
-
-Passes when the binary prints its {ready, port, token} line and the
-WebSocket answers with engine.ready. Needs `websockets` on sys.path, which
-the engine's own dependencies provide in any venv the engine is installed in.
-"""
+"""Boot a frozen engine binary and prove a client can talk to it:
+`python packaging/smoke_engine.py <path-to-mesh-code-engine>` passes when it
+prints {ready, port, token} and the WebSocket answers with engine.ready."""
 import asyncio
 import json
 import os

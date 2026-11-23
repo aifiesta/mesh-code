@@ -1,8 +1,5 @@
-"""The wire contract exists twice: protocol.py and ui/src/types.ts.
-
-A name added on one side and not the other is the most common way the
-two drift apart, and nothing else catches it before a user clicks.
-"""
+"""The wire contract exists twice, in protocol.py and ui/src/types.ts; a name
+added on one side only is how the two drift, and nothing else catches it."""
 import re
 from pathlib import Path
 

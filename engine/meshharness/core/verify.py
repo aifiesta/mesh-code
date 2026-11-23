@@ -24,13 +24,9 @@ _ACTION_ASK_RE = re.compile(
 
 def verify_reply(reply: str, *, tool_calls_this_turn: int,
                  user_asked_action: bool) -> "str | None":
-    """Return a short reason when the reply looks like a routing failure.
-
-    Two clear-cut signals only:
-      refusal    — the model declined or claimed it lacks tools it was given
-      hallucination — it claims to have DONE work while calling no tool
-    Anything else returns None (accept the answer).
-    """
+    """A short reason when the reply looks like a routing failure, else None:
+    the model declined or claimed it lacks tools it was given, or it claims to
+    have done work while calling no tool."""
     text = (reply or "").strip()
     if not text:
         return None                      # empty is handled by the retry ladder

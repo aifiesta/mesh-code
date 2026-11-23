@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
-"""Re-pin the local-model manifest without an app build.
-
-  packaging/pin-local-manifest.py --runtime b11796     # hash llama.cpp's assets
-  packaging/pin-local-manifest.py --models             # refresh GGUF sizes/sha256 from Hugging Face
-
-llama.cpp publishes no checksums, so the runtime assets are downloaded and
-hashed here; Hugging Face exposes each LFS file's sha256 and size through its
-tree API, so models are pinned without downloading them.
-"""
+"""Re-pin the local-model manifest without an app build: --runtime <tag>
+downloads and hashes llama.cpp's assets (it publishes no checksums); --models
+reads GGUF sizes and sha256 from Hugging Face's tree API without downloading."""
 from __future__ import annotations
 
 import argparse

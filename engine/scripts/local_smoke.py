@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
-"""Release gate for a local tier: six agent prompts against the real tools.
-
-  engine/.venv/bin/python engine/scripts/local_smoke.py [--model local/<id>] [--install]
-
-Uses the real ~/.mesh-code/local layer (installed models, bundled or
-downloaded runtime). Prints, per prompt, whether the tool call arrived
-structured or had to be parsed from text, time to first token, tokens/s,
-and the server's resident memory. Exits 1 when a tool prompt produced no
-call at all. The manifest can flip a tier default on this evidence alone.
-"""
+"""Release gate for a local tier: six agent prompts against the real tools and
+~/.mesh-code/local. Run engine/scripts/local_smoke.py [--model local/<id>]
+[--install]; exits 1 when a tool prompt produced no call at all."""
 from __future__ import annotations
 
 import argparse

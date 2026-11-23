@@ -27,12 +27,9 @@ def looks_like_tool_call(text: str) -> bool:
 
 def extract(text: str, known_tools: set, *, schemas: dict | None = None,
             id_prefix: str = "text") -> tuple[str, list, str | None]:
-    """Return (text with the calls removed, calls, reason-if-none).
-
-    Calls are `{"id", "name", "arguments": <json string>}`, the shape the
-    accumulator produces for structured calls. `schemas` maps a tool name
-    to its JSON-schema `properties`, so XML parameters are typed by the
-    tool, not guessed from their text."""
+    """Return (text with the calls removed, calls, reason-if-none). Calls use
+    the accumulator's `{"id", "name", "arguments"}` shape; `schemas` maps a tool
+    name to its JSON-schema `properties`, so XML parameters are typed by it."""
     calls: list = []
     clean = text
     quoted = _quoted_spans(text)

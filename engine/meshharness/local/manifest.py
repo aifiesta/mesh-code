@@ -1,8 +1,6 @@
-"""Which models and which llama-server build this app knows how to run.
-
-The bundled manifest is trusted; a remote one may only re-pin download
-facts (repo, file, sha256, size) per model and the runtime tag/assets.
-Anything that reaches a filesystem path or the server argv stays bundled."""
+"""Which models and llama-server build this app can run. The bundled manifest
+is trusted; a remote one may only re-pin download facts (repo, file, sha256,
+size, runtime tag/assets), never anything that reaches a path or the argv."""
 from __future__ import annotations
 
 import json

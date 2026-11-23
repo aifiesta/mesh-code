@@ -13,16 +13,8 @@ export type Action = {
   run: () => void
 }
 
-/**
- * ⌘K. The answer to "there are 24 commands and I can't find any of them".
- *
- * Two things make it work better than the slash commands it replaces.
- * First, every enum setting is expanded into one action PER OPTION —
- * "Who writes: Gateway auto" is directly runnable, so you never have to
- * learn what the policy's values are before you can change it. Second, matching
- * runs over the engine's own help text, so typing "cheap" finds the
- * settings about spend without any of them containing the word.
- */
+/** ⌘K. Each enum setting is one action per option, and matching runs over the
+ * engine's help text, so typing "cheap" finds the spend settings. */
 export function CommandPalette({ settings, extra, onSet, onClose }: {
   settings: SettingsDoc | null
   extra: Action[]
