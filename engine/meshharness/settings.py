@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .core import fx
+
 # Categories, in the order a settings screen should show them.
 CATEGORIES = [
     ("model", "Model", "Which model answers, and what it costs"),
@@ -134,6 +136,19 @@ SCHEMA: list[dict] = [
         ],
         "help": "Affects prose only — never what the assistant is allowed to do.",
         "why": "Concise is good once you trust it; explanatory is good when reviewing unfamiliar code.",
+    },
+    {
+        "key": "currency",
+        "category": "behaviour",
+        "type": "enum",
+        "label": "Currency",
+        "default": "USD",
+        "options": [
+            _opt(code, f"{c['label']} ({c['symbol']})")
+            for code, c in fx.CURRENCIES.items()
+        ],
+        "help": "Which currency costs are shown in. Mesh bills in US dollars; other currencies are converted for display.",
+        "why": "The rate comes from Frankfurter, or fawazahmed0's currency API if that fails, at most once a day. Saved chats and totals stay in dollars.",
     },
     {
         "key": "system",

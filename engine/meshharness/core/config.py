@@ -92,6 +92,8 @@ DEFAULT_CONFIG = {
     "route_effort": "auto",
     # How the assistant writes (prose only — never tool access or scope).
     "output_style": "default",
+    # Display currency for costs. Bills and totals stay in US dollars.
+    "currency": "USD",
     # Last version whose "what's new" line was shown (see whatsnew.py).
     "last_seen_version": "",
     # Models observed rejecting reasoning_effort (with tools) — skipped

@@ -7,6 +7,7 @@ import { ApprovalDialog } from './components/ApprovalDialog'
 import { CommandPalette, type Action } from './components/CommandPalette'
 import { ControlBar } from './components/ControlBar'
 import { BillLine } from './components/BillSplit'
+import { FxContext, useMoney } from './money'
 import { SettingsSheet } from './components/SettingsSheet'
 import { Wordmark } from './components/Logo'
 import { PlanCard } from './components/PlanCard'
@@ -328,6 +329,7 @@ export default function App() {
   }
 
   return (
+    <FxContext.Provider value={state.fx}>
     <div className={`app ${sideOpen ? '' : 'side-hidden'}`}>
       {!sideOpen && (
         <button className="side-show" onClick={() => setSideOpen(true)}
@@ -593,6 +595,7 @@ export default function App() {
         </main>
       )}
     </div>
+    </FxContext.Provider>
   )
 }
 
@@ -627,6 +630,7 @@ function SessionView({ s, controls, profile, railOpen, onRailResize, railResizin
   onMention: (path: string) => void
 }) {
   const scroller = useRef<HTMLDivElement>(null)
+  const { money } = useMoney()
 
   // A file preview lives in the rail now — if the rail is hidden when one
   // arrives, opening a file would otherwise do nothing visible.
@@ -735,7 +739,7 @@ function SessionView({ s, controls, profile, railOpen, onRailResize, railResizin
                 return (
                   <div className="turn-foot" key={m.id} id={`m-${m.id}`}>
                     {m.model} · {m.hops} hop{m.hops === 1 ? '' : 's'} · {m.tokens.toLocaleString()} tok ·
-                    {' '}{m.estimated ? '~' : ''}${m.cost.toFixed(6)} · {m.elapsed.toFixed(1)}s
+                    {' '}{money(m.cost, (n) => '$' + n.toFixed(6), m.estimated)} · {m.elapsed.toFixed(1)}s
                     <BillLine bill={m.bill} />
                   </div>
                 )
