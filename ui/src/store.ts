@@ -1,3 +1,4 @@
+import { USD_FX, type Fx } from './money'
 import { Ev, type Approval, type Ask, type CatalogModel, type DirEntry, type FilePreview, type Root, type Msg, type Plan, type Profile, type RouteExplain, type SettingsDoc, type Status, type ToolCard, type WireEvent } from './types'
 
 /** The thinking level as Settings names it. */
@@ -64,6 +65,8 @@ export type AppState = {
    *  of the same outcome — two successes in a row are two events. */
   keyResult: { ok: boolean; detail: string; cleared: boolean; at: number } | null
   configError: { key: string; message: string } | null
+  /** Display currency and its rate. Amounts stay in dollars; this only formats them. */
+  fx: Fx
 }
 
 export const initialState: AppState = {
@@ -82,6 +85,7 @@ export const initialState: AppState = {
   profile: null,
   keyResult: null,
   configError: null,
+  fx: USD_FX,
 }
 
 let uid = 0
@@ -209,9 +213,12 @@ export function reduce(state: AppState, action: Action): AppState {
         ? state.active : (prunedOrder[0] ?? null)
       return {
         ...state, ready: true, hasKey: !!d.has_key, sessions, order: prunedOrder,
-        settings, catalog, profile, active,
+        settings, catalog, profile, active, fx: d.fx ?? state.fx,
       }
     }
+
+    case Ev.FX:
+      return { ...state, fx: d as Fx }
 
     case Ev.SETTINGS:
       return { ...state, settings: d as SettingsDoc, configError: null }

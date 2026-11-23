@@ -81,6 +81,7 @@ class Event:
     ROUTED = "routed"                  # smart router picked a model
     SETTINGS = "settings"              # schema + current values
     CATALOG = "catalog"                # model list with context + pricing
+    FX = "fx"                          # display currency + USD exchange rate
     ROUTE_EXPLAIN = "route.explain"    # ranked candidates for a draft prompt
     CONFIG_ERROR = "config.error"      # a rejected setting, with the reason
     DIR_LISTING = "dir.listing"        # children of one workspace directory

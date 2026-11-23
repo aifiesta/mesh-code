@@ -4,6 +4,7 @@ import type { Profile, SessionSummary } from '../types'
 import { Mark } from './Logo'
 import { Caret, Chevron, IconExternal } from './Chevron'
 import { FeedbackDialog } from './FeedbackDialog'
+import { useMoney } from '../money'
 
 /**
  * Navigation, history, and account — the three things a sidebar is for.
@@ -60,6 +61,7 @@ export function Sidebar({
   resizing: boolean
   onHide: () => void
 }) {
+  const { money } = useMoney()
   const [menu, setMenu] = useState(false)
   const [feedback, setFeedback] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -191,7 +193,7 @@ export function Sidebar({
             <strong>{profile?.signed_in ? 'Mesh account' : 'No key'}</strong>
             <em>
               {profile?.models ? `${profile.models.toLocaleString()} models` : 'Not connected'}
-              {profile?.lifetime?.cost ? ` · $${profile.lifetime.cost.toFixed(2)}` : ''}
+              {profile?.lifetime?.cost ? ` · ${money(profile.lifetime.cost, (n) => '$' + n.toFixed(2))}` : ''}
             </em>
           </span>
           <span className={`account-status ${connection}`} title={`Engine ${connection}`} />

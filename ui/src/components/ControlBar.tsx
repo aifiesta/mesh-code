@@ -4,6 +4,7 @@ import type { RouteExplain, SettingSpec, SettingsDoc, Status } from '../types'
 import { fmtTokens, fmtUsd, pricePerM, type CatalogModel } from '../types'
 import { Field } from './Field'
 import { BillTable } from './BillSplit'
+import { converting, fxNote, useMoney } from '../money'
 
 /**
  * The dials you touch often, where you are already looking.
@@ -26,6 +27,7 @@ export function ControlBar({ status, settings, catalog, routeExplain, onSet, onO
   onExplain: () => void
 }) {
   const [open, setOpen] = useState<string | null>(null)
+  const { fx, money, price } = useMoney()
   const ref = useRef<HTMLDivElement>(null)
 
   useDismissable(open !== null, () => setOpen(null), ref)
@@ -60,6 +62,9 @@ export function ControlBar({ status, settings, catalog, routeExplain, onSet, onO
   const estimated = !!status?.turn_estimated
 
   const toggle = (id: string) => setOpen((o) => (o === id ? null : id))
+  const usd6 = (n: number) => '$' + n.toFixed(6)
+  // Converted, the dollar bill is one hover away.
+  const usdTitle = (n?: number) => (converting(fx) ? `${usd6(n ?? 0)} billed` : undefined)
 
   return (
     <div className="controlbar" ref={ref}>
@@ -88,7 +93,7 @@ export function ControlBar({ status, settings, catalog, routeExplain, onSet, onO
               <div className="pinned-model">
                 <span className="pinned-name" title={model}>{shortModel(model)}</span>
                 <span className="pinned-price">
-                  {row ? <>{fmtUsd(inPrice)} in · {fmtUsd(pricePerM(row, 'completion'))} out, per 1M</>
+                  {row ? <>{price(inPrice, fmtUsd)} in · {price(pricePerM(row, 'completion'), fmtUsd)} out, per 1M</>
                        : 'Pricing loads with the catalog.'}
                 </span>
                 <button className="btn subtle" onClick={() => { setOpen(null); onOpenSettings('model') }}>
@@ -146,18 +151,17 @@ export function ControlBar({ status, settings, catalog, routeExplain, onSet, onO
                 onClick={() => toggle('cost')}>
           <span className="ctl-label">Session</span>
           <span className="ctl-value money">
-            {estimated && '~'}
-            {cost.toLocaleString(undefined,
-              { style: 'currency', currency: 'USD', minimumFractionDigits: 4 })}
+            {money(cost, (n) => n.toLocaleString(undefined,
+              { style: 'currency', currency: 'USD', minimumFractionDigits: 4 }), estimated)}
           </span>
         </button>
         {open === 'cost' && (
           <Pop title="Spend" onSettings={() => { setOpen(null); onOpenSettings('behaviour') }}>
             <dl className="pop-stats">
-              <div><dt>This turn</dt><dd>${(status?.turn_cost ?? 0).toFixed(6)}</dd></div>
-              <div><dt>Session</dt><dd>${(status?.session_cost ?? 0).toFixed(6)}</dd></div>
+              <div><dt>This turn</dt><dd title={usdTitle(status?.turn_cost)}>{money(status?.turn_cost ?? 0, usd6)}</dd></div>
+              <div><dt>Session</dt><dd title={usdTitle(status?.session_cost)}>{money(status?.session_cost ?? 0, usd6)}</dd></div>
               <div><dt>Tokens</dt><dd>{tokens.toLocaleString()}</dd></div>
-              <div><dt>Rate</dt><dd>{fmtUsd(inPrice)} / 1M in</dd></div>
+              <div><dt>Rate</dt><dd>{price(inPrice, fmtUsd)} / 1M in</dd></div>
             </dl>
             <BillTable session={status?.session_bill} turn={status?.turn_bill} live={live} />
             <p className="pop-note">
@@ -169,6 +173,8 @@ export function ControlBar({ status, settings, catalog, routeExplain, onSet, onO
                     + 'be priced from the catalog, so this is not what you were billed.'
                   : 'What the gateway actually billed, not an estimate.'}
             </p>
+            {fxNote(fx) && <p className="pop-note">{fxNote(fx)}</p>}
+            {spec('currency') && <Field spec={spec('currency')!} onChange={onSet} compact />}
             {spec('optimize') && <Field spec={spec('optimize')!} onChange={onSet} compact />}
           </Pop>
         )}

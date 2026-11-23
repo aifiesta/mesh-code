@@ -1,4 +1,5 @@
 import { addBills, billTotal, fmtSmallUsd, fmtTokens, type Bill } from '../types'
+import { useMoney } from '../money'
 
 type PartKey = 'fresh' | 'cached' | 'cache_write' | 'output'
 
@@ -18,10 +19,11 @@ const shown = (bill: Bill) => PARTS.filter((p) => tokensOf(bill, p.key) > 0 || u
 
 /** One line under a finished turn: where its tokens and money went. */
 export function BillLine({ bill }: { bill?: Bill | null }) {
+  const { money } = useMoney()   // before any early return: hooks run every render
   if (!bill) return null
   const parts = shown(bill)
   if (!parts.length) return null
-  const tilde = bill.estimated ? '~' : ''
+  const amt = (usd: number) => money(usd, fmtSmallUsd, bill.estimated)
   const why = bill.estimated
     ? 'The gateway sent no breakdown for at least one step, so this split is worked out from token counts and catalog prices.'
     : 'As billed by the gateway, step by step.'
@@ -31,12 +33,12 @@ export function BillLine({ bill }: { bill?: Bill | null }) {
         <span key={p.key} title={p.hint}>
           {i > 0 && ' · '}
           {p.label.toLowerCase()} {fmtTokens(tokensOf(bill, p.key))}
-          {' '}{tilde}{fmtSmallUsd(usdOf(bill, p.key))}
+          {' '}{amt(usdOf(bill, p.key))}
           {p.key === 'output' && bill.thinking_tokens > 0 &&
             <> ({fmtTokens(bill.thinking_tokens)} thinking)</>}
         </span>
       ))}
-      {bill.other_usd > 0 && <span> · other {tilde}{fmtSmallUsd(bill.other_usd)}</span>}
+      {bill.other_usd > 0 && <span> · other {amt(bill.other_usd)}</span>}
     </div>
   )
 }
@@ -45,6 +47,7 @@ export function BillLine({ bill }: { bill?: Bill | null }) {
 export function BillTable({ session, turn, live }: {
   session?: Bill | null; turn?: Bill | null; live: boolean
 }) {
+  const { money } = useMoney()
   // Session figures only move when a turn ends, so the turn in flight is added in.
   const bill = live ? addBills(session, turn) : (session ?? null)
   if (!bill) return null
@@ -52,7 +55,7 @@ export function BillTable({ session, turn, live }: {
   if (!parts.length) return null
   const total = billTotal(bill)
   const pct = (usd: number) => (total > 0 ? Math.round((100 * usd) / total) + '%' : '')
-  const tilde = bill.estimated ? '~' : ''
+  const amt = (usd: number) => money(usd, fmtSmallUsd, bill.estimated)
   return (
     <table className="bill-table">
       <thead>
@@ -63,7 +66,7 @@ export function BillTable({ session, turn, live }: {
           <tr key={p.key} title={p.hint}>
             <td>{p.label}</td>
             <td>{tokensOf(bill, p.key).toLocaleString()}</td>
-            <td>{tilde}{fmtSmallUsd(usdOf(bill, p.key))}</td>
+            <td>{amt(usdOf(bill, p.key))}</td>
             <td>{pct(usdOf(bill, p.key))}</td>
           </tr>
         ))}
@@ -71,13 +74,13 @@ export function BillTable({ session, turn, live }: {
           <tr className="sub" title="The part of output that was the model thinking. Already counted in Output.">
             <td>of which thinking</td>
             <td>{bill.thinking_tokens.toLocaleString()}</td>
-            <td>{tilde}{fmtSmallUsd(bill.thinking_usd)}</td>
+            <td>{amt(bill.thinking_usd)}</td>
             <td>{pct(bill.thinking_usd)}</td>
           </tr>
         )}
         {bill.other_usd > 0 && (
           <tr title="Billed, but not as tokens (a tool fee, for example).">
-            <td>Other</td><td></td><td>{tilde}{fmtSmallUsd(bill.other_usd)}</td><td>{pct(bill.other_usd)}</td>
+            <td>Other</td><td></td><td>{amt(bill.other_usd)}</td><td>{pct(bill.other_usd)}</td>
           </tr>
         )}
       </tbody>

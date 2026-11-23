@@ -3,6 +3,7 @@
 
 export const Ev = {
   SETTINGS: 'settings',
+  FX: 'fx',
   CATALOG: 'catalog',
   ROUTE_EXPLAIN: 'route.explain',
   DIR_LISTING: 'dir.listing',
