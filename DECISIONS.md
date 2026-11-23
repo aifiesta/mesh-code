@@ -235,3 +235,18 @@ a turn still running at step 20 escalates once, through the normal
 once-per-turn rule. Ported from Saha's aifiesta/mesh-code#14; the router,
 Smart-default migration and steer-only budget there were left out because
 0.3.0 removed the router and keeps the budget governor.
+
+## 2026-11-23 — 0.3.0 takes #15's file tools but not its scored router
+Decided by Raushan. The ladder replaced the router on 2026-10-22, and #15
+extended that router with per-level benchmark scores: shipping both means
+two routing systems, and `model_scores.json` carries Artificial Analysis
+figures whose terms restrict customer-facing use until that is settled. The
+file tools stand on their own (72% fewer tokens in #15's runs), so
+`edit_file`, ranged reads with outlines, generated-file notes and shell
+output trimming come in; a read the mode approves stays inside the project
+and never opens an `.env` file. The scores stay in `docs/bench/model_scoring`
+as input for the escalation chain. Thinking levels go to Mesh as
+`reasoning.effort`, because the flat field stops at high and Harder sends
+xhigh; local hops send no level, as before. A refused level falls back to
+the nearest one the model accepts. #14 is not merged: its ladder-relevant
+parts are the 2026-11-14 port.

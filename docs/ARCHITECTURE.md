@@ -127,12 +127,12 @@ Kept deliberately small, so fixes can still flow between the CLI and here:
 
 | Module | Change | Why |
 |---|---|---|
-| `safety.py` | gates and path resolution take a `root` | The CLI could ask `os.getcwd()` because one process served one directory. The harness serves many workspaces from one engine, so "relative to what?" has a per-session answer. |
-| `tools.py` | `execute()` / `build_system_prompt()` take `cwd` | Same reason. Also: prompt text that described a terminal now describes a window. |
+| `safety.py` | gates and path resolution take a `root`; a read approved by the mode alone must be inside the project and not an `.env` file | The CLI could ask `os.getcwd()` because one process served one directory. The harness serves many workspaces from one engine, so "relative to what?" has a per-session answer. |
+| `tools.py` | `execute()` / `build_system_prompt()` take `cwd`; `edit_file`, line-range reads with an outline for long files, a note in place of generated files, shell output that keeps failures and the end (full log on disk) | Same reason. Also: prompt text that described a terminal now describes a window. The file tools cut what a task sends to the model (see DECISIONS 2026-11-23). |
 | `config.py` | own config home; reads the CLI's credentials; raises instead of `sys.exit()` | This process serves every open window and must not die over one bad setting. |
 | `plan.py` | `to_dict()` replaces `render()` | The plan used to draw itself with `rich` markup — precisely the coupling that made a second frontend impossible. |
-| `client.py` | one request per hop, a per-hop `Target`, `exclude_models` with `model: "auto"` | The CLI's optimized-attempt retry went with its optimize levers; local hops need their own endpoint and timeouts. |
-| `memory.py` | `dedupe_read(state, path)` | The pruning lever it guarded against is gone. |
+| `client.py` | one request per hop, a per-hop `Target`, `exclude_models` with `model: "auto"`; thinking level as `reasoning.effort` | The CLI's optimized-attempt retry went with its optimize levers; local hops need their own endpoint and timeouts. Mesh's flat field stops at high. |
+| `memory.py` | `dedupe_read(state, path)`; `forget_read` after an edit | The pruning lever it guarded against is gone. An edit sends only the changed lines, so the earlier read no longer matches the file. |
 
 `loopguard.py` and `styles.py` are the CLI's byte-for-byte. `compact.py` and
 `pricing.py` carry fixes made here (the compaction transcript pointer,
