@@ -39,6 +39,18 @@ def test_a_long_output_keeps_its_tail_and_exit_code(harness):
     assert h.session.history_payload()[-1]["ok"] is True
 
 
+def test_a_long_output_is_never_logged_for_the_model(harness, monkeypatch, tmp_path):
+    from meshharness.core import tools
+    monkeypatch.setattr(tools, "shell_log_dir", lambda: tmp_path / "logs")
+    h = harness(policy="pinned")
+    h.session.run_command("python3 -c \"print('secret-ish ' * 4000)\"")
+    done = h.wait_for(Event.COMMAND_FINISHED)
+    sent = h.session.state["messages"][-1]["content"]
+    assert "Full output saved" not in sent and "Full output saved" not in done["data"]["output"]
+    assert len(sent) < 5_000
+    assert not (tmp_path / "logs").exists()
+
+
 def test_a_multi_line_command_replays_whole(harness, tmp_path):
     (tmp_path / "sub").mkdir()
     (tmp_path / "sub" / "inner.txt").write_text("x")

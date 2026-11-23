@@ -85,10 +85,12 @@ or a web page. So:
 ## Commands you type
 
 A message that starts with `!` runs in the project folder without an
-approval dialog, like the Shell tab: it is you typing, not the agent. Its
-output is added to the conversation as data and is sent to whichever model
-answers next, which may be a cloud one. Do not `!cat` a secret you would
-not paste into a prompt.
+approval dialog, like the Shell tab: it is you typing, not the agent. The
+command, its exit code and at most 4,000 characters of its output (the start
+and the end) are added to the conversation as data and sent to whichever
+model answers next, which may be a cloud one. The rest is not sent or saved;
+the window shows up to 8,000 characters of it until the app reloads. Do not
+`!cat` a secret you would not paste into a prompt.
 
 ## Secrets
 

@@ -411,7 +411,8 @@ class Session:
         cid = uuid.uuid4().hex[:12]
         self.emit(Event.COMMAND_STARTED, id=cid, command=command)
         result = tools_mod.execute("run_bash", {"command": command, "timeout": SHELL_TIMEOUT},
-                                   self.cfg, cwd=self.workspace, cancel=self._interrupt)
+                                   self.cfg, cwd=self.workspace, cancel=self._interrupt,
+                                   condense=False)
         output, code = _split_exit(result)
         if output.startswith("Error: command timed out"):
             output = f"Stopped after {SHELL_TIMEOUT // 60} minutes. Run long-lived commands in the Shell tab."
@@ -419,7 +420,8 @@ class Session:
         self.state["messages"].append({"role": "user", "content": _shell_message(
             command, code, _clip_middle(output, 4000))})
         self.emit(Event.COMMAND_FINISHED, id=cid, command=command, ok=code == 0,
-                  output=output + (f"\n[exit {code}]" if code is not None else ""))
+                  output=_clip_middle(output, tools_mod.OUTPUT_LIMIT)
+                  + (f"\n[exit {code}]" if code is not None else ""))
 
     def interrupt(self) -> None:
         """Abort the turn in flight. Safe to call when idle."""

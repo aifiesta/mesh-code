@@ -1434,8 +1434,11 @@ def apply_edit(target: Path, old: str, new: str, replace_all: bool = False,
 
 def execute(name: str, arguments: dict, cfg: "dict | None" = None,
             cwd: "str | Path | None" = None,
-            cancel: "threading.Event | None" = None) -> str:
+            cancel: "threading.Event | None" = None, *, condense: bool = True) -> str:
     """Run a tool locally and return a string result for the model.
+
+    `condense=False` returns run_bash output uncut and saves no log: a `!`
+    command's output is the user's, and the session clips it itself.
 
     `cancel` is the session's interrupt flag; run_bash kills the whole
     process tree as soon as it is set.
@@ -1546,7 +1549,8 @@ def execute(name: str, arguments: dict, cfg: "dict | None" = None,
                     "smaller commands."
                 )
             # The "[exit N]" suffix is parsed by compact._describe_action.
-            return f"{condense_output(clean_output(out))}\n[exit {proc.returncode}]"
+            out = clean_output(out)
+            return f"{condense_output(out) if condense else out}\n[exit {proc.returncode}]"
         except Exception as e:
             return f"Error: {e}"
 
