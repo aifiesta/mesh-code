@@ -131,7 +131,8 @@ class Engine:
                         continue
                     if not Path(data["workspace"]).is_dir():
                         continue  # the project folder is gone
-                    sess = Session.restore(data, dict(self.cfg), self.emit, local=self.local)
+                    sess = Session.restore(data, dict(self.cfg), self.emit, local=self.local,
+                                           budget=self.budget)
                     migrated = self.cfg.get("_migrated_to_local")
                     if migrated and sess.cfg.get("model") == migrated:
                         sess.cfg["model"] = "local/auto"   # the snapshot predates local-first

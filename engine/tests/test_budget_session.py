@@ -141,3 +141,38 @@ def test_a_stopped_cloud_hop_still_counts_its_estimate(gateway, harness, tmp_pat
     h.session.interrupt()
     h.wait_for(Event.TURN_ABORTED)
     assert b.snapshot()["month"]["spent"] > 0
+
+
+def test_a_restored_session_is_held_by_the_engine_ledger(gateway, harness, tmp_path):
+    from meshharness.core import config as cfg
+    from meshharness.session import Session
+    h = harness(policy="pinned")
+    h.session.save_state()
+    snap = json.loads((cfg.SESSIONS_DIR / f"{h.session.id}.json").read_text())
+    b = _budget(tmp_path)
+    b.record("pinned", b.daily_limit())
+    events = []
+    restored = Session.restore(snap, dict(h.session.cfg), events.append, budget=b)
+    restored.catalog = CATALOG
+    try:
+        restored.submit("hello")
+        deadline = time.time() + 10
+        while not any(e["type"] == Event.TURN_FINISHED for e in events) and time.time() < deadline:
+            time.sleep(0.01)
+        assert gateway.requests == []
+        assert [e for e in events if e["type"] == Event.BUDGET_HOLD]
+    finally:
+        restored.close()
+
+
+def test_the_engine_restores_sessions_onto_its_own_ledger(harness, monkeypatch):
+    from meshharness.core import config as cfg
+    from meshharness.server import Engine
+    h = harness(policy="pinned")
+    h.session.save_state()
+    monkeypatch.setenv("MESHAPI_API_KEY", "rsk_test")
+    engine = Engine(token="t")
+    try:
+        assert engine.sessions[h.session.id].budget is engine.budget
+    finally:
+        engine.shutdown()

@@ -562,7 +562,8 @@ def test_session_survives_a_restart_with_its_conversation(gateway, harness, tmp_
     assert snap["workspace"] == str(h.session.workspace)
 
     events = []
-    restored = Session.restore(snap, dict(h.session.cfg), lambda ev: events.append(ev))
+    restored = Session.restore(snap, dict(h.session.cfg), lambda ev: events.append(ev),
+                               budget=None)
     try:
         texts = [m.get("content") for m in restored.state["messages"]]
         assert any("the answer is 42" in str(t) for t in texts), \
@@ -636,7 +637,8 @@ def test_session_cost_and_tokens_survive_the_full_persistence_chain(gateway, har
     assert snap["session_tokens"] == tok1
 
     events = []
-    restored = Session.restore(snap, dict(h.session.cfg), lambda ev: events.append(ev))
+    restored = Session.restore(snap, dict(h.session.cfg), lambda ev: events.append(ev),
+                               budget=None)
     try:
         assert restored.session_cost == cost1
         assert restored.session_tokens == tok1

@@ -314,11 +314,11 @@ class Session:
             pass  # persistence must never break a turn
 
     @classmethod
-    def restore(cls, data: dict, cfg: dict, emit, local=None) -> "Session":
+    def restore(cls, data: dict, cfg: dict, emit, *, local=None, budget) -> "Session":
         """Rebuild a session from its snapshot — conversation intact."""
         s = cls(data["id"], data["workspace"], cfg, emit,
                 title=data.get("title") or "",
-                mode=mode_from_str_safe(data.get("mode")), local=local)
+                mode=mode_from_str_safe(data.get("mode")), local=local, budget=budget)
         s.created_at = data.get("created_at") or s.created_at
         s.chat_label = data.get("label") or ""
         s.session_cost = float(data.get("session_cost") or 0)
