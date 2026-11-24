@@ -18,7 +18,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 def sse_turn(text: str = "", tool_calls: list | None = None,
              usage: dict | None = None, cost: float | None = None,
-             model: str = "test/model", error: str | None = None) -> list[str]:
+             model: str = "test/model", error: str | None = None,
+             finish_reason: str | None = None) -> list[str]:
     """Build the SSE data lines for one assistant turn."""
     lines: list[str] = []
     if error:
@@ -35,6 +36,9 @@ def sse_turn(text: str = "", tool_calls: list | None = None,
         for frag in _chunks(tc["arguments"], 24):
             lines.append(json.dumps({"choices": [{"delta": {
                 "tool_calls": [{"index": i, "function": {"arguments": frag}}]}}]}))
+    if finish_reason:
+        lines.append(json.dumps({"model": model, "choices": [
+            {"delta": {}, "finish_reason": finish_reason}]}))
     lines.append(json.dumps({
         "model": model,
         "usage": usage or {"prompt_tokens": 10, "completion_tokens": 5,

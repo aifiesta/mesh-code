@@ -43,8 +43,8 @@ from .core import journal, safety
 from . import helpers as helpers_mod
 from .core import pricing as _pricing
 from .core import tools as tools_mod
-from .core.client import (complete_chat, nearest_level, reasoning_refusal,
-                          stream_chat)
+from .core.client import (MAX_OUTPUT_ROOM, complete_chat, cut_off_at, nearest_level,
+                          reasoning_refusal, stream_chat)
 from .core.permissions import AUTO_APPROVE, Mode
 from .core.plan import Plan
 from .core.tools import TOOLS, build_system_messages, find_stub_markers, summarize_call
@@ -647,6 +647,10 @@ class Session:
                     refusal = reasoning_refusal(msg)
                 if self._level_refused(refusal):
                     continue
+                if meta.get("cut_off"):
+                    # Not the model failing: another model would hit it too.
+                    self.emit(Event.ERROR, fatal=True, message=msg)
+                    break
                 if meta.get("cap_stop"):
                     # The free local model can't go on and the cloud is off
                     # today: nothing else may take this task.
@@ -921,6 +925,7 @@ class Session:
         empty_retries = 0
         compacted_for_context = False
         tried_non_streaming = False
+        raised_room = False
 
         while True:
             attempt += 1
@@ -1060,6 +1065,26 @@ class Session:
                         continue
                 return reply, meta
 
+            if not meta.get("tool_calls") and not (reply or "").strip():
+                cut = cut_off_at(meta)
+                if cut:
+                    # The reply ran out of room (thinking included) and came
+                    # back empty. Asking again the same way buys the same
+                    # empty reply at the same price: give it more room once,
+                    # then say so rather than end the task in silence.
+                    have = int(cfg.get("max_tokens") or cut)
+                    if not raised_room and have < MAX_OUTPUT_ROOM:
+                        raised_room = True
+                        bigger = min(MAX_OUTPUT_ROOM, max(have * 2, 32_000))
+                        # Read by the next attempt as this turn's reply limit.
+                        self.state["_max_tokens_shrunk"] = bigger
+                        self.emit(Event.NOTICE, level="warn", message=(
+                            f"the model's reply was cut off at {cut} tokens — asking "
+                            f"again with room for {bigger}"))
+                        continue
+                    return "", dict(meta, cut_off=True, error=(
+                        f"the model's reply was cut off at {cut} tokens and came back "
+                        "empty, even with more room. Ask for the work in smaller parts."))
             if (not meta.get("tool_calls") and not (reply or "").strip()
                     and attempt < loopguard.MAX_STREAM_ATTEMPTS
                     and empty_retries < 2):

@@ -126,7 +126,10 @@ def test_a_claude_request_carries_the_marks(gateway):
     _send(gateway, chat)
     sent = gateway.requests[0]
     assert _marked(sent["messages"]) == [0, 4]
-    assert "max_tokens" not in sent, "caching must never cap the reply"
+    # Caching adds no cap of its own: the only limit is the reply room every
+    # Claude request asks for (client.output_room), marked or not.
+    from meshharness.core.client import output_room
+    assert sent.get("max_tokens") == output_room(CLAUDE), "caching must never cap the reply"
     assert chat == snapshot, "the stored history must never carry a mark"
 
 
