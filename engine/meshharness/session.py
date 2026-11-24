@@ -911,6 +911,9 @@ class Session:
                 except LocalUnavailable as e:
                     if self._interrupt.is_set():
                         raise KeyboardInterrupt
+                    if self._offer_cloud_instead(cfg["model"], str(e)):
+                        attempt = 0
+                        continue          # this hop again, on the cloud model
                     return "", {"error": f"local model: {e}", "local_unavailable": True}
                 msgs = self._local_messages(msgs)
             picked_local = target is not None and not self.state.get("_on_local")
@@ -1141,6 +1144,9 @@ class Session:
     _MAX_ESCALATIONS = 2
 
     def _effective_model(self) -> str:
+        instead = self.state.get("_cloud_instead_of_local")
+        if instead:
+            return instead   # the user said yes to the cloud for this task
         pick = self.state.get("_smart_pick")
         if pick and self.cfg.get("route_mode") == "smart":
             return pick
@@ -1233,6 +1239,9 @@ class Session:
         self.state["_on_local"] = False
         self.state["_turn_level"] = None
         self.state["_turn_cohort"] = None
+        # A yes to the cloud covers one task; the next message asks again.
+        self.state.pop("_cloud_instead_of_local", None)
+        self.state["_turn_text"] = text
         if self.cfg.get("route_mode") != "smart":
             return
         self._route_cloud(text, had_image)
@@ -1427,6 +1436,56 @@ class Session:
             return self.local.ready_target()
         except Exception:
             return None
+
+    def _offer_cloud_instead(self, model_id: str, reason: str) -> bool:
+        """The local model the user picked cannot run here. Warn, and ask
+        before spending money: on a yes, Smart routing's cloud pick for this
+        task answers it (the local model stays picked for later messages)."""
+        name = _short_model(model_id)
+        self.emit(Event.NOTICE, level="warn",
+                  message=f"{name} can't run on this computer right now: {reason}")
+        use, stop = "Use the cloud for this task", "Stop"
+        token = self.pending.open()
+        self.emit(Event.ASK_USER, token=token, turn_id=None, from_app=True, questions=[{
+            "header": "Local model",
+            "question": (f"{name} can't run on this computer right now ({reason}). "
+                         "Use a cloud model for this task instead? Cloud models cost money."),
+            "options": [
+                {"label": use, "description": "Smart routing picks the cloud model for this task. "
+                                              "Your local model stays selected for later messages."},
+                {"label": stop, "description": "End this task without using the cloud."},
+            ]}])
+        try:
+            answers = self.pending.wait(token, timeout=ASK_TIMEOUT)
+        except Cancelled:
+            return False
+        answer = (answers[0] if isinstance(answers, list) and answers else answers) or ""
+        if str(answer).strip() != use:
+            return False
+        model = self._cloud_pick_for_turn()
+        if not model:
+            self.emit(Event.NOTICE, level="warn",
+                      message="no cloud model could be chosen (the model list has not loaded)")
+            return False
+        self.state["_cloud_instead_of_local"] = model
+        self.turn_model = model
+        self.emit(Event.NOTICE, level="info",
+                  message=f"using {_short_model(model)} in the cloud for this task, as you asked")
+        return True
+
+    def _cloud_pick_for_turn(self) -> "str | None":
+        """Smart routing's cloud pick for this turn's task, whatever the
+        routing setting: the same cost-aware choice a Smart routing user gets."""
+        saved = (self.state.get("_smart_pick"), self.state.get("_turn_level"),
+                 self.state.get("_turn_cohort"))
+        try:
+            self._route_cloud(self.state.get("_turn_text") or "", False)
+            return self.state.get("_smart_pick")
+        except Exception:
+            return None
+        finally:
+            # Routing off stays off: only the one model for this task is kept.
+            self.state["_smart_pick"], self.state["_turn_level"], self.state["_turn_cohort"] = saved
 
     def _picked_local_target(self, model_id: str):
         """A Target for a local model the user picked in the model list.
