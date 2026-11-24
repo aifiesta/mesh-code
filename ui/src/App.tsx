@@ -11,6 +11,7 @@ import { FxContext, useMoney } from './money'
 import { SettingsSheet } from './components/SettingsSheet'
 import { Wordmark } from './components/Logo'
 import { PlanCard } from './components/PlanCard'
+import { HelpersCard } from './components/HelpersCard'
 import { Sidebar } from './components/Sidebar'
 import { Splash } from './components/Splash'
 import { TerminalPanel } from './components/TerminalPanel'
@@ -754,6 +755,8 @@ function SessionView({ s, controls, banner, profile, railOpen, onRailResize, rai
                 return <ToolCardView key={m.id} card={m.card} />
               case 'plan':
                 return <PlanCard key={m.id} plan={m.plan} />
+              case 'helpers':
+                return <HelpersCard key={m.id} run={m.run} money={money} />
               case 'ask':
                 return (
                   <AskInline
@@ -791,6 +794,7 @@ function SessionView({ s, controls, banner, profile, railOpen, onRailResize, rai
                   <div className="turn-foot" key={m.id} id={`m-${m.id}`}>
                     {m.model} · {m.hops} hop{m.hops === 1 ? '' : 's'}
                     {m.localSteps ? ` (${m.localSteps} on the local model${m.steppedUp ? ', then stepped up' : ''})` : ''}
+                    {m.helpers?.length ? ` + ${m.helpers.length} helpers (${money(m.helpers.reduce((a, h) => a + h.cost, 0), (n) => '$' + n.toFixed(4))}, included)` : ''}
                     {' · '}{m.tokens.toLocaleString()} tok ·
                     {' '}{money(m.cost, (n) => '$' + n.toFixed(6), m.estimated)} · {m.elapsed.toFixed(1)}s
                     <BillLine bill={m.bill} />

@@ -40,6 +40,7 @@ export const Ev = {
   ERROR: 'error',
   COMPACTED: 'compacted',
   ROUTED: 'routed',
+  HELPERS: 'helpers',
   ENGINE_READY: 'engine.ready',
   HISTORY: 'history',
   CHAT_CLEARED: 'chat.cleared',
@@ -136,10 +137,21 @@ export type Msg =
   | { kind: 'notice'; id: string; level: string; text: string; detail?: any }
   | { kind: 'turn'; id: string; cost: number; tokens: number; elapsed: number; model: string; hops: number; estimated?: boolean; bill?: Bill | null
       /** Steps that ran on the local model, and whether the turn stepped up from it. */
-      localSteps?: number; steppedUp?: boolean }
+      localSteps?: number; steppedUp?: boolean
+      /** Deep work helpers that wrote pieces of this task (their cost is in `cost`). */
+      helpers?: { n: number; title: string; status: string; cost: number; steps: number }[] | null }
   | { kind: 'server'; id: string; url: string; pid: number; port: number; cmd: string; stopped?: boolean }
   | { kind: 'plan'; id: string; plan: Plan }
+  | { kind: 'helpers'; id: string; callId: string; run: HelperRun }
   | { kind: 'ask'; id: string; ask: Ask; answered?: string[] }
+
+/** Deep work helpers (engine helpers.py): cheap models writing pieces of
+ *  one task at the same time, for Opus to review and join. */
+export type HelperRow = {
+  n: number; title: string; files: string[]; status: string
+  cost: number; steps: number; secs: number; estimated?: boolean
+}
+export type HelperRun = { model: string; helpers: HelperRow[]; working: number; cost: number }
 
 export type Approval = {
   token: string; callId: string; name: string; summary: string

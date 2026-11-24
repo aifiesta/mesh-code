@@ -590,6 +590,8 @@ body.resizing .side-resize { pointer-events: auto; }
   transition: width .5s cubic-bezier(.2, .8, .25, 1);
 }
 .plan-card.done .plan-fill { background: var(--ok); }
+.helpers-card .plan-card-head { margin-bottom: 8px; }
+.helpers-card .helper-meta { color: var(--ink-3); font-size: var(--t-xs); }
 .plan-steps { list-style: none; margin: 0; padding: 0; }
 .plan-steps li {
   display: flex; gap: 10px; align-items: baseline; padding: 3px 0;

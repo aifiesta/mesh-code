@@ -40,10 +40,11 @@ import httpx
 from .bridge import Cancelled, Pending
 from .core import compact, finishcheck, loopguard, memory, router, textcalls
 from .core import journal, safety
+from . import helpers as helpers_mod
 from .core import pricing as _pricing
 from .core import tools as tools_mod
-from .core.client import (complete_chat, nearest_level, reasoning_refusal,
-                          stream_chat)
+from .core.client import (MAX_OUTPUT_ROOM, complete_chat, cut_off_at, nearest_level,
+                          reasoning_refusal, stream_chat)
 from .core.permissions import AUTO_APPROVE, Mode
 from .core.plan import Plan
 from .core.tools import TOOLS, build_system_messages, find_stub_markers, summarize_call
@@ -95,6 +96,12 @@ class Session:
                  emit, *, title: str = "", mode: Mode = Mode.DEFAULT, local=None,
                  cap=None):
         self.id = session_id
+        # Set when this session is a Deep work helper (see helpers.py): its
+        # piece's files and who owns the rest. None for every normal chat.
+        self.helper: "dict | None" = None
+        # Helpers running for this chat's current task, so an approval click
+        # in this chat reaches the helper that asked.
+        self._helpers_live: list = []
         # The engine's LocalModels layer, or None (tests, a cloud-only engine).
         self.local = local
         # The engine's daily share of a monthly plan (core/dailycap), or None.
@@ -378,6 +385,10 @@ class Session:
                                  if isinstance(p, dict) and p.get("type") == "text"), "")
                 else:
                     text = str(content or "")
+                # The Deep work decision note is for the model, not the chat.
+                text = text.split(helpers_mod.DECIDE_MARK)[0]
+                if text.startswith(helpers_mod.DECIDE_NOTE.strip()):
+                    text = ""
                 # Skip synthetic nudges (stall messages ride as user role)
                 if text.strip():
                     out.append({"kind": "user", "text": text})
@@ -428,7 +439,9 @@ class Session:
         self.pending.resolve_all()
 
     def respond_approval(self, token: str, decision: str) -> bool:
-        return self.pending.resolve(token, decision)
+        if self.pending.resolve(token, decision):
+            return True
+        return any(h.pending.resolve(token, decision) for h in list(self._helpers_live))
 
     def respond_ask(self, token: str, answers) -> bool:
         return self.pending.resolve(token, answers)
@@ -543,6 +556,7 @@ class Session:
         # Which turn this is, so a plan revised inside it can keep its ticks
         # while a plan made in a later turn starts clean (see _plan_tool).
         self.state["_turn_id"] = turn_id
+        self.state["_helper_rows"] = None
 
         # Held on the session (not as locals) so _status() can publish the
         # running totals mid-turn. turn_model starts EMPTY on purpose: under
@@ -561,6 +575,7 @@ class Session:
         # this the effective pick is known — _route_turn sets turn_model.
         self._route_turn(text, had_image=bool(attachments))
         cap_block = self._apply_daily_cap()
+        self._arm_helpers()
 
         model_used = self.cfg.get("model", "")
         self._status()
@@ -632,6 +647,10 @@ class Session:
                     refusal = reasoning_refusal(msg)
                 if self._level_refused(refusal):
                     continue
+                if meta.get("cut_off"):
+                    # Not the model failing: another model would hit it too.
+                    self.emit(Event.ERROR, fatal=True, message=msg)
+                    break
                 if meta.get("cap_stop"):
                     # The free local model can't go on and the cloud is off
                     # today: nothing else may take this task.
@@ -860,6 +879,7 @@ class Session:
                       bill=turn_bill, local=self.turn_local,
                       local_steps=self.state.get("_local_hops_total", 0),
                       stepped_up_from_local=bool(self.state.get("_local_stepped_up")),
+                      helpers=self._helpers_summary(),
                       session_cost=round(self.session_cost, 6))
         else:
             self.emit(Event.TURN_FINISHED, turn_id=turn_id, hops=hop,
@@ -869,6 +889,7 @@ class Session:
                       bill=turn_bill, local=self.turn_local,
                       local_steps=self.state.get("_local_hops_total", 0),
                       stepped_up_from_local=bool(self.state.get("_local_stepped_up")),
+                      helpers=self._helpers_summary(),
                       session_cost=round(self.session_cost, 6),
                       plan=self.state["plan"].to_dict() if self.state["plan"] else None,
                       stubs=sorted(self.state.get("stub_files") or {}))
@@ -904,6 +925,7 @@ class Session:
         empty_retries = 0
         compacted_for_context = False
         tried_non_streaming = False
+        raised_room = False
 
         while True:
             attempt += 1
@@ -950,7 +972,7 @@ class Session:
                 if target is not None:
                     self.local.server.begin_use()
                 try:
-                    reply, meta = self._consume(stream_chat(msgs, cfg, tools=TOOLS, target=target))
+                    reply, meta = self._consume(stream_chat(msgs, cfg, tools=self._tools(), target=target))
                 finally:
                     if target is not None:
                         self.local.server.end_use()
@@ -1043,6 +1065,26 @@ class Session:
                         continue
                 return reply, meta
 
+            if not meta.get("tool_calls") and not (reply or "").strip():
+                cut = cut_off_at(meta)
+                if cut:
+                    # The reply ran out of room (thinking included) and came
+                    # back empty. Asking again the same way buys the same
+                    # empty reply at the same price: give it more room once,
+                    # then say so rather than end the task in silence.
+                    have = int(cfg.get("max_tokens") or cut)
+                    if not raised_room and have < MAX_OUTPUT_ROOM:
+                        raised_room = True
+                        bigger = min(MAX_OUTPUT_ROOM, max(have * 2, 32_000))
+                        # Read by the next attempt as this turn's reply limit.
+                        self.state["_max_tokens_shrunk"] = bigger
+                        self.emit(Event.NOTICE, level="warn", message=(
+                            f"the model's reply was cut off at {cut} tokens — asking "
+                            f"again with room for {bigger}"))
+                        continue
+                    return "", dict(meta, cut_off=True, error=(
+                        f"the model's reply was cut off at {cut} tokens and came back "
+                        "empty, even with more room. Ask for the work in smaller parts."))
             if (not meta.get("tool_calls") and not (reply or "").strip()
                     and attempt < loopguard.MAX_STREAM_ATTEMPTS
                     and empty_retries < 2):
@@ -1135,7 +1177,7 @@ class Session:
                       message="streaming keeps failing — trying one non-streaming request")
             # The hop's effective cfg, as the streaming attempt used: the
             # live smart pick, and no thinking level this model has refused.
-            return complete_chat(msgs, self._effective_cfg(), tools=TOOLS, target=target,
+            return complete_chat(msgs, self._effective_cfg(), tools=self._tools(), target=target,
                                  max_tokens=self.state.get("_max_tokens_shrunk"))
         except Exception:
             return None
@@ -1149,6 +1191,90 @@ class Session:
         self._interrupt.wait(timeout=wait)
         if self._interrupt.is_set():
             raise KeyboardInterrupt
+
+    # ------------------------------------------------------------------
+    # Deep work helpers (see helpers.py)
+    # ------------------------------------------------------------------
+    def _arm_helpers(self) -> None:
+        """At the start of a task: offer the lead the `delegate` tool when the
+        task STARTS as Deep work under Smart routing (Sol at extra high since
+        24 Nov; Opus where Sol is not offered). A task that steps up into
+        another model later is finished by that model alone. Off unless the
+        config sets deep_work_helpers (off by default since 25 Nov)."""
+        self.state["_helpers_for"] = None
+        self.state["_helpers_used"] = False
+        if self.helper or not self.cfg.get("deep_work_helpers", False):
+            return
+        if self.cfg.get("route_mode") != "smart" or self.state.get("_on_local"):
+            return
+        pick = self.state.get("_smart_pick") or ""
+        if (self.state.get("_turn_level") == "max" and pick
+                and not pick.startswith(helpers_mod.HELPER_PREFIX)):
+            self.state["_helpers_for"] = pick
+            # The decision point: on the user's message, so the lead weighs
+            # it before writing (see helpers.DECIDE_NOTE).
+            msgs = self.state.get("messages") or []
+            last = msgs[-1] if msgs else None
+            if last and last.get("role") == "user":
+                c = last.get("content")
+                if isinstance(c, str):
+                    last["content"] = c + helpers_mod.DECIDE_NOTE
+                elif isinstance(c, list):
+                    last["content"] = c + [{"type": "text",
+                                            "text": helpers_mod.DECIDE_NOTE.strip()}]
+
+    def _helpers_summary(self) -> "list | None":
+        rows = self.state.get("_helper_rows")
+        if not rows:
+            return None
+        return [{k: (round(r[k], 6) if k == "cost" else r[k])
+                 for k in ("n", "title", "status", "cost", "steps")} for r in rows]
+
+    def _helpers_armed(self) -> bool:
+        lead = self.state.get("_helpers_for")
+        return bool(lead) and self._effective_model() == lead and not self.state.get("_on_local")
+
+    def _tools(self) -> list:
+        """The tool list for this step."""
+        if self.helper:
+            return helpers_mod.HELPER_TOOLS
+        if self._helpers_armed():
+            return TOOLS + [helpers_mod.DELEGATE_TOOL]
+        return TOOLS
+
+    def _delegate(self, p: dict, turn_id: str, hop: int) -> str:
+        args = p["args"] if isinstance(p.get("args"), dict) else {}
+        self.emit(Event.TOOL_STARTED, call_id=p["id"], name="delegate",
+                  summary=summarize_call("delegate", args), args=_safe_args("delegate", args),
+                  turn_id=turn_id, hop=hop)
+
+        def done(result: str, ok: bool) -> str:
+            self.emit(Event.TOOL_RESULT, call_id=p["id"], name="delegate", ok=ok,
+                      result=_clip(result))
+            return result
+
+        if not self._helpers_armed():
+            return done("Error: helpers are not available for this task. Do the work yourself.",
+                        False)
+        if self.state.get("_helpers_used"):
+            return done("Error: the helpers were already used once for this task. Finish the "
+                        "rest yourself.", False)
+        if self._cap_on():
+            return done("Error: today's share of the plan is used, so no helpers can start. "
+                        "Finish the work yourself.", False)
+        pieces, err = helpers_mod.check_pieces(args, self.workspace)
+        if err:
+            return done(err, False)
+        self.state["_helpers_used"] = True
+        run = helpers_mod.HelperRun(self, pieces, turn_id=turn_id, call_id=p["id"],
+                                    task=str(self.state.get("_turn_text") or ""))
+        self.state["_helper_rows"] = run.rows
+        try:
+            result = run.run()
+        except KeyboardInterrupt:
+            done("Stopped by the user while the helpers were working.", False)
+            raise
+        return done(result, True)
 
     # ------------------------------------------------------------------
     # routing / compaction
@@ -1361,7 +1487,12 @@ class Session:
             return False
         if not explicit and self.state.get("_smart_escalations", 0) >= self._MAX_ESCALATIONS:
             return False
-        if not explicit and self.cfg.get("route_effort", "auto") != "auto":
+        # Deep work starts below the strongest model (router.DEEP_WORK_LEVEL):
+        # its one step-up, to the strongest, is part of Deep work itself, so it
+        # is taken even when the user set the Effort to Deep work.
+        deep_step = bool(self.state.get("_smart_difficulty") == "max"
+                         and (self.state.get("_smart_pick_info") or {}).get("deep_start"))
+        if not explicit and not deep_step and self.cfg.get("route_effort", "auto") != "auto":
             return False  # user pinned the effort — respect it
         try:
             table = router.load_table()
@@ -1370,7 +1501,7 @@ class Session:
             cohort = self.state.get("_smart_cohort") or "chat"
             cur = self.state.get("_smart_difficulty") or "mid"
             nxt = router.escalate(cur)
-            if nxt == cur:
+            if nxt == cur and not deep_step:
                 return False  # already at the top
             prev = self._serving()
             got = router.choose(cohort, nxt, self.cfg.get("route_weights"),
@@ -2046,6 +2177,32 @@ class Session:
 
         self.state.setdefault("doom_streak", {}).pop(name, None)
 
+        if name == "delegate":
+            return self._delegate(p, turn_id, hop)
+        offered = sorted(t["function"]["name"] for t in self._tools())
+        if name not in offered:
+            # No such tool (or not one this step has, like start_server for a
+            # helper): say so at once. Asking the user to approve a call that
+            # cannot run was a dead click (a helper called "bash", 24 Nov).
+            near = "run_bash" if "bash" in name or "shell" in name else None
+            msg = (f"Error: there is no tool named {name!r}."
+                   + (f" Use {near}." if near and near in offered else
+                      f" The tools are: {', '.join(offered)}."))
+            self.emit(Event.TOOL_STARTED, call_id=p["id"], name=name,
+                      summary=summarize_call(name, args if isinstance(args, dict) else {}),
+                      args=_safe_args(name, args if isinstance(args, dict) else {}),
+                      turn_id=turn_id, hop=hop)
+            self.emit(Event.TOOL_RESULT, call_id=p["id"], name=name, ok=False, result=msg)
+            return msg
+        if name in ("write_file", "edit_file") and self.helper:
+            # A helper edits only its own piece's files: the others are
+            # being written at this moment by another helper.
+            refused = helpers_mod.edit_refusal(self, args.get("path"))
+            if refused:
+                self.emit(Event.TOOL_RESULT, call_id=p["id"], name=name, ok=False,
+                          result=refused)
+                return refused
+
         # An edit that cannot apply (no match, several matches, no such
         # file) is answered before anyone is asked: "approve this?" for a
         # call that can only fail is a wasted click.
@@ -2078,6 +2235,15 @@ class Session:
                 self.emit(Event.NOTICE, level="warn",
                           message=f"auto-approval blocked: {reason}")
 
+        if not approved and self.helper and reason:
+            # A helper never stops the task for a click on something outside
+            # its project (24 Nov: scratch files in /tmp asked twice). It is
+            # told why and gets on with its piece.
+            self.emit(Event.TOOL_DECIDED, call_id=p["id"], name=name,
+                      decision=Decision.DENY, auto=True)
+            return (f"Error: not allowed for a helper ({reason}). Keep everything inside the "
+                    "project folder, scratch files included, or leave it for the lead and say "
+                    "so in your report.")
         if not approved:
             decision = self._request_approval(p, turn_id, hop, reason)
             if decision == Decision.ALWAYS:
@@ -2147,6 +2313,16 @@ class Session:
         The correlation id is reserved BEFORE the event goes out, so a very
         fast click cannot arrive before there is a slot to receive it.
         """
+        if self.helper:
+            # Helpers running at once share one approval card in the lead's
+            # chat: they ask one at a time.
+            with self.helper["approval_lock"]:
+                if self._interrupt.is_set():
+                    return Decision.INTERRUPTED
+                return self._ask_approval(p, turn_id, hop, reason)
+        return self._ask_approval(p, turn_id, hop, reason)
+
+    def _ask_approval(self, p: dict, turn_id: str, hop: int, reason: str) -> str:
         token = self.pending.open()
         name, args = p["name"], p["args"]
         self.emit(Event.TOOL_PROPOSED, token=token, call_id=p["id"], name=name,

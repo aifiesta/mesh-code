@@ -484,6 +484,16 @@ SCORED_COHORTS = ("agentic", "coding")
 # the live catalog, no pick changed; it only matters for a slow (local) model.
 TIME_VALUE = 0.05 / 3
 SCORED_FLOOR = 0.6       # never pick under 60% of the best chance available
+# Deep work keeps its model (the strongest there is) but thinks one level
+# lower: for Claude Opus 5.5, extra high scored the same on hard tasks as max
+# (60%), code quality 44% against 46%, at 40% less cost and two thirds of the
+# time (model scoring, 17 Nov). The user's call, 24 Nov: "make it default".
+DEEP_WORK_LEVEL = "xhigh"
+# Deep work STARTS on the model a Complex task would get, thinking at
+# DEEP_WORK_LEVEL (GPT-6.1 Sol at extra high: 46.3 on hard work against 51.7
+# for Opus, at about an eighth of the cost), and keeps the strongest model for
+# a step-up when it struggles: one Opus task could use up a small plan's whole
+# day (the user's call, 24 Nov). Complex itself is unchanged.
 STICKY_MARGIN = 0.10     # keep the serving model while it is within 10% of the best
 # The scores carry margins of 5 to 12 points, so two entries whose expected
 # costs are this close cannot be told apart. Between them, take the one that
@@ -693,10 +703,36 @@ def pick_scored(difficulty: str, weights: "dict | None", doc: "dict | None",
             if not cands:
                 return None
 
+        if band == "max" and not failed and not level and _band(difficulty) == "max":
+            # Deep work starts where a Complex task would (see COMPLEX_LEVEL);
+            # the strongest model is what a step-up (`failed`) reaches.
+            start = pick_scored("xhigh", weights, doc, catalog, needs_tools=needs_tools,
+                                needs_ctx=needs_ctx, incumbent=incumbent, exclude=exclude,
+                                incumbent_bonus=incumbent_bonus)
+            if start:
+                up = next((e for e in ents if e["model"] == start["model"]
+                           and e["level"] == DEEP_WORK_LEVEL), None)
+                if up is not None:
+                    start["level"], start["effort"] = up["level"], up["effort"]
+                start["deep_start"] = True
+                return start
         if band == "max":
             ranked = sorted(cands, key=lambda e: (-_chance(e, "max"), e["cost_per_task"]))
             chosen, sticky = ranked[0], False
             costs = {id(e): _expected(e, "max", k, rescue) for e in ranked}
+            if not level and _band(difficulty) == "max" and chosen["level"] == "max":
+                # Same model, one level down (see DEEP_WORK_LEVEL), when it
+                # was tested there. A level the user fixed is left alone.
+                # Looked up among all entries: after a step-up the lower level
+                # may not count as clearly stronger than what struggled, but
+                # it is the same model the step-up chose.
+                lower = next((e for e in ents if e["model"] == chosen["model"]
+                              and e["level"] == DEEP_WORK_LEVEL
+                              and (e["model"], e["level"]) != tuple(failed or ())), None)
+                if lower is not None:
+                    costs.setdefault(id(lower), _expected(lower, "max", k, rescue))
+                    ranked = [lower] + [e for e in ranked if e is not lower]
+                    chosen = lower
         else:
             best = max(_chance(e, band) for e in cands)
             able = [e for e in cands if _chance(e, band) >= SCORED_FLOOR * best] or cands
