@@ -1,7 +1,9 @@
 """A daily share of a monthly plan, so a small plan lasts the month.
 
-The person sets their monthly plan (in dollars, in Settings) and the day the
-month resets. Each day gets an even share of what is left:
+The monthly plan (in dollars) and the day it renews are fixed for the person,
+not a setting they can change (the user's call, 24 Nov): they come from
+~/.mesh-code/plan.json, or MESH_CODE_MONTHLY_PLAN_USD / MESH_CODE_PLAN_RESET_DAY
+in the environment. No plan = off. Each day gets an even share of what is left:
 
     today's share = (plan - spent this period before today) / days left
 
@@ -49,10 +51,35 @@ def period_for(today: date, reset_day: int) -> "tuple[date, date]":
     return start, _add_month(start, reset_day)
 
 
-class DailyCap:
-    def __init__(self, cfg: dict, path: "Path | None" = None, *, now=None):
+class FixedPlan:
+    """Where the fixed plan comes from, read fresh each time (cheap): the
+    environment first, then ~/.mesh-code/plan.json. Looks like a dict to
+    DailyCap, so tests can pass a plain one."""
+
+    ENV = {"monthly_plan_usd": "MESH_CODE_MONTHLY_PLAN_USD",
+           "plan_reset_day": "MESH_CODE_PLAN_RESET_DAY"}
+
+    def __init__(self, path: "Path | None" = None):
         from . import config as config_mod
-        self.cfg = cfg
+        self.path = Path(path) if path else config_mod.CONFIG_DIR / "plan.json"
+
+    def get(self, key: str, default=None):
+        env = os.environ.get(self.ENV.get(key, ""), "").strip()
+        if env:
+            return env
+        try:
+            d = json.loads(self.path.read_text())
+            if isinstance(d, dict) and d.get(key) is not None:
+                return d[key]
+        except (OSError, ValueError):
+            pass
+        return default
+
+
+class DailyCap:
+    def __init__(self, cfg=None, path: "Path | None" = None, *, now=None):
+        from . import config as config_mod
+        self.cfg = cfg if cfg is not None else FixedPlan()
         self.path = Path(path) if path else config_mod.CONFIG_DIR / "daily_cap.json"
         self._now = now or time.time
         self._lock = threading.RLock()
@@ -95,8 +122,17 @@ class DailyCap:
         """Start a new day or a new period when the date has moved on. The
         day's share is fixed when the day starts, so spending today cannot
         shrink today's share while you work."""
+        # Re-read first: every app window (and every running copy of the app)
+        # writes the same file, so what is in memory may be behind.
+        fresh = self._load()
+        if fresh or not self.path.exists():
+            self.data = fresh
         today = self._today()
-        start, end = period_for(today, self.cfg.get("plan_reset_day", 1))
+        try:
+            reset_day = int(self.cfg.get("plan_reset_day", 1) or 1)
+        except (TypeError, ValueError):
+            reset_day = 1
+        start, end = period_for(today, reset_day)
         d = self.data
         if d.get("period_start") != start.isoformat():
             d.clear()

@@ -87,8 +87,6 @@ DEFAULT_CONFIG = {
     # repeated identical actions ignore nudges, "keep-going" nudges forever
     # (unattended runs).
     "max_hops": 0,
-    "monthly_plan_usd": 0,      # daily share of a monthly plan; 0 = off
-    "plan_reset_day": 1,
     "auto_compact": True,
     "stall_policy": "pause",
     # Smart routing (local table-driven picker). route_mode: "off" (pin),

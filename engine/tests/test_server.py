@@ -533,3 +533,48 @@ def test_find_files_indexes_the_workspace_and_prunes_noise(app_client, tmp_path)
         assert ".env.example" in files
         assert not any(f.startswith("node_modules") for f in files)
         assert ev["data"]["truncated"] is False
+
+
+def test_the_monthly_plan_is_not_a_setting_people_can_change(app_client, tmp_path):
+    client, engine = app_client
+    with client.websocket_connect("/ws?token=secret-token") as ws:
+        ws.receive_text()
+        ws.send_text(json.dumps({"type": Request.SET_CONFIG, "key": "monthly_plan_usd", "value": 500}))
+        err = _drain_any(ws, Event.CONFIG_ERROR)
+    assert err["data"]["key"] == "monthly_plan_usd"
+    assert not engine.cap.enabled()
+
+
+def test_a_fixed_plan_turns_the_daily_share_on_for_every_chat(app_client, tmp_path):
+    from meshharness.core import config as config_mod
+    client, engine = app_client
+    (config_mod.CONFIG_DIR / "plan.json").write_text(json.dumps({"monthly_plan_usd": 10}))
+    with client.websocket_connect("/ws?token=secret-token") as ws:
+        hello = json.loads(ws.receive_text())
+        assert all(r["daily_cap"]["enabled"] for r in hello["data"]["sessions"])
+        ws.send_text(json.dumps({"type": Request.OPEN_WORKSPACE, "workspace": str(tmp_path)}))
+        sid = _drain(ws, Event.SESSION_STARTED)["session"]
+    assert engine.cap.enabled() and engine.sessions[sid]._cap_snapshot()["left_pct"] == 100.0
+
+
+def _drain_any(ws, want, limit=400):
+    for _ in range(limit):
+        ev = json.loads(ws.receive_text())
+        if ev.get("type") == want:
+            return ev
+    raise AssertionError(f"never saw {want}")
+
+
+def test_chats_reopened_after_a_restart_follow_the_daily_share(app_client, tmp_path):
+    client, engine = app_client
+    with client.websocket_connect("/ws?token=secret-token") as ws:
+        ws.receive_text()
+        ws.send_text(json.dumps({"type": Request.OPEN_WORKSPACE, "workspace": str(tmp_path)}))
+        sid = _drain(ws, Event.SESSION_STARTED)["session"]
+    engine.sessions[sid].save_state()
+    again = Engine(token="secret-token")
+    try:
+        assert sid in again.sessions and again.sessions[sid].cap is again.cap
+    finally:
+        for s in again.sessions.values():
+            s.close()

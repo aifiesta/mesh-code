@@ -29,7 +29,6 @@ CATEGORIES = [
     ("routing", "Routing", "Let Mesh choose per prompt, or pin one model"),
     ("local", "Local model", "A coding model on this machine: free and private while it answers"),
     ("behaviour", "Behaviour", "How the assistant works and writes"),
-    ("plan", "Daily share", "Spread a monthly plan over the month"),
     ("limits", "Limits & recovery", "What happens on long or stuck turns"),
     ("privacy", "Memory & privacy", "What persists between sessions"),
 ]
@@ -245,29 +244,6 @@ SCHEMA: list[dict] = [
         "multiline": True,
         "help": "Prepended to the harness's own instructions, not a replacement for them.",
         "why": "Good place for project conventions the model should always follow.",
-    },
-    {
-        "key": "monthly_plan_usd",
-        "category": "plan",
-        "type": "int",
-        "label": "Monthly plan (US$)",
-        "default": 0,
-        "min": 0, "max": 100000,
-        "zero_label": "Off",
-        "help": ("Your monthly plan. Each day gets an even share of what is left; once today's "
-                 "share is used, cloud models wait until tomorrow and the free local model "
-                 "carries on. 0 turns this off."),
-        "why": "Keeps a small plan from being used up in one long day, so it lasts the month.",
-    },
-    {
-        "key": "plan_reset_day",
-        "category": "plan",
-        "type": "int",
-        "label": "Plan resets on day",
-        "default": 1,
-        "min": 1, "max": 28,
-        "help": "The day of the month your plan starts again.",
-        "why": "The daily share counts the days left until this day.",
     },
     {
         "key": "max_hops",
