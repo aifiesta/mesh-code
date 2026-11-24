@@ -484,6 +484,11 @@ SCORED_COHORTS = ("agentic", "coding")
 # the live catalog, no pick changed; it only matters for a slow (local) model.
 TIME_VALUE = 0.05 / 3
 SCORED_FLOOR = 0.6       # never pick under 60% of the best chance available
+# Deep work keeps its model (the strongest there is) but thinks one level
+# lower: for Claude Opus 5.5, extra high scored the same on hard tasks as max
+# (60%), code quality 44% against 46%, at 40% less cost and two thirds of the
+# time (model scoring, 17 Nov). The user's call, 24 Nov: "make it default".
+DEEP_WORK_LEVEL = "xhigh"
 STICKY_MARGIN = 0.10     # keep the serving model while it is within 10% of the best
 # The scores carry margins of 5 to 12 points, so two entries whose expected
 # costs are this close cannot be told apart. Between them, take the one that
@@ -697,6 +702,13 @@ def pick_scored(difficulty: str, weights: "dict | None", doc: "dict | None",
             ranked = sorted(cands, key=lambda e: (-_chance(e, "max"), e["cost_per_task"]))
             chosen, sticky = ranked[0], False
             costs = {id(e): _expected(e, "max", k, rescue) for e in ranked}
+            if not level and _band(difficulty) == "max" and chosen["level"] == "max":
+                # Same model, one level down (see DEEP_WORK_LEVEL), when it
+                # was tested there. A level the user fixed is left alone.
+                lower = next((e for e in ranked if e["model"] == chosen["model"]
+                              and e["level"] == DEEP_WORK_LEVEL), None)
+                if lower is not None:
+                    chosen = lower
         else:
             best = max(_chance(e, band) for e in cands)
             able = [e for e in cands if _chance(e, band) >= SCORED_FLOOR * best] or cands
