@@ -111,6 +111,9 @@ class Engine:
             self.cfg, local_dir=config_mod.LOCAL_DIR, app_version=__version__,
             emit=lambda type_, data: self.emit(event(type_, None, **data)),
             on_catalog_change=self._share_catalog)
+        # Daily share of a monthly plan: one ledger for every window (core/dailycap).
+        from .core.dailycap import DailyCap
+        self.cap = DailyCap(self.cfg)
         self.usage = config_mod.load_usage()
         # Display-only exchange rate. Fetched in the background, never in a turn.
         self.fx = fx_mod.RateKeeper()
@@ -237,7 +240,8 @@ class Engine:
         if model:
             cfg["model"] = model
         self.add_root(workspace)
-        s = Session(sid, workspace, cfg, self.emit, mode=mode_from_str(mode), local=self.local)
+        s = Session(sid, workspace, cfg, self.emit, mode=mode_from_str(mode), local=self.local,
+                    cap=self.cap)
         self.sessions[sid] = s
         s.catalog = self.merged_catalog()
         s.start()

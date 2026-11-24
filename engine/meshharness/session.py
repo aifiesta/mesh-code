@@ -92,10 +92,13 @@ class Session:
     """One conversation against one workspace directory."""
 
     def __init__(self, session_id: str, workspace: str | Path, cfg: dict,
-                 emit, *, title: str = "", mode: Mode = Mode.DEFAULT, local=None):
+                 emit, *, title: str = "", mode: Mode = Mode.DEFAULT, local=None,
+                 cap=None):
         self.id = session_id
         # The engine's LocalModels layer, or None (tests, a cloud-only engine).
         self.local = local
+        # The engine's daily share of a monthly plan (core/dailycap), or None.
+        self.cap = cap
         # A step-up / back-to-local the user asked for from the UI thread;
         # the worker takes it at the start of the next hop.
         self._route_request: "tuple | None" = None
@@ -206,6 +209,7 @@ class Session:
             busy=self._busy.is_set(),
             servers=[{k: s.get(k) for k in ("pid", "port", "url", "cmd")}
                      for s in self.servers],
+            daily_cap=self.cap.snapshot() if self.cap is not None else {"enabled": False},
         )
 
     def describe(self) -> dict:
@@ -554,6 +558,7 @@ class Session:
         # _smart_pick (NOT cfg["model"], which stays the user's pin). After
         # this the effective pick is known — _route_turn sets turn_model.
         self._route_turn(text, had_image=bool(attachments))
+        cap_block = self._apply_daily_cap()
 
         model_used = self.cfg.get("model", "")
         self._status()
@@ -569,6 +574,12 @@ class Session:
             if hop_limit and hop > hop_limit:
                 self.emit(Event.NOTICE, level="warn",
                           message=f"stopped after {hop_limit} hops (max_hops)")
+                break
+
+            if cap_block:
+                self.emit(Event.ERROR, fatal=True, message=cap_block)
+                break
+            if self._cap_hard_stop():
                 break
 
             self._take_route_request()
@@ -694,6 +705,8 @@ class Session:
                     except Exception:
                         pass
                 self.turn_cost += hop_cost
+                if self.cap is not None:
+                    self.cap.record(hop_cost)   # local steps never come here
                 if estimated:
                     self.turn_estimated = True
                 # The split. From the gateway's own bill when it sent one;
@@ -885,6 +898,9 @@ class Session:
 
         while True:
             attempt += 1
+            broken = self.state.pop("_local_broken", None)
+            if broken:
+                return "", {"error": self._cap_message(f"the local model failed ({broken})")}
             msgs = self.state["messages"] + extras if extras else self.state["messages"]
             # Effective cfg: the LIVE smart pick as this hop's model (it may
             # have escalated since the turn began), reasoning stripped for
@@ -897,6 +913,9 @@ class Session:
                 target = self._local_target()
                 if target is None:
                     self._smart_escalate("the local model is not loaded any more")
+                    if self.state.get("_on_local"):     # the cloud is off today
+                        return "", {"error": self._cap_message(
+                            "the local model is not loaded any more")}
                 else:
                     # Request-only: the stored chat keeps main's full prompt,
                     # so a step-up sends the cloud model everything as usual.
@@ -1316,6 +1335,14 @@ class Session:
         On the local model, the first step is off it, to Smart routing's own
         pick for this task level (not "something clearly stronger", which
         from a local model would jump past the cheap pick to a dear one)."""
+        if self._cap_on():
+            # Today's share is used: no step up to the cloud, by signal or button.
+            if not self.state.get("_cap_said"):
+                self.state["_cap_said"] = True
+                self.emit(Event.NOTICE, level="info", message=(
+                    f"not moving to the cloud ({reason}): today's share of your plan is used, "
+                    "so cloud models are off until tomorrow"))
+            return False
         if self.state.get("_on_local"):
             return self._step_off_local(reason)
         if self.cfg.get("route_mode") != "smart":
@@ -1428,6 +1455,59 @@ class Session:
     # lands. After a step-up the turn stays on the cloud; the next message
     # starts local again.
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # daily share of a monthly plan
+    # ------------------------------------------------------------------
+    def _cap_on(self) -> bool:
+        try:
+            return self.cap is not None and self.cap.capped()
+        except Exception:
+            return False                      # a broken ledger never blocks work
+
+    def _cap_message(self, why: str) -> str:
+        return (f"Today's share of your plan is used, so cloud models are off until tomorrow, "
+                f"and {why}. Start again tomorrow, or raise your monthly plan in Settings.")
+
+    def _apply_daily_cap(self) -> "str | None":
+        """At the start of a task: once today's share is used, the task goes
+        to the free local model whatever model was picked or routed.
+        Returns a message to end the turn with when there is no local model."""
+        if not self._cap_on():
+            return None
+        if self.state.get("_on_local") or is_local(self._effective_model()):
+            return None                       # already free
+        target = self._local_target()
+        fits, why = self._local_fit() if target is not None else (False, "")
+        if target is not None and fits:
+            self.state["_cap_said"] = True
+            self._go_local(target, why="today's share of your plan is used: free on this machine")
+            self.emit(Event.NOTICE, level="info", message=(
+                "Today's share of your plan is used: this task runs on the free local model. "
+                "Cloud models are back tomorrow."))
+            return None
+        if self.local is None or not self.cfg.get("local_enabled", True):
+            return self._cap_message("local models are turned off, so nothing free can take this task")
+        if target is not None:
+            return self._cap_message(f"this chat is too long for the free local model ({why})")
+        return self._cap_message("no free local model is ready on this computer "
+                                 "(it may be loading: try again in a minute)")
+
+    def _cap_hard_stop(self) -> bool:
+        """A cloud task that kept going past today's share stops between
+        steps once it has spent twice the share (a runaway guard: a task is
+        otherwise allowed to finish)."""
+        if self.cap is None or self.state.get("_on_local") or is_local(self._effective_model()):
+            return False
+        try:
+            over = self.cap.past_hard_stop()
+        except Exception:
+            return False
+        if over:
+            self.emit(Event.NOTICE, level="warn", message=(
+                "Stopped between steps: this task has used twice today's share of your plan. "
+                "Cloud models are back tomorrow; the free local model can carry on now."))
+        return over
+
     def _local_target(self):
         """A Target for the loaded local model, or None (never blocks)."""
         if self.local is None or not self.cfg.get("local_enabled", True):
@@ -1444,6 +1524,8 @@ class Session:
         name = _short_model(model_id)
         self.emit(Event.NOTICE, level="warn",
                   message=f"{name} can't run on this computer right now: {reason}")
+        if self._cap_on():
+            return False          # cloud models are off today: nothing to offer
         use, stop = "Use the cloud for this task", "Stop"
         token = self.pending.open()
         self.emit(Event.ASK_USER, token=token, turn_id=None, from_app=True, questions=[{
@@ -1555,7 +1637,8 @@ class Session:
             self.local.recover()
         except Exception:
             pass
-        self._smart_escalate(f"the local server failed: {what}")
+        if not self._smart_escalate(f"the local server failed: {what}") and self._cap_on():
+            self.state["_local_broken"] = what
 
     def _local_messages(self, msgs: list) -> list:
         """The chat as a small local model is sent it: one short system
@@ -1753,7 +1836,12 @@ class Session:
             # compact, step up instead. (The point itself is unchanged.)
             window = self.local.context_window()
             if window and compact.should_compact(self._local_messages(self.state["messages"]), window):
-                self._smart_escalate("the chat outgrew the local model's window")
+                if not self._smart_escalate("the chat outgrew the local model's window") \
+                        and self.state.get("_on_local") and self.cfg.get("auto_compact", True):
+                    # Cloud is off today: trim to fit the local window instead.
+                    self._compact_now("the chat outgrew the local model's window",
+                                      line=int(window * compact.COMPACT_THRESHOLD))
+                    return
         if not self.cfg.get("auto_compact", True):
             return
         exhausted = self.state.get("_compact_exhausted")
