@@ -213,6 +213,7 @@ export function reduce(state: AppState, action: Action): AppState {
             model: row.model, mode: row.mode, route_mode: 'off',
             session_cost: row.session_cost ?? 0, session_tokens: row.session_tokens ?? 0,
             workspace: row.workspace ?? '', busy: !!row.busy, servers: [],
+            daily_cap: row.daily_cap,
           },
         }
       }
