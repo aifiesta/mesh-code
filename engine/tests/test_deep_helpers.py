@@ -199,6 +199,7 @@ def test_helpers_run_at_once_and_the_lead_reviews_with_their_reports(
     last = h.of(Event.HELPERS)[-1]["data"]
     assert last["working"] == 0 and last["cost"] == pytest.approx(0.004)
     assert [r["steps"] for r in last["helpers"]] == [2, 2]
+    assert all(r["secs"] < 5 for r in last["helpers"])
     assert h.of(Event.ASSISTANT_MESSAGE)[-1]["data"]["text"] == "All joined."
 
 
@@ -274,6 +275,8 @@ def test_a_helper_that_runs_out_of_time_is_reported_to_the_lead(
     done = h.wait_for(Event.TURN_FINISHED, timeout=20)
     assert time.time() - t0 < 7, "the lead must not wait out a stuck helper"
     assert [x["status"] for x in done["data"]["helpers"]] == ["done", "timed out"]
+    rows = h.of(Event.HELPERS)[-1]["data"]["helpers"]
+    assert rows[0]["secs"] < rows[1]["secs"], "a helper's time stops when it finishes"
     result = [m for m in gateway.requests[-1]["messages"] if m.get("role") == "tool"][-1]
     assert "timed out" in result["content"] and "finish this piece yourself" in result["content"]
 
@@ -355,3 +358,19 @@ def test_a_second_delegate_in_one_task_is_refused(gateway, harness, monkeypatch)
     res = [e for e in h.of(Event.TOOL_RESULT) if e["data"]["name"] == "delegate"]
     assert res[0]["data"]["ok"] and not res[1]["data"]["ok"]
     assert "already used" in res[1]["data"]["result"]
+
+
+def test_the_decision_note_rides_with_the_message_but_not_in_the_chat(harness):
+    h = harness(route_mode="smart")
+    s = h.session
+    s.state["messages"].append({"role": "user", "content": "rework the shop"})
+    s.state.update(_turn_level="max", _smart_pick="anthropic/claude-opus-5.5", _on_local=False)
+    s._arm_helpers()
+    assert s.state["messages"][-1]["content"].endswith(H.DECIDE_NOTE)
+    shown = [m for m in s.history_payload() if m["kind"] == "user"]
+    assert shown == [{"kind": "user", "text": "rework the shop"}]
+    # Not on other tasks.
+    s.state["messages"].append({"role": "user", "content": "small fix"})
+    s.state.update(_turn_level="high", _smart_pick="deepseek/deepseek-v4.1-flash-1017")
+    s._arm_helpers()
+    assert s.state["messages"][-1]["content"] == "small fix"

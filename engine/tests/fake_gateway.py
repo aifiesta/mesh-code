@@ -117,9 +117,11 @@ class FakeGateway:
                 with outer._lock:
                     outer.requests.append(payload)
                     outer.headers.append({k.lower(): v for k, v in self.headers.items()})
-                    # A responder answers by what the request says (requests
-                    # from sessions running at once arrive in any order).
-                    lines = outer.responder(payload) if outer.responder else None
+                # A responder answers by what the request says (requests from
+                # sessions running at once arrive in any order). Called outside
+                # the lock: it may wait for another request to arrive.
+                lines = outer.responder(payload) if outer.responder else None
+                with outer._lock:
                     if lines is None:
                         lines = outer._turns.pop(0) if outer._turns else sse_turn("(no script)")
                 if lines and lines[0] == "__drop__":

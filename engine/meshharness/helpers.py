@@ -60,8 +60,10 @@ DELEGATE_TOOL = {
             "and planned, and only when ALL of these hold: (1) the work splits into 2-4 pieces "
             "that each edit DIFFERENT files (no file in two pieces); (2) writing the code is "
             "clearly the bigger part of the job, not a small fix; (3) each piece can be built "
-            "from a short brief. Otherwise do the work yourself as usual: most tasks should not "
-            "be split. Each brief names the exact files the piece may edit (its test files "
+            "from a short brief. Otherwise do the work yourself as usual. A helper step costs "
+            "about a thirtieth of one of yours, so when these hold, handing the writing (code "
+            "and its tests) to helpers saves the user money; the review stays yours. Each "
+            "brief names the exact files the piece may edit (its test files "
             "too), the function names and signatures both sides rely on, the behaviour wanted, "
             "and which tests to run. Helpers read the files themselves: do not paste code or "
             "file contents into a brief. Helpers can't ask the user anything. The call returns "
@@ -96,6 +98,17 @@ DELEGATE_TOOL = {
         },
     },
 }
+
+# Said to the lead with the user's message on a task where helpers are on:
+# without it Opus read two files and started writing in 2 of 2 live runs, and
+# the decision the flow is built on was never made. Hidden in the chat view.
+DECIDE_NOTE = (
+    "\n\n[Mesh Code: this is Deep work, so you can hand the writing to cheaper helpers "
+    "with the `delegate` tool. Once you have read the code and know the change, decide "
+    "before you write anything: if it splits into 2-4 independent pieces on separate files "
+    "and writing them is the bigger part of the job, delegate them; if not, carry on "
+    "yourself.]")
+DECIDE_MARK = "\n\n[Mesh Code: this is Deep work"
 
 HELPER_TOOLS = [t for t in TOOLS if t["function"]["name"] not in HELPER_SKIP_TOOLS]
 
@@ -236,6 +249,8 @@ class HelperRun:
         elif typ in (Event.TURN_FINISHED, Event.TURN_ABORTED):
             with self.lock:
                 self.ended[n] = True
+                self._row(n)["secs"] = time.time() - self.started_at[n]
+            self.publish()
         elif typ == Event.TOOL_PROPOSED:
             # The user's permission mode asks for this call: the card shows in
             # the lead's chat, saying which helper is asking.
@@ -313,7 +328,8 @@ class HelperRun:
             lead._helpers_live = []
             for n, s in self.sessions.items():
                 row = self._row(n)
-                row["secs"] = time.time() - self.started_at[n]
+                if not self.ended[n]:
+                    row["secs"] = time.time() - self.started_at[n]
                 if n in why:
                     row["status"] = why[n]
                 elif not self.ended[n]:

@@ -385,6 +385,10 @@ class Session:
                                  if isinstance(p, dict) and p.get("type") == "text"), "")
                 else:
                     text = str(content or "")
+                # The Deep work decision note is for the model, not the chat.
+                text = text.split(helpers_mod.DECIDE_MARK)[0]
+                if text.startswith(helpers_mod.DECIDE_NOTE.strip()):
+                    text = ""
                 # Skip synthetic nudges (stall messages ride as user role)
                 if text.strip():
                     out.append({"kind": "user", "text": text})
@@ -1179,6 +1183,17 @@ class Session:
         pick = self.state.get("_smart_pick") or ""
         if self.state.get("_turn_level") == "max" and "claude-opus" in pick:
             self.state["_helpers_for"] = pick
+            # The decision point: on the user's message, so the lead weighs
+            # it before writing (see helpers.DECIDE_NOTE).
+            msgs = self.state.get("messages") or []
+            last = msgs[-1] if msgs else None
+            if last and last.get("role") == "user":
+                c = last.get("content")
+                if isinstance(c, str):
+                    last["content"] = c + helpers_mod.DECIDE_NOTE
+                elif isinstance(c, list):
+                    last["content"] = c + [{"type": "text",
+                                            "text": helpers_mod.DECIDE_NOTE.strip()}]
 
     def _helpers_summary(self) -> "list | None":
         rows = self.state.get("_helper_rows")
