@@ -81,10 +81,11 @@ def _simple_helper(payload):
 @pytest.mark.parametrize("level,pick,mode,offered", [
     ("max", "anthropic/claude-opus-5.5", "smart", True),
     ("xhigh", "anthropic/claude-opus-5.5", "smart", False),     # Complex task: unchanged
-    ("max", "openai/gpt-6.1-sol", "smart", False),              # Deep work but not on Opus
+    ("max", "openai/gpt-6.1-sol", "smart", True),               # Deep work starts on Sol since 24 Nov
+    ("max", "deepseek/deepseek-v4.1-flash-1017", "smart", False),  # never a helper leading helpers
     ("max", "anthropic/claude-opus-5.5", "off", False),         # Smart routing off
 ])
-def test_offered_only_when_the_task_starts_as_deep_work_on_opus(harness, level, pick, mode,
+def test_offered_only_when_the_task_starts_as_deep_work(harness, level, pick, mode,
                                                                 offered):
     h = harness(route_mode=mode)
     s = h.session
@@ -186,7 +187,7 @@ def test_helpers_run_at_once_and_the_lead_reviews_with_their_reports(
     result = next(m for m in lead_reqs[1]["messages"] if m.get("role") == "tool")["content"]
     assert 'Piece 1 "Alpha"' in result and "Wrote a.py." in result
     assert 'Piece 2 "Beta"' in result and "Wrote b.py." in result
-    assert "run the full test suite" in result
+    assert "Run the full test suite once" in result
     # Helpers asked on DeepSeek at max thinking, without the lead's extra tools.
     helper_reqs = [r for r in gateway.requests if r.get("model") != LEAD]
     assert {r["model"] for r in helper_reqs} == {H.HELPER_MODELS[0]}
@@ -374,3 +375,29 @@ def test_the_decision_note_rides_with_the_message_but_not_in_the_chat(harness):
     s.state.update(_turn_level="high", _smart_pick="deepseek/deepseek-v4.1-flash-1017")
     s._arm_helpers()
     assert s.state["messages"][-1]["content"] == "small fix"
+
+
+def test_deep_work_steps_up_from_its_start_to_the_strongest_even_with_effort_set(
+        harness, monkeypatch):
+    """Deep work starts below the strongest model; its one step-up is part of
+    Deep work, so it is taken with the Effort set to Deep work in Settings."""
+    from meshharness.core import router
+    h = harness(route_mode="smart", route_effort="max")
+    s = h.session
+    s.catalog = [{"id": "x"}]
+    monkeypatch.setattr(router, "load_table", lambda: {"x": 1})
+    seen = []
+
+    def choose(cohort, difficulty, *a, **kw):
+        seen.append((difficulty, kw.get("failed")))
+        return {"model": "anthropic/claude-opus-5.5", "level": "xhigh", "effort": "xhigh",
+                "scored": True}
+    monkeypatch.setattr(router, "choose", choose)
+    s._apply_pick({"model": "openai/gpt-6.1-sol", "level": "xhigh", "effort": "xhigh",
+                   "scored": True, "deep_start": True}, "max")
+    s.state["_smart_cohort"] = "agentic"
+    assert s._smart_escalate("model is repeating the same action")
+    assert s.state["_smart_pick"] == "anthropic/claude-opus-5.5"
+    assert seen == [("max", ("openai/gpt-6.1-sol", "xhigh"))]
+    # once on the strongest, the Effort the user set holds again
+    assert not s._smart_escalate("still struggling")
