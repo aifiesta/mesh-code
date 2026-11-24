@@ -1196,9 +1196,10 @@ class Session:
     # Deep work helpers (see helpers.py)
     # ------------------------------------------------------------------
     def _arm_helpers(self) -> None:
-        """At the start of a task: offer Opus the `delegate` tool when the
-        task STARTS as Deep work and Smart routing picked Opus. A task that
-        steps up into Opus later is finished by Opus alone."""
+        """At the start of a task: offer the lead the `delegate` tool when the
+        task STARTS as Deep work under Smart routing (Sol at extra high since
+        24 Nov; Opus where Sol is not offered). A task that steps up into
+        another model later is finished by that model alone."""
         self.state["_helpers_for"] = None
         self.state["_helpers_used"] = False
         if self.helper or not self.cfg.get("deep_work_helpers", True):
@@ -1206,7 +1207,8 @@ class Session:
         if self.cfg.get("route_mode") != "smart" or self.state.get("_on_local"):
             return
         pick = self.state.get("_smart_pick") or ""
-        if self.state.get("_turn_level") == "max" and "claude-opus" in pick:
+        if (self.state.get("_turn_level") == "max" and pick
+                and not pick.startswith(helpers_mod.HELPER_PREFIX)):
             self.state["_helpers_for"] = pick
             # The decision point: on the user's message, so the lead weighs
             # it before writing (see helpers.DECIDE_NOTE).
@@ -1484,7 +1486,12 @@ class Session:
             return False
         if not explicit and self.state.get("_smart_escalations", 0) >= self._MAX_ESCALATIONS:
             return False
-        if not explicit and self.cfg.get("route_effort", "auto") != "auto":
+        # Deep work starts below the strongest model (router.DEEP_WORK_LEVEL):
+        # its one step-up, to the strongest, is part of Deep work itself, so it
+        # is taken even when the user set the Effort to Deep work.
+        deep_step = bool(self.state.get("_smart_difficulty") == "max"
+                         and (self.state.get("_smart_pick_info") or {}).get("deep_start"))
+        if not explicit and not deep_step and self.cfg.get("route_effort", "auto") != "auto":
             return False  # user pinned the effort — respect it
         try:
             table = router.load_table()
@@ -1493,7 +1500,7 @@ class Session:
             cohort = self.state.get("_smart_cohort") or "chat"
             cur = self.state.get("_smart_difficulty") or "mid"
             nxt = router.escalate(cur)
-            if nxt == cur:
+            if nxt == cur and not deep_step:
                 return False  # already at the top
             prev = self._serving()
             got = router.choose(cohort, nxt, self.cfg.get("route_weights"),

@@ -54,7 +54,8 @@ def test_each_rung_of_the_ladder_gets_the_entry_that_is_cheapest_to_finish_with(
         assert _id(_pick(rung)) == ("t/cheap", "high"), rung
     assert _pick("xhigh")["model"] == "t/mid", \
         "once a task has beaten a model, the mid one is tried before the strong one"
-    assert _id(_pick("max")) == ("t/strong", "max")          # Deep work
+    deep = _pick("max")                                      # Deep work starts where Complex does
+    assert deep["model"] == "t/mid" and deep["deep_start"]
 
 
 def test_expected_cost_is_attempt_plus_wait_plus_failure_risk():
@@ -76,9 +77,12 @@ def test_a_model_that_cannot_do_hard_work_is_not_offered_it_however_cheap():
     assert all(r["model"] != "t/cheap" for r in got["ranked"])
 
 
-def test_max_means_the_strongest_whatever_it_costs():
-    assert _id(_pick("max")) == ("t/strong", "max")
-    assert _id(_pick("max", weights={"cost": 0.98, "cap": 0.01, "speed": 0.01})) == ("t/strong", "max")
+def test_deep_work_steps_up_to_the_strongest_whatever_it_costs():
+    start = _pick("max")
+    up = _pick("max", failed=(start["model"], start["level"]))
+    assert _id(up) == ("t/strong", "max")
+    cheap = {"cost": 0.98, "cap": 0.01, "speed": 0.01}
+    assert _id(_pick("max", weights=cheap, failed=(start["model"], start["level"]))) == ("t/strong", "max")
 
 
 def test_the_three_sliders_each_move_the_pick_their_own_way():
@@ -402,14 +406,21 @@ def test_the_bundled_scores_send_small_work_cheap_and_the_top_to_the_strongest()
         start = router.pick_scored(rung, None, doc, cat)
         assert price[start["model"]] <= 0.25, f"{rung} should not start on a dear model"
         assert price[start["model"]] < price[deep["model"]]
-    # Deep work: the model of the strongest entry there is, one thinking level
-    # down when it was tested there (router.DEEP_WORK_LEVEL).
+    # Deep work starts on the Complex pick, thinking at DEEP_WORK_LEVEL when it
+    # was tested there; its step-up reaches the model of the strongest entry,
+    # at that level too.
     ents = scores.entries(doc)
-    best = max(ents, key=lambda e: e["hard"]["score"] - e["hard"]["margin"])
-    assert deep["model"] == best["model"]
-    tested = {e["level"] for e in ents if e["model"] == best["model"]}
+    complex_pick = router.pick_scored("xhigh", None, doc, cat)
+    assert deep["model"] == complex_pick["model"] and deep["deep_start"]
+    tested = {e["level"] for e in ents if e["model"] == deep["model"]}
     assert deep["level"] == (router.DEEP_WORK_LEVEL if router.DEEP_WORK_LEVEL in tested
-                             else best["level"])
+                             else complex_pick["level"])
+    up = router.pick_scored("max", None, doc, cat, failed=(deep["model"], deep["level"]))
+    best = max(ents, key=lambda e: e["hard"]["score"] - e["hard"]["margin"])
+    assert up["model"] == best["model"]
+    tested = {e["level"] for e in ents if e["model"] == best["model"]}
+    assert up["level"] == (router.DEEP_WORK_LEVEL if router.DEEP_WORK_LEVEL in tested
+                           else best["level"])
 
 
 # ---- the table serving a coding turn ------------------------------------------------------
@@ -459,7 +470,8 @@ def test_the_level_the_user_forces_is_the_level_used(gateway, harness, monkeypat
     h.wait_for(Event.TURN_FINISHED)
     routed = h.of(Event.ROUTED)[0]["data"]
     assert routed["task"] == "Deep work" and routed["why"] == "you set it in Settings"
-    assert (routed["model"], routed["thinking"]) == ("t/strong", "max")
+    # Deep work starts on the Complex pick (router.DEEP_WORK_LEVEL)
+    assert routed["model"] == "t/mid"
 
 
 def test_explaining_a_route_gives_the_level_and_the_rule_behind_it(harness, monkeypatch):
@@ -614,15 +626,19 @@ def test_caching_makes_a_task_cheaper_not_faster():
         _priced("anthropic/claude-x")["minutes_per_task"]
 
 
-def test_deep_work_keeps_the_strongest_model_one_thinking_level_down():
-    """Deep work: the same model as before, at extra high when it was tested
-    there (router.DEEP_WORK_LEVEL); max stays for a model with no such entry,
-    for a level the user fixed, and for a step-up that found nothing stronger."""
+def test_deep_work_starts_on_the_complex_model_at_extra_high_and_steps_up_at_extra_high():
+    """Deep work starts on the model Complex would get, thinking at extra high
+    when it was tested there (router.DEEP_WORK_LEVEL); a step-up goes to the
+    strongest model, also at extra high when tested there. A level the user
+    fixed skips both rules."""
     doc = copy.deepcopy(DOC)
-    doc["models"]["t/strong"]["levels"]["xhigh"] = _e(90, 60, 12.0, 16)
-    got = _pick("max", doc=doc)
-    assert _id(got) == ("t/strong", "xhigh") and got["effort"] == "xhigh"
-    assert _id(_pick("max")) == ("t/strong", "max"), "no extra-high entry: max as before"
+    doc["models"]["t/mid"]["levels"]["xhigh"] = _e(84, 46, 1.4, 9)
+    doc["models"]["t/strong"]["levels"]["xhigh"] = _e(90, 58, 12.0, 16)
+    start = _pick("max", doc=doc)
+    assert _id(start) == ("t/mid", "xhigh") and start["effort"] == "xhigh" and start["deep_start"]
+    assert _pick("xhigh", doc=doc)["model"] == "t/mid", "Complex keeps its own level"
+    up = _pick("max", doc=doc, failed=("t/mid", "xhigh"))
+    assert _id(up) == ("t/strong", "xhigh") and not up.get("deep_start")
     assert _id(_pick("max", doc=doc, level="max")) == ("t/strong", "max"), "the user's level wins"
-    # a struggling Complex task that finds nothing stronger climbs at full strength
-    assert _id(_pick("xhigh", doc=doc, failed=("t/strong", "xhigh"))) == ("t/strong", "max")
+    # no extra-high entry anywhere: the Complex pick's own level, then strongest at max
+    assert _pick("max")["model"] == "t/mid"

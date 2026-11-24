@@ -1,7 +1,11 @@
-"""Deep work helpers: Opus plans and reviews, cheap helpers write the pieces.
+"""Deep work helpers: the lead plans and reviews, cheap helpers write the pieces.
 
-Only for a task that STARTS as Deep work with Smart routing on Opus (the
-user's design, 24 Nov). Opus reads the code and plans as it always does; on
+Only for a task that STARTS as Deep work under Smart routing. The lead was
+Opus (the user's design, 24 Nov); since the evening of 24 Nov Deep work starts
+on GPT-6.1 Sol at extra high and steps up to Opus only when Sol struggles, and
+the helpers stay with the lead that starts the task (the user's call: "sol
+extra high with the current helpers"). Below, "Opus" reads as "the lead".
+Opus reads the code and plans as it always does; on
 those turns it also has one more tool, `delegate`. If the work splits into
 2-4 independent pieces on separate files and writing them is clearly the
 bigger job, it hands each piece a short brief. Each piece goes to a fresh
@@ -61,7 +65,8 @@ DELEGATE_TOOL = {
             "that each edit DIFFERENT files (no file in two pieces); (2) writing the code is "
             "clearly the bigger part of the job, not a small fix; (3) each piece can be built "
             "from a short brief. Otherwise do the work yourself as usual. A helper step costs "
-            "about a thirtieth of one of yours, so when these hold, handing the writing (code "
+            "a small fraction (a twentieth or less) of one of yours, so when these hold, "
+            "handing the writing (code "
             "and its tests) to helpers saves the user money; the review stays yours. Each "
             "brief names the exact files the piece may edit (its test files "
             "too), the function names and signatures both sides rely on, the behaviour wanted, "
