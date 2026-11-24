@@ -2442,6 +2442,21 @@ body.resizing .rail-resize { pointer-events: auto; }
 .local-card.compact .local-actions .btn { padding: 3px 10px; font-size: var(--t-xs); }
 .ctl-flag.local { background: var(--ok-film); color: var(--ok); }
 .ctl-local { display: flex; gap: 4px; }
+/* Today's share of a monthly plan: a ring and a percentage, never money. */
+.ctl.ctl-day { flex: 0 1 auto; }
+.ctl.ctl-day .ctl-btn { max-width: 280px; }
+.day-ring { flex: none; }
+.day-ring-track { stroke: var(--film-3); }
+.day-ring-left { stroke: var(--ok); transition: stroke-dasharray .4s ease; }
+.ctl-btn.capped .ctl-value { color: var(--warn); }
+.ctl-btn.capped .day-ring-track { stroke: var(--warn-film); }
+.day-hero { display: flex; align-items: center; gap: 14px; margin: 4px 0 12px; }
+.day-ring-num { fill: var(--ink); font-size: 15px; font-weight: 600; font-family: var(--sans); }
+.day-big { font-weight: 600; color: var(--ink); font-size: var(--t-md, 15px); }
+.day-plan { display: flex; justify-content: space-between; align-items: baseline;
+  padding: 8px 0 2px; border-top: 1px solid var(--hair-soft); color: var(--ink-3); font-size: var(--t-xs); }
+.day-plan b { color: var(--ink-2); font-weight: 600; }
+.day-sub { color: var(--ink-3); font-size: var(--t-xs); margin-top: 2px; }
 .localpanel .profile-head { display: flex; align-items: center; justify-content: space-between; }
 .localpanel .profile-head .link { color: var(--brand); font-size: var(--t-xs); font-weight: 500; }
 .localpanel .browser-rows { max-height: 280px; }

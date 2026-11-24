@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import { useDismissable } from '../useDismissable'
-import type { LocalStatus, RouteExplain, SettingSpec, SettingsDoc, Status } from '../types'
+import type { DailyCap, LocalStatus, RouteExplain, SettingSpec, SettingsDoc, Status } from '../types'
 import { fmtTokens, fmtUsd, pricePerM, type CatalogModel } from '../types'
 import { Field } from './Field'
 import { BillTable } from './BillSplit'
@@ -69,7 +69,14 @@ export function ControlBar({ status, settings, catalog, routeExplain, local, onS
   // The local model inside Smart routing: which buttons make sense now.
   const onLocal = !!status?.turn_local
   const localReady = !!local?.enabled && local.server.state === 'ready'
-  const showEscalate = live && onLocal && routeMode === 'smart'
+  // Today's share of a monthly plan: past it, cloud models wait for tomorrow,
+  // so there is nothing to escalate to.
+  const cap = status?.daily_cap
+  const capped = !!cap?.enabled && cap.capped
+  // Past today's share a downloaded local model is woken for the task, so
+  // "on" means downloaded and turned on, not only loaded right now.
+  const localOn = !!local?.enabled && (local.models ?? []).some((m) => m.installed)
+  const showEscalate = live && onLocal && routeMode === 'smart' && !capped
   const showBack = live && !onLocal && localReady && routeMode === 'smart'
 
   const toggle = (id: string) => setOpen((o) => (o === id ? null : id))
@@ -158,6 +165,39 @@ export function ControlBar({ status, settings, catalog, routeExplain, local, onS
         </div>
       )}
 
+      {/* ---- today's share of the monthly plan (hidden when no plan is set) ---- */}
+      {cap?.enabled && (
+        <div className="ctl ctl-day">
+          <button className={`ctl-btn ${open === 'day' ? 'on' : ''} ${capped ? 'capped' : ''}`}
+                  onClick={() => toggle('day')}
+                  title={dayTitle(cap, localOn)}>
+            <Ring left={cap.left_pct} />
+            <span className="ctl-value">
+              {capped ? 'Today used up' : <>Today {Math.floor(cap.left_pct)}% left</>}
+            </span>
+          </button>
+          {open === 'day' && (
+            <Pop title="Today">
+              <div className="day-hero">
+                <Ring left={cap.left_pct} big />
+                <div>
+                  <div className="day-big">{capped ? 'Used up for today' : 'left for today'}</div>
+                  <div className="day-sub">
+                    {capped
+                      ? (localOn ? 'Free local model until tomorrow' : 'Cloud models back tomorrow')
+                      : 'Unused share carries over'}
+                  </div>
+                </div>
+              </div>
+              <div className="day-plan">
+                <span>Next share</span>
+                <b>{fmtDay(cap.next_share_on)}</b>
+              </div>
+            </Pop>
+          )}
+        </div>
+      )}
+
       {/* ---- tokens ---- */}
       <div className="ctl ctl-tok">
         <button className={`ctl-btn ${open === 'tok' ? 'on' : ''} ${live ? 'ticking' : ''}`}
@@ -220,13 +260,13 @@ export function ControlBar({ status, settings, catalog, routeExplain, local, onS
 }
 
 function Pop({ title, children, onSettings }: {
-  title: string; children: React.ReactNode; onSettings: () => void
+  title: string; children: React.ReactNode; onSettings?: () => void
 }) {
   return (
     <div className="pop">
       <div className="pop-head">{title}</div>
       {children}
-      <button className="pop-more" onClick={onSettings}>All settings →</button>
+      {onSettings && <button className="pop-more" onClick={onSettings}>All settings →</button>}
     </div>
   )
 }
@@ -268,6 +308,42 @@ function Explain({ explain }: { explain: RouteExplain | null }) {
       )}
     </div>
   )
+}
+
+/** A ring: how much of today's share is left. The big one has the number inside. */
+function Ring({ left, big }: { left: number; big?: boolean }) {
+  const size = big ? 64 : 14, stroke = big ? 6 : 2.25
+  const r = (size - stroke) / 2, c = 2 * Math.PI * r
+  const frac = Math.max(0, Math.min(1, left / 100))
+  return (
+    <svg className="day-ring" width={size} height={size} viewBox={`0 0 ${size} ${size}`} aria-hidden="true">
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" strokeWidth={stroke} className="day-ring-track" />
+      {frac > 0 && <circle cx={size / 2} cy={size / 2} r={r} fill="none" strokeWidth={stroke} className="day-ring-left"
+              strokeDasharray={`${c * frac} ${c}`} strokeLinecap="round"
+              transform={`rotate(-90 ${size / 2} ${size / 2})`} />}
+      {big && (
+        <text x="50%" y="50%" textAnchor="middle" dominantBaseline="central" className="day-ring-num">
+          {Math.floor(left)}%
+        </text>
+      )}
+    </svg>
+  )
+}
+
+function fmtDay(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const d = new Date(iso + 'T00:00:00')
+  if (isNaN(d.getTime())) return iso
+  return d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
+}
+
+/** The chip's tooltip: shares and dates only, never money. */
+function dayTitle(cap: Extract<DailyCap, { enabled: true }>, localOn: boolean): string {
+  if (cap.capped) {
+    return `Today's share of your plan is used. Cloud models are back ${fmtDay(cap.next_share_on)}`
+      + (localOn ? '; until then the free local model takes new tasks.' : '.')
+  }
+  return `${Math.floor(cap.left_pct)}% of today's share of your plan left. A new share starts ${fmtDay(cap.next_share_on)}.`
 }
 
 const shortModel = (m: string) => (m.includes('/') ? m.split('/').slice(1).join('/') : m)
