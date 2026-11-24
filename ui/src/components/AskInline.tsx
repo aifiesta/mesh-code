@@ -65,18 +65,18 @@ export function AskInline({ ask, answered, onAnswer, onDismiss }: {
               </button>
             ))}
           </div>
-          <input
+          {!ask.fromApp && <input
             className="ask-other"
             placeholder="Something else…"
             value={other[i] ?? ''}
             onChange={(e) => setOther((p) => ({ ...p, [i]: e.target.value }))}
             onKeyDown={(e) => { if (e.key === 'Enter' && ready) onAnswer(answers) }}
-          />
+          />}
         </div>
       ))}
 
       <div className="ask-inline-actions">
-        <button className="btn ghost" onClick={onDismiss}>Let the model decide</button>
+        {!ask.fromApp && <button className="btn ghost" onClick={onDismiss}>Let the model decide</button>}
         <div className="spacer" />
         <button className="btn primary" disabled={!ready} onClick={() => onAnswer(answers)}>
           Send answer

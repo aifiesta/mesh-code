@@ -111,6 +111,10 @@ class Engine:
             self.cfg, local_dir=config_mod.LOCAL_DIR, app_version=__version__,
             emit=lambda type_, data: self.emit(event(type_, None, **data)),
             on_catalog_change=self._share_catalog)
+        # Daily share of a fixed monthly plan (not a setting): one ledger for
+        # every window (core/dailycap).
+        from .core.dailycap import DailyCap
+        self.cap = DailyCap()
         self.usage = config_mod.load_usage()
         # Display-only exchange rate. Fetched in the background, never in a turn.
         self.fx = fx_mod.RateKeeper()
@@ -139,7 +143,8 @@ class Engine:
                         continue
                     if not Path(data["workspace"]).is_dir():
                         continue  # the project folder is gone
-                    sess = Session.restore(data, dict(self.cfg), self.emit, local=self.local)
+                    sess = Session.restore(data, dict(self.cfg), self.emit, local=self.local,
+                                           cap=self.cap)
                     sess.catalog = self.merged_catalog()
                     self.sessions[sess.id] = sess
                     self.add_root(str(sess.workspace))
@@ -178,7 +183,16 @@ class Engine:
         try:
             loop.call_soon_threadsafe(self.outbox.put_nowait, ev)
         except RuntimeError:
-            pass  # loop is shutting down
+            return  # loop is shutting down
+        if ev.get("type") in (Event.TURN_FINISHED, Event.TURN_ABORTED) and self.cap.enabled():
+            # Today's share is one figure for every chat: redraw the others
+            # after this one spent some of it.
+            for sid, other in list(self.sessions.items()):
+                if sid != ev.get("session"):
+                    try:
+                        other._status()
+                    except Exception:
+                        pass
 
     def spawn(self, coro) -> asyncio.Task:
         """create_task + keep a strong reference until it finishes."""
@@ -237,7 +251,8 @@ class Engine:
         if model:
             cfg["model"] = model
         self.add_root(workspace)
-        s = Session(sid, workspace, cfg, self.emit, mode=mode_from_str(mode), local=self.local)
+        s = Session(sid, workspace, cfg, self.emit, mode=mode_from_str(mode), local=self.local,
+                    cap=self.cap)
         self.sessions[sid] = s
         s.catalog = self.merged_catalog()
         s.start()

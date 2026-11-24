@@ -3,6 +3,7 @@ change start on it when it is loaded, a step-up goes to Smart routing's own
 pick for the level, and the extra local signals (no file read, two failed
 tool rounds, a step limit, failing tests) use the same step-up path."""
 import json
+import time
 
 import pytest
 from fake_gateway import FakeGateway, sse_turn
@@ -365,6 +366,7 @@ def test_a_picked_local_model_runs_every_step_and_never_steps_up(harness, gatewa
 def test_a_picked_local_model_that_is_not_ready_ends_the_turn_with_the_reason(harness, gateway, llama):
     h = harness(model="local/tiny", route_mode="off", local=StubLocal(llama, ready=False))
     h.session.submit("hi")
+    h.session.respond_ask(h.wait_for(Event.ASK_USER)["data"]["token"], ["Stop"])
     err = h.wait_for(Event.ERROR)
     assert err["data"]["fatal"] and "not downloaded" in err["data"]["message"]
     assert _chat_requests(gateway) == [] and llama.requests == []
@@ -373,5 +375,122 @@ def test_a_picked_local_model_that_is_not_ready_ends_the_turn_with_the_reason(ha
 def test_a_picked_local_model_with_local_turned_off_says_so(harness, gateway, llama):
     h = harness(model="local/tiny", route_mode="off", local=StubLocal(llama), local_enabled=False)
     h.session.submit("hi")
+    h.session.respond_ask(h.wait_for(Event.ASK_USER)["data"]["token"], ["Stop"])
     err = h.wait_for(Event.ERROR)
     assert "turned off" in err["data"]["message"] and _chat_requests(gateway) == []
+
+
+# ---- a picked local model and its small window ------------------------------
+
+LOCAL_ROW = {"id": "local/tiny", "context_length": 16384, "supports_tools": True, "local": True,
+             "pricing": {"prompt_usd_per_1m": "0", "completion_usd_per_1m": "0"}}
+TOO_LONG = json.dumps({"error": {
+    "code": 400, "message": "the request exceeds the available context size, try increasing it",
+    "type": "exceed_context_size_error", "n_prompt_tokens": 17000, "n_ctx": 16384}})
+
+
+def _bash(i):
+    return sse_turn(tool_calls=[{"id": f"b{i}", "name": "run_bash", "arguments": json.dumps(
+        {"command": f"python3 -c \"print('x' * 9000)\"  # {i}"})}])
+
+
+def _picked(harness, llama, **kw):
+    h = harness(mode=Mode.BYPASS, model="local/tiny", route_mode="off",
+                local=StubLocal(llama, window=16384), auto_compact=True, **kw)
+    h.session.catalog = [LOCAL_ROW] + CATALOG
+    return h
+
+
+def test_a_picked_local_model_is_trimmed_at_its_own_window(harness, gateway, llama):
+    llama.script(*[_bash(i) for i in range(16)], sse_turn("Done."))
+    h = _picked(harness, llama)
+    h.session.submit("print a lot")
+    h.wait_for(Event.TURN_FINISHED, timeout=60)
+    assert h.of(Event.COMPACTED), "a 16k local window must be trimmed long before 128k"
+    sent = [len(json.dumps(r["messages"])) // 4 for r in llama.requests]
+    assert max(sent) < 16384 * 0.8, sent
+
+
+def test_when_the_local_runner_says_too_long_the_chat_is_trimmed_and_retried(harness, gateway, llama):
+    llama.script(*[_bash(i) for i in range(6)], [f"__status__:400:{TOO_LONG}"], sse_turn("Done."))
+    h = _picked(harness, llama)
+    h.session.submit("print a lot")
+    fin = h.wait_for(Event.TURN_FINISHED, timeout=60)
+    assert h.of(Event.ERROR) == []
+    assert [c["data"]["reason"] for c in h.of(Event.COMPACTED)] == \
+        ["the chat outgrew the local model's window"]
+    assert len(llama.requests) == 8 and len(llama.requests[-1]["messages"]) < len(llama.requests[-2]["messages"])
+    assert fin["data"]["cost"] == 0
+
+
+def test_a_chat_that_cannot_be_trimmed_to_fit_says_so_plainly(harness, gateway, llama):
+    llama.script([f"__status__:400:{TOO_LONG}"])
+    h = _picked(harness, llama)
+    h.session.submit("hi")
+    err = h.wait_for(Event.ERROR)
+    msg = err["data"]["message"]
+    assert err["data"]["fatal"] and "16k window" in msg and "gateway" not in msg
+    assert _chat_requests(gateway) == []
+
+
+def test_other_local_errors_name_the_local_model_not_the_gateway(harness, gateway, llama):
+    llama.script(['__status__:400:{"error": {"message": "bad request"}}'])
+    h = _picked(harness, llama)
+    h.session.submit("hi")
+    err = h.wait_for(Event.ERROR)
+    assert err["data"]["message"] == "the local model returned HTTP 400"
+
+# ---- a picked local model that cannot run: warn, ask, then the cloud ----------
+
+def _picked_not_ready(harness, llama, monkeypatch):
+    monkeypatch.setattr(scores, "load", lambda path=None: DOC)
+    h = harness(mode=Mode.BYPASS, model="local/tiny", route_mode="off",
+                local=StubLocal(llama, ready=False))
+    h.session.catalog = CATALOG
+    return h
+
+
+def test_a_picked_local_model_that_cannot_run_warns_and_asks_before_the_cloud(harness, gateway, llama, monkeypatch):
+    gateway.script(sse_turn("The bulk discount is applied before tax."))
+    h = _picked_not_ready(harness, llama, monkeypatch)
+    h.session.submit(LOOKUP)
+    ask = h.wait_for(Event.ASK_USER)
+    q = ask["data"]["questions"][0]
+    assert "can't run on this computer" in q["question"] and "cost money" in q["question"]
+    assert [o["label"] for o in q["options"]] == ["Use the cloud for this task", "Stop"]
+    assert ask["data"]["from_app"] is True, "no \"Let the model decide\" on a question from the app"
+    assert any(n["data"]["level"] == "warn" and "can't run" in n["data"]["message"]
+               for n in h.of(Event.NOTICE))
+    time.sleep(0.1)
+    assert _chat_requests(gateway) == [], "nothing is spent before the user says yes"
+
+    h.session.respond_ask(ask["data"]["token"], ["Use the cloud for this task"])
+    fin = h.wait_for(Event.TURN_FINISHED)
+    sent = _chat_requests(gateway)
+    assert len(sent) == 1 and sent[0]["model"] in DOC["models"] and llama.requests == []
+    assert h.of(Event.ROUTED)[-1]["data"]["model"] == sent[0]["model"]
+    assert fin["data"]["cost"] > 0, "a cloud step is billed like any other"
+    assert h.session.cfg["model"] == "local/tiny" and h.session.cfg["route_mode"] == "off", \
+        "the user's choice of model and routing is not changed"
+
+
+def test_saying_stop_ends_the_task_with_the_reason_and_spends_nothing(harness, gateway, llama, monkeypatch):
+    h = _picked_not_ready(harness, llama, monkeypatch)
+    h.session.submit(LOOKUP)
+    ask = h.wait_for(Event.ASK_USER)
+    h.session.respond_ask(ask["data"]["token"], ["Stop"])
+    err = h.wait_for(Event.ERROR)
+    assert "not downloaded" in err["data"]["message"] and _chat_requests(gateway) == []
+
+
+def test_a_yes_covers_one_task_and_the_next_message_asks_again(harness, gateway, llama, monkeypatch):
+    gateway.script(sse_turn("First."), sse_turn("Second."))
+    h = _picked_not_ready(harness, llama, monkeypatch)
+    h.session.submit(LOOKUP)
+    h.session.respond_ask(h.wait_for(Event.ASK_USER)["data"]["token"], ["Use the cloud for this task"])
+    h.wait_for(Event.TURN_FINISHED)
+    h.session.submit(SMALL)
+    second = h.wait_for(Event.ASK_USER, min_count=2)
+    h.session.respond_ask(h.of(Event.ASK_USER)[-1]["data"]["token"], ["Use the cloud for this task"])
+    h.wait_for(Event.TURN_FINISHED, min_count=2)
+    assert len(h.of(Event.ASK_USER)) == 2 and len(_chat_requests(gateway)) == 2

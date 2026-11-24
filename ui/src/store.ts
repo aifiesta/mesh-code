@@ -213,6 +213,7 @@ export function reduce(state: AppState, action: Action): AppState {
             model: row.model, mode: row.mode, route_mode: 'off',
             session_cost: row.session_cost ?? 0, session_tokens: row.session_tokens ?? 0,
             workspace: row.workspace ?? '', busy: !!row.busy, servers: [],
+            daily_cap: row.daily_cap,
           },
         }
       }
@@ -510,7 +511,7 @@ export function reduce(state: AppState, action: Action): AppState {
       case Ev.ASK_USER: {
         // Inline in the transcript, not a modal: the answer becomes part of
         // the history instead of vanishing with the dialog.
-        const ask = { token: d.token, questions: d.questions }
+        const ask = { token: d.token, questions: d.questions, fromApp: !!d.from_app }
         return {
           ...s, ask,
           messages: [...s.messages, { kind: 'ask', id: nid(), ask }],

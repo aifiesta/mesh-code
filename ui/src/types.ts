@@ -151,7 +151,9 @@ export type AskQuestion = {
   options?: { label: string; description?: string }[]
   multiSelect?: boolean
 }
-export type Ask = { token: string; questions: AskQuestion[] }
+// fromApp: asked by the app itself (not the model), so there is no model to
+// leave the choice to and no free-text answer.
+export type Ask = { token: string; questions: AskQuestion[]; fromApp?: boolean }
 
 export type Status = {
   model: string; mode: Mode; route_mode: string; session_cost: number
@@ -169,7 +171,16 @@ export type Status = {
   turn_bill?: Bill | null
   session_bill?: Bill | null
   servers: { pid: number; port: number; url: string; cmd: string }[]
+  /** Today's share of a monthly plan (engine core/dailycap). Shares only,
+   *  never money. Off unless a monthly plan is set. */
+  daily_cap?: DailyCap
 }
+
+export type DailyCap =
+  | { enabled: false }
+  | { enabled: true; used_pct: number; left_pct: number; capped: boolean
+      /** ISO dates (the computer's own day). */
+      next_share_on: string; month_resets_on: string | null }
 
 /** Where a bill went. Cached and cache-written input are billed apart from
  *  fresh input; thinking is a share of output, never added on top of it.

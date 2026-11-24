@@ -49,7 +49,7 @@ from .core.plan import Plan
 from .core.tools import TOOLS, build_system_messages, find_stub_markers, summarize_call
 from .local import prompt as local_prompt
 from .local.manager import LocalUnavailable
-from .local.provider import is_local
+from .local.provider import AUTO_ID, is_local
 from .terminal import Terminal
 from .protocol import Decision, Event, event
 
@@ -73,6 +73,14 @@ TOOL_SCHEMAS = {t["function"]["name"]: (t["function"].get("parameters") or {}).g
                 for t in TOOLS}
 # Local model inside Smart routing (see the smart-routing section):
 LOCAL_LEVELS = ("low", "mid")       # Lookup and Small change start local
+# File reads sized to the serving model's window (tokens): one read at most a
+# fifth of it, all reads in one step at most two fifths, so a batch of reads
+# can never fill a 16k local window by itself (measured 24 Nov: three 13k-char
+# data files in one step were 32.8k tokens). Cloud windows of 1M never reach
+# these; the character caps in tools.py bind there as before.
+READ_SHARE = 0.20
+BATCH_READ_SHARE = 0.40
+READ_FLOOR_TOKENS = 400             # less room than this: defer the read to the next step
 LOCAL_STEP_LIMIT = 15               # steps on the local model before stepping up
 LOCAL_FAILED_ROUNDS = 2             # failed tool rounds in a row before stepping up
 # Tools that look at (or change) the project. A local answer with none of
@@ -84,10 +92,13 @@ class Session:
     """One conversation against one workspace directory."""
 
     def __init__(self, session_id: str, workspace: str | Path, cfg: dict,
-                 emit, *, title: str = "", mode: Mode = Mode.DEFAULT, local=None):
+                 emit, *, title: str = "", mode: Mode = Mode.DEFAULT, local=None,
+                 cap=None):
         self.id = session_id
         # The engine's LocalModels layer, or None (tests, a cloud-only engine).
         self.local = local
+        # The engine's daily share of a monthly plan (core/dailycap), or None.
+        self.cap = cap
         # A step-up / back-to-local the user asked for from the UI thread;
         # the worker takes it at the start of the next hop.
         self._route_request: "tuple | None" = None
@@ -198,6 +209,7 @@ class Session:
             busy=self._busy.is_set(),
             servers=[{k: s.get(k) for k in ("pid", "port", "url", "cmd")}
                      for s in self.servers],
+            daily_cap=self._cap_snapshot(),
         )
 
     def describe(self) -> dict:
@@ -213,6 +225,7 @@ class Session:
             "session_tokens": self.session_tokens,
             "messages": len(self.state["messages"]),
             "busy": self._busy.is_set(),
+            "daily_cap": self._cap_snapshot(),
         }
 
     # ------------------------------------------------------------------
@@ -321,11 +334,11 @@ class Session:
             pass  # persistence must never break a turn
 
     @classmethod
-    def restore(cls, data: dict, cfg: dict, emit, *, local=None) -> "Session":
+    def restore(cls, data: dict, cfg: dict, emit, *, local=None, cap=None) -> "Session":
         """Rebuild a session from its snapshot — conversation intact."""
         s = cls(data["id"], data["workspace"], cfg, emit,
                 title=data.get("title") or "",
-                mode=mode_from_str_safe(data.get("mode")), local=local)
+                mode=mode_from_str_safe(data.get("mode")), local=local, cap=cap)
         s.created_at = data.get("created_at") or s.created_at
         s.chat_label = data.get("label") or ""
         s.session_cost = float(data.get("session_cost") or 0)
@@ -526,6 +539,7 @@ class Session:
         self.state["_local_text_nudged"] = False
         self.state["_local_checked"] = False
         self.state.pop("_verify_fired", None)
+        self.state.pop("_cap_said", None)      # the daily-share notice, once per task
         # Which turn this is, so a plan revised inside it can keep its ticks
         # while a plan made in a later turn starts clean (see _plan_tool).
         self.state["_turn_id"] = turn_id
@@ -546,6 +560,7 @@ class Session:
         # _smart_pick (NOT cfg["model"], which stays the user's pin). After
         # this the effective pick is known — _route_turn sets turn_model.
         self._route_turn(text, had_image=bool(attachments))
+        cap_block = self._apply_daily_cap()
 
         model_used = self.cfg.get("model", "")
         self._status()
@@ -553,7 +568,12 @@ class Session:
         hop_limit = int(self.cfg.get("max_hops") or 0)
         aborted = False
 
-        while True:
+        if cap_block:
+            # Nothing free can take the task and the cloud is off today:
+            # end before any step, so nothing is sent anywhere.
+            self.emit(Event.ERROR, fatal=True, message=cap_block)
+            model_used = ""
+        while not cap_block:
             hop += 1
             if self._interrupt.is_set():
                 aborted = True
@@ -561,6 +581,9 @@ class Session:
             if hop_limit and hop > hop_limit:
                 self.emit(Event.NOTICE, level="warn",
                           message=f"stopped after {hop_limit} hops (max_hops)")
+                break
+
+            if self._cap_hard_stop():
                 break
 
             self._take_route_request()
@@ -588,8 +611,10 @@ class Session:
                 if (e.response.status_code < 500 and self._level_refused(
                         reasoning_refusal(_safe_text(e.response)))):
                     continue
+                source = ("the local model" if is_local(self._effective_model())
+                          else "gateway")
                 self.emit(Event.ERROR, fatal=True, message=(
-                    f"gateway returned HTTP {e.response.status_code}"),
+                    f"{source} returned HTTP {e.response.status_code}"),
                     detail=_safe_text(e.response))
                 break
             except httpx.RequestError as e:
@@ -607,6 +632,11 @@ class Session:
                     refusal = reasoning_refusal(msg)
                 if self._level_refused(refusal):
                     continue
+                if meta.get("cap_stop"):
+                    # The free local model can't go on and the cloud is off
+                    # today: nothing else may take this task.
+                    self.emit(Event.ERROR, fatal=True, message=msg)
+                    break
                 # If a SMART PICK errored, abandon it and retry on the pinned
                 # model — the model answering now beats the table's opinion.
                 # Only a pinned-model error (nothing to fall back to) is fatal.
@@ -618,6 +648,11 @@ class Session:
             model_used = meta.get("model") or model_used
             self.turn_model = model_used
             usage = meta.get("usage") or {}
+            if usage.get("prompt_tokens"):
+                # What this request really carried, for the trim check.
+                self.state["_seen_prompt"] = {"model": self._effective_model(),
+                                              "tokens": int(usage["prompt_tokens"]),
+                                              "n": len(self.state.get("messages") or [])}
             self.turn_tokens += int(usage.get("total_tokens") or 0)
             local_hop = bool(meta.get("local"))
             self.turn_local = local_hop
@@ -679,6 +714,8 @@ class Session:
                     except Exception:
                         pass
                 self.turn_cost += hop_cost
+                if self.cap is not None:
+                    self.cap.record(hop_cost)   # local steps never come here
                 if estimated:
                     self.turn_estimated = True
                 # The split. From the gateway's own bill when it sent one;
@@ -870,6 +907,10 @@ class Session:
 
         while True:
             attempt += 1
+            broken = self.state.pop("_local_broken", None)
+            if broken:
+                return "", {"error": self._cap_message(f"the local model failed ({broken})"),
+                            "cap_stop": True}
             msgs = self.state["messages"] + extras if extras else self.state["messages"]
             # Effective cfg: the LIVE smart pick as this hop's model (it may
             # have escalated since the turn began), reasoning stripped for
@@ -882,6 +923,9 @@ class Session:
                 target = self._local_target()
                 if target is None:
                     self._smart_escalate("the local model is not loaded any more")
+                    if self.state.get("_on_local"):     # the cloud is off today
+                        return "", {"error": self._cap_message(
+                            "the local model is not loaded any more"), "cap_stop": True}
                 else:
                     # Request-only: the stored chat keeps main's full prompt,
                     # so a step-up sends the cloud model everything as usual.
@@ -896,6 +940,9 @@ class Session:
                 except LocalUnavailable as e:
                     if self._interrupt.is_set():
                         raise KeyboardInterrupt
+                    if self._offer_cloud_instead(cfg["model"], str(e)):
+                        attempt = 0
+                        continue          # this hop again, on the cloud model
                     return "", {"error": f"local model: {e}", "local_unavailable": True}
                 msgs = self._local_messages(msgs)
             picked_local = target is not None and not self.state.get("_on_local")
@@ -916,6 +963,23 @@ class Session:
                     continue
                 code = e.response.status_code
                 body = _safe_text(e.response)
+                if picked_local:
+                    over = loopguard.parse_local_context_overflow(body)
+                    if over is not None:
+                        # The user chose this model, so there is no cloud to
+                        # hand the chat to: trim hard and try once more, and
+                        # if that is not enough say so in plain words.
+                        if not compacted_for_context and self.cfg.get("auto_compact", True):
+                            compacted_for_context = True
+                            if self._compact_now("the chat outgrew the local model's window",
+                                                 aggressive=True):
+                                continue
+                        window = over.get("context_limit") or target.context_limit
+                        size = f"{window // 1024}k " if window else ""
+                        return "", {"error": (
+                            f"this chat no longer fits the local model's {size}window, even "
+                            "after trimming it. Start a new chat, or pick a cloud model to "
+                            "carry on with this one.")}
                 overflow = loopguard.parse_max_tokens_overflow(body)
                 if overflow is not None and not self.state.get("_max_tokens_shrunk"):
                     new = loopguard.adjusted_max_tokens(overflow)
@@ -1109,6 +1173,9 @@ class Session:
     _MAX_ESCALATIONS = 2
 
     def _effective_model(self) -> str:
+        instead = self.state.get("_cloud_instead_of_local")
+        if instead:
+            return instead   # the user said yes to the cloud for this task
         pick = self.state.get("_smart_pick")
         if pick and self.cfg.get("route_mode") == "smart":
             return pick
@@ -1201,8 +1268,13 @@ class Session:
         self.state["_on_local"] = False
         self.state["_turn_level"] = None
         self.state["_turn_cohort"] = None
+        # A yes to the cloud covers one task; the next message asks again.
+        self.state.pop("_cloud_instead_of_local", None)
+        self.state["_turn_text"] = text
         if self.cfg.get("route_mode") != "smart":
             return
+        if self._cap_on():
+            return    # today's share is used: no cloud pick to name (_apply_daily_cap)
         self._route_cloud(text, had_image)
         try:
             self._start_local(had_image)
@@ -1275,6 +1347,14 @@ class Session:
         On the local model, the first step is off it, to Smart routing's own
         pick for this task level (not "something clearly stronger", which
         from a local model would jump past the cheap pick to a dear one)."""
+        if self._cap_on():
+            # Today's share is used: no step up to the cloud, by signal or button.
+            if explicit or not self.state.get("_cap_said"):
+                self.state["_cap_said"] = True
+                self.emit(Event.NOTICE, level="info", message=(
+                    f"not moving to the cloud ({reason}): today's share of your plan is used, "
+                    "so cloud models are off until tomorrow"))
+            return False
         if self.state.get("_on_local"):
             return self._step_off_local(reason)
         if self.cfg.get("route_mode") != "smart":
@@ -1387,6 +1467,73 @@ class Session:
     # lands. After a step-up the turn stays on the cloud; the next message
     # starts local again.
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # daily share of a monthly plan
+    # ------------------------------------------------------------------
+    def _cap_snapshot(self) -> dict:
+        try:
+            return self.cap.snapshot() if self.cap is not None else {"enabled": False}
+        except Exception:
+            return {"enabled": False}         # a broken ledger never breaks the status
+
+    def _cap_on(self) -> bool:
+        try:
+            return self.cap is not None and self.cap.capped()
+        except Exception:
+            return False                      # a broken ledger never blocks work
+
+    def _cap_message(self, why: str) -> str:
+        return (f"Today's share of your plan is used, so cloud models are off until tomorrow, "
+                f"and {why}.")
+
+    def _apply_daily_cap(self) -> "str | None":
+        """At the start of a task: once today's share is used, the task goes
+        to the free local model whatever model was picked or routed.
+        Returns a message to end the turn with when there is no local model."""
+        if not self._cap_on():
+            return None
+        if self.state.get("_on_local") or is_local(self._effective_model()):
+            return None                       # already free
+        if self.local is None or not self.cfg.get("local_enabled", True):
+            return self._cap_message("local models are turned off, so nothing free can take this task")
+        fits, why = self._local_fit()
+        if not fits and self.local.context_window():
+            return self._cap_message(f"this chat is too long for the free local model ({why})")
+        target = self._local_target()
+        if target is None:
+            # Downloaded but asleep: with the cloud off there is nothing else
+            # to answer, so wait for it to load (Stop still stops).
+            try:
+                target = self.local.target_for(
+                    AUTO_ID, cancel=self._interrupt,
+                    notify=lambda msg: self.emit(Event.NOTICE, level="info", message=msg))
+            except LocalUnavailable as e:
+                return self._cap_message(f"the free local model can't run here ({e})")
+            except Exception as e:
+                return self._cap_message(f"the free local model can't run here ({type(e).__name__})")
+        self.state["_cap_said"] = True
+        self._go_local(target, why="today's share of your plan is used: free on this machine")
+        self.emit(Event.NOTICE, level="info", message=(
+            "Today's share of your plan is used: this task runs on the free local model. "
+            "Cloud models are back tomorrow."))
+        return None
+
+    def _cap_hard_stop(self) -> bool:
+        """A cloud task that kept going past today's share stops between
+        steps once it has spent twice the share (a runaway guard: a task is
+        otherwise allowed to finish)."""
+        if self.cap is None or self.state.get("_on_local") or is_local(self._effective_model()):
+            return False
+        try:
+            over = self.cap.past_hard_stop()
+        except Exception:
+            return False
+        if over:
+            self.emit(Event.NOTICE, level="warn", message=(
+                "Stopped between steps: this task has used twice today's share of your plan. "
+                "Cloud models are back tomorrow; the free local model can carry on now."))
+        return over
+
     def _local_target(self):
         """A Target for the loaded local model, or None (never blocks)."""
         if self.local is None or not self.cfg.get("local_enabled", True):
@@ -1395,6 +1542,62 @@ class Session:
             return self.local.ready_target()
         except Exception:
             return None
+
+    def _offer_cloud_instead(self, model_id: str, reason: str) -> bool:
+        """The local model the user picked cannot run here. Warn, and ask
+        before spending money: on a yes, Smart routing's cloud pick for this
+        task answers it (the local model stays picked for later messages)."""
+        name = _short_model(model_id)
+        self.emit(Event.NOTICE, level="warn",
+                  message=f"{name} can't run on this computer right now: {reason}")
+        if self._cap_on():
+            # Cloud models are off today: nothing to offer.
+            self.emit(Event.NOTICE, level="info", message=(
+                "today's share of your plan is used, so the cloud can't take this task "
+                "until tomorrow"))
+            return False
+        use, stop = "Use the cloud for this task", "Stop"
+        token = self.pending.open()
+        self.emit(Event.ASK_USER, token=token, turn_id=None, from_app=True, questions=[{
+            "header": "Local model",
+            "question": (f"{name} can't run on this computer right now ({reason}). "
+                         "Use a cloud model for this task instead? Cloud models cost money."),
+            "options": [
+                {"label": use, "description": "Smart routing picks the cloud model for this task. "
+                                              "Your local model stays selected for later messages."},
+                {"label": stop, "description": "End this task without using the cloud."},
+            ]}])
+        try:
+            answers = self.pending.wait(token, timeout=ASK_TIMEOUT)
+        except Cancelled:
+            return False
+        answer = (answers[0] if isinstance(answers, list) and answers else answers) or ""
+        if str(answer).strip() != use:
+            return False
+        model = self._cloud_pick_for_turn()
+        if not model:
+            self.emit(Event.NOTICE, level="warn",
+                      message="no cloud model could be chosen (the model list has not loaded)")
+            return False
+        self.state["_cloud_instead_of_local"] = model
+        self.turn_model = model
+        self.emit(Event.NOTICE, level="info",
+                  message=f"using {_short_model(model)} in the cloud for this task, as you asked")
+        return True
+
+    def _cloud_pick_for_turn(self) -> "str | None":
+        """Smart routing's cloud pick for this turn's task, whatever the
+        routing setting: the same cost-aware choice a Smart routing user gets."""
+        saved = (self.state.get("_smart_pick"), self.state.get("_turn_level"),
+                 self.state.get("_turn_cohort"))
+        try:
+            self._route_cloud(self.state.get("_turn_text") or "", False)
+            return self.state.get("_smart_pick")
+        except Exception:
+            return None
+        finally:
+            # Routing off stays off: only the one model for this task is kept.
+            self.state["_smart_pick"], self.state["_turn_level"], self.state["_turn_cohort"] = saved
 
     def _picked_local_target(self, model_id: str):
         """A Target for a local model the user picked in the model list.
@@ -1464,7 +1667,8 @@ class Session:
             self.local.recover()
         except Exception:
             pass
-        self._smart_escalate(f"the local server failed: {what}")
+        if not self._smart_escalate(f"the local server failed: {what}") and self._cap_on():
+            self.state["_local_broken"] = what
 
     def _local_messages(self, msgs: list) -> list:
         """The chat as a small local model is sent it: one short system
@@ -1551,6 +1755,9 @@ class Session:
         kind, harder = req
         if kind == "escalate":
             why = "you asked for a stronger model"
+            if self._cap_on():
+                self._smart_escalate(why, explicit=True)   # refused, with a notice
+                return
             if self.state.get("_on_local"):
                 self._step_off_local(why)
                 if harder:
@@ -1662,31 +1869,60 @@ class Session:
             # compact, step up instead. (The point itself is unchanged.)
             window = self.local.context_window()
             if window and compact.should_compact(self._local_messages(self.state["messages"]), window):
-                self._smart_escalate("the chat outgrew the local model's window")
+                if not self._smart_escalate("the chat outgrew the local model's window") \
+                        and self.state.get("_on_local") and self.cfg.get("auto_compact", True):
+                    # Cloud is off today: trim to fit the local window instead.
+                    self._compact_now("the chat outgrew the local model's window",
+                                      line=int(window * compact.COMPACT_THRESHOLD))
+                    return
         if not self.cfg.get("auto_compact", True):
             return
-        if self.state.get("_compact_exhausted"):
+        exhausted = self.state.get("_compact_exhausted")
+        if exhausted is not False and exhausted is not None and \
+                (exhausted is True or len(self.state["messages"]) <= exhausted):
+            # Nothing was left to trim, and nothing has been added since.
             return
-        # Use the EFFECTIVE model's window — a mid-turn escalation may have
-        # moved to a model with a different context limit.
-        limit = compact.context_limit(self._effective_model(), self.catalog)
-        if compact.should_compact(self.state["messages"], limit):
-            # Pass the limit so the FOLD phase is reachable. Without it,
-            # compact_history only truncates; the second call finds nothing
-            # left to truncate, returns {}, and _compact_exhausted trips —
-            # making the next context error fatal. The whole fold machinery
-            # was dead before this argument was threaded through.
-            self._compact_now("approaching the context limit", limit=limit)
+        # Use the EFFECTIVE model's line — a mid-turn escalation may have
+        # moved to a model with a different window or price.
+        model = self._effective_model()
+        line = compact.trim_line(model, self.catalog)
+        used, scale = self._chat_tokens(model)
+        if used > line:
+            # The line also sets how far the trim goes (folding until under
+            # half of it), so it does not fire again a few steps later.
+            self._compact_now("approaching this model's trim point", line=line, scale=scale)
+
+    def _chat_tokens(self, model: str) -> "tuple[int, float]":
+        """(tokens the next request will carry, real-per-estimated ratio).
+        The last request's real prompt count from the provider (tools and
+        system prompt included) plus a guess for what was added since; the
+        chars/4 guess alone when there is no count for this model's chat."""
+        msgs = self.state.get("messages") or []
+        est = compact.est_history_tokens(msgs)
+        seen = self.state.get("_seen_prompt") or {}
+        if (seen.get("model") == model and seen.get("tokens")
+                and 0 < seen.get("n", 0) <= len(msgs)):
+            used = int(seen["tokens"]) + compact.est_history_tokens(msgs[seen["n"]:])
+            # Never below the guess: a provider that leaves cached tokens out
+            # of its count must not make a big chat look small.
+            return max(used, est), max(1.0, used / max(1, est))
+        return est, 1.0
 
     def _compact_now(self, why: str, *, limit: "int | None" = None,
-                     aggressive: bool = False) -> bool:
+                     aggressive: bool = False, line: "int | None" = None,
+                     scale: float = 1.0) -> bool:
         try:
             report = compact.compact_history(
-                self.state, limit=limit, aggressive=aggressive)
+                self.state, limit=limit, aggressive=aggressive, line=line, scale=scale)
         except Exception:
             return False
+        # The chat before the trim is what the last real count measured.
+        self.state.pop("_seen_prompt", None)
         if not report:
-            self.state["_compact_exhausted"] = True
+            # Remember how long the chat was: once it grows, there may be
+            # something to trim again (an early check on a real count can
+            # find nothing yet, and must not switch trimming off all turn).
+            self.state["_compact_exhausted"] = len(self.state.get("messages") or [])
             return False
         try:
             memory.invalidate_dropped(self.state)
@@ -1703,6 +1939,7 @@ class Session:
                            reply: "str | None" = None) -> dict:
         from .core.tools import repair_tool_args, validate_call  # noqa: F401
         prepared = [_prepare_call(tc) for tc in tool_calls]
+        self.state["_batch_read_tok"] = 0   # what this batch's reads have added
 
         self.state["messages"].append({
             "role": "assistant",
@@ -2133,6 +2370,27 @@ class Session:
                   action="edit")
         return result
 
+    def _serving_window(self) -> "int | None":
+        """The window of the model that will read this step's results."""
+        if self.state.get("_on_local") or is_local(self._effective_model()):
+            try:
+                return self.local.context_window() if self.local is not None else None
+            except Exception:
+                return None
+        return compact.context_limit(self._effective_model(), self.catalog)
+
+    def _read_room(self) -> "dict | None":
+        """Token room for file reads: one read at most READ_SHARE of the
+        window, all reads in one step at most BATCH_READ_SHARE. On a 1M-token
+        cloud window both are far above the character caps, so only small
+        windows (local models, small picked models) feel it."""
+        window = self._serving_window()
+        if not window:
+            return None
+        used = self.state.get("_batch_read_tok") or 0
+        return {"window": window, "read": int(window * READ_SHARE),
+                "batch": int(window * BATCH_READ_SHARE) - used}
+
     def _read_file(self, args: dict, call_id: str) -> str:
         path = args.get("path") or ""
         # Same reason as _write_file: hand memory the workspace-resolved path.
@@ -2153,8 +2411,22 @@ class Session:
             self.emit(Event.TOOL_RESULT, call_id=call_id, name="read_file",
                       ok=True, result=stub, deduped=True)
             return stub
-        detail = tools_mod.read_file_detail(args, cwd=self.workspace)
+        room = self._read_room()
+        if room is not None and room["batch"] < READ_FLOOR_TOKENS and self.state.get("_batch_read_tok"):
+            # Earlier reads in this same step already took the room this
+            # model has; the next step's trim makes space for this one.
+            result = (f"[{Path(path).name} not read in this step: the reads above already "
+                      f"take about {self.state['_batch_read_tok']} tokens, as much as this "
+                      f"model's {room['window'] // 1024}k window can take at once. Read it "
+                      "in your next step.]")
+            self.emit(Event.TOOL_RESULT, call_id=call_id, name="read_file",
+                      ok=True, result=result, bytes=len(result))
+            return result
+        detail = tools_mod.read_file_detail(
+            args, cwd=self.workspace,
+            max_tokens=None if room is None else min(room["read"], room["batch"]))
         result = detail["text"]
+        self.state["_batch_read_tok"] = (self.state.get("_batch_read_tok") or 0) + tools_mod.est_tokens(result)
         ok = not result.startswith("Error:")
         self.emit(Event.TOOL_RESULT, call_id=call_id, name="read_file",
                   ok=ok, result=_clip(result), bytes=len(result))

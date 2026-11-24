@@ -79,6 +79,50 @@ def context_limit(model_id: str, models: "list | None") -> int:
     return DEFAULT_CONTEXT_TOKENS
 
 
+# When to trim, per model (tokens). The window alone is the wrong line on
+# 1M-token cloud models: 70% of it never comes, while every step re-sends the
+# whole chat. Measured on the live list (23 Nov): some models bill every
+# token higher past a size (Haiku 5.5 5x past 100k, GPT-6 2x past 272k) and
+# re-reading a cached chat costs $0.10-0.20 per 1M on Claude/GPT/Gemini but
+# under $0.01 on DeepSeek. A trim re-sends the kept chat once at full price,
+# so it pays back after ~3-13 later steps on the dear ones, while on the
+# cheap ones it mostly just loses detail.
+PRICE_STEP_MARGIN = 0.90          # stay this far under a model's price step
+DEAR_CACHE_USD_PER_1M = 0.05      # cache reads at/over this per 1M: "dear"
+DEAR_LINE_TOKENS = 100_000        # trim point for dear-cache models
+CHEAP_LINE_TOKENS = 200_000       # trim point for cheap-cache models
+FOLD_BELOW = 0.50                 # after a trim, fold until under this share of the line
+RECENT_SHARE = 0.50               # the untouched recent window may hold at most this share
+
+
+def _price(row: dict, key: str) -> "float | None":
+    try:
+        v = (row.get("pricing") or {}).get(key)
+        return float(v) if v not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def trim_line(model_id: str, models: "list | None") -> int:
+    """Chat size (tokens) at which this model's chat is trimmed: the lowest
+    of 70% of its window, just under a price step it has, and a cost line set
+    by what re-reading its cached chat costs."""
+    window = context_limit(model_id, models)
+    line = int(window * COMPACT_THRESHOLD)
+    row = next((m for m in models or [] if m.get("id") == model_id), None)
+    if not row:
+        return line
+    step = row.get("standard_context_threshold")
+    if isinstance(step, int) and step > 0:
+        line = min(line, int(step * PRICE_STEP_MARGIN))
+    cached = _price(row, "cache_read_input_usd_per_1m")
+    if cached is None:
+        cached = _price(row, "prompt_usd_per_1m")
+    if cached is not None and cached > 0:
+        line = min(line, DEAR_LINE_TOKENS if cached >= DEAR_CACHE_USD_PER_1M else CHEAP_LINE_TOKENS)
+    return line
+
+
 def should_compact(messages: list, limit: int,
                    threshold: float = COMPACT_THRESHOLD) -> bool:
     return est_history_tokens(messages) > limit * threshold
@@ -192,7 +236,8 @@ def _persist_transcript(state: dict, messages: list) -> "str | None":
 
 
 def compact_history(state: dict, limit: "int | None" = None,
-                    aggressive: bool = False) -> dict:
+                    aggressive: bool = False, *, line: "int | None" = None,
+                    scale: float = 1.0) -> dict:
     """Shrink state["messages"] in place; keep session_reads coherent.
 
     `limit` gates phase 2: folding runs only while the estimate still
@@ -204,6 +249,14 @@ def compact_history(state: dict, limit: "int | None" = None,
     """
     messages = state.get("messages") or []
     keep_recent = KEEP_RECENT_AGGRESSIVE if aggressive else KEEP_RECENT_MESSAGES
+    if line:
+        # A small window can be filled by the last few messages alone (a
+        # 16k local window: seven file reads in one step). Then the untouched
+        # recent window shrinks, down to the aggressive one, so the trim
+        # can reach them. `scale` turns the chars/4 guess into real tokens.
+        while (keep_recent > KEEP_RECENT_AGGRESSIVE
+               and est_history_tokens(messages[-keep_recent:]) * scale > line * RECENT_SHARE):
+            keep_recent -= 1
     before_tok = est_history_tokens(messages)
     reads = state.get("session_reads") or {}
 
@@ -237,10 +290,13 @@ def compact_history(state: dict, limit: "int | None" = None,
 
     # ---- Phase 2: fold whole assistant/tool runs (only if still over) ------
     folded = 0
-    still_over = (
-        limit is not None
-        and est_history_tokens(messages) > limit * COMPACT_THRESHOLD
-    ) or (limit is None and aggressive)
+    if line:
+        still_over = est_history_tokens(messages) * scale > line * FOLD_BELOW
+    else:
+        still_over = (
+            limit is not None
+            and est_history_tokens(messages) > limit * COMPACT_THRESHOLD
+        ) or (limit is None and aggressive)
     if still_over:
         # Persist BEFORE dropping anything — the summary below points here.
         transcript = _persist_transcript(state, messages)

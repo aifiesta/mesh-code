@@ -784,6 +784,9 @@ function SessionView({ s, controls, banner, profile, railOpen, onRailResize, rai
                   </div>
                 )
               case 'turn':
+                // A task that ended before any step (e.g. today's share used
+                // and nothing free to run it) has no model or spend to show.
+                if (!m.hops && !m.model) return null
                 return (
                   <div className="turn-foot" key={m.id} id={`m-${m.id}`}>
                     {m.model} · {m.hops} hop{m.hops === 1 ? '' : 's'}
