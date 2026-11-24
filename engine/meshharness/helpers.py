@@ -67,14 +67,16 @@ DELEGATE_TOOL = {
             "from a short brief. Otherwise do the work yourself as usual. A helper step costs "
             "a small fraction (a twentieth or less) of one of yours, so when these hold, "
             "handing the writing (code "
-            "and its tests) to helpers saves the user money; the review stays yours. Each "
-            "brief names the exact files the piece may edit (its test files "
+            "and its tests) to helpers saves the user money; the review stays yours. Every file "
+            "the request changes, README and docs included, belongs to one piece, so nothing "
+            "is left for you to write. Each brief names the exact files the piece may edit "
+            "(its test files "
             "too), the function names and signatures both sides rely on, the behaviour wanted, "
             "and which tests to run. Helpers read the files themselves: do not paste code or "
             "file contents into a brief. Helpers can't ask the user anything. The call returns "
-            "each helper's report. Then YOU review and join: read the changes, run the full "
-            "test suite, fix what does not fit, finish any piece that failed, and give the user "
-            "the final summary. You can call it once per task."
+            "each helper's report. Then YOU join: run the full test suite, read the changed "
+            "code once, fix what is broken or missing from the request, finish any piece that "
+            "failed, and give the user the final summary. You can call it once per task."
         ),
         "parameters": {
             "type": "object",
@@ -114,6 +116,23 @@ DECIDE_NOTE = (
     "and writing them is the bigger part of the job, delegate them; if not, carry on "
     "yourself.]")
 DECIDE_MARK = "\n\n[Mesh Code: this is Deep work"
+
+# What the lead is told when the helpers are done. Kept short on purpose: a
+# Sol lead that re-read every file, tests included, in small chunks and then
+# polished passing code spent $0.20-0.55 on the review alone, more than the
+# planning and all the helpers together (live, 24 Nov). Opus's quick reviews
+# (run the suite, read the code once) cost $0.06 and missed nothing the
+# hidden checks found.
+REVIEW_ASK = (
+    "The helpers have finished. Join their work now, in as few steps as you can:\n"
+    "1. Run the full test suite once.\n"
+    "2. Read the changed code files once, whole and in one go (one command or one read "
+    "each). Do not read the test files unless a test fails, and do not read in small "
+    "chunks.\n"
+    "3. Fix only what is broken, or missing from the request, and finish any piece below "
+    "that is not done. Do not tidy, restyle or extend code or tests that already pass.\n"
+    "4. If you changed anything, run the full suite once more. Then give the user one "
+    "final summary.")
 
 HELPER_TOOLS = [t for t in TOOLS if t["function"]["name"] not in HELPER_SKIP_TOOLS]
 
@@ -361,9 +380,7 @@ class HelperRun:
             time.sleep(0.1)
 
     def report(self) -> str:
-        lines = ["The helpers have finished. Review and join now: read the changed files, run "
-                 "the full test suite, fix what does not fit, finish any piece below that is "
-                 "not done, then give the user one final summary.", ""]
+        lines = [REVIEW_ASK, ""]
         for p in self.pieces:
             n, row = p["n"], self._row(p["n"])
             head = (f"Piece {n} \"{p['title']}\" (files: {', '.join(p['files'])}): {row['status']} "

@@ -187,7 +187,7 @@ def test_helpers_run_at_once_and_the_lead_reviews_with_their_reports(
     result = next(m for m in lead_reqs[1]["messages"] if m.get("role") == "tool")["content"]
     assert 'Piece 1 "Alpha"' in result and "Wrote a.py." in result
     assert 'Piece 2 "Beta"' in result and "Wrote b.py." in result
-    assert "run the full test suite" in result
+    assert "Run the full test suite once" in result
     # Helpers asked on DeepSeek at max thinking, without the lead's extra tools.
     helper_reqs = [r for r in gateway.requests if r.get("model") != LEAD]
     assert {r["model"] for r in helper_reqs} == {H.HELPER_MODELS[0]}

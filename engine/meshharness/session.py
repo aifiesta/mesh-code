@@ -2178,6 +2178,21 @@ class Session:
 
         if name == "delegate":
             return self._delegate(p, turn_id, hop)
+        offered = sorted(t["function"]["name"] for t in self._tools())
+        if name not in offered:
+            # No such tool (or not one this step has, like start_server for a
+            # helper): say so at once. Asking the user to approve a call that
+            # cannot run was a dead click (a helper called "bash", 24 Nov).
+            near = "run_bash" if "bash" in name or "shell" in name else None
+            msg = (f"Error: there is no tool named {name!r}."
+                   + (f" Use {near}." if near and near in offered else
+                      f" The tools are: {', '.join(offered)}."))
+            self.emit(Event.TOOL_STARTED, call_id=p["id"], name=name,
+                      summary=summarize_call(name, args if isinstance(args, dict) else {}),
+                      args=_safe_args(name, args if isinstance(args, dict) else {}),
+                      turn_id=turn_id, hop=hop)
+            self.emit(Event.TOOL_RESULT, call_id=p["id"], name=name, ok=False, result=msg)
+            return msg
         if name in ("write_file", "edit_file") and self.helper:
             # A helper edits only its own piece's files: the others are
             # being written at this moment by another helper.
@@ -2219,6 +2234,15 @@ class Session:
                 self.emit(Event.NOTICE, level="warn",
                           message=f"auto-approval blocked: {reason}")
 
+        if not approved and self.helper and reason:
+            # A helper never stops the task for a click on something outside
+            # its project (24 Nov: scratch files in /tmp asked twice). It is
+            # told why and gets on with its piece.
+            self.emit(Event.TOOL_DECIDED, call_id=p["id"], name=name,
+                      decision=Decision.DENY, auto=True)
+            return (f"Error: not allowed for a helper ({reason}). Keep everything inside the "
+                    "project folder, scratch files included, or leave it for the lead and say "
+                    "so in your report.")
         if not approved:
             decision = self._request_approval(p, turn_id, hop, reason)
             if decision == Decision.ALWAYS:

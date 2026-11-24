@@ -28,6 +28,7 @@ Design notes:
   so a symlink in cwd pointing at /etc/passwd doesn't sneak past us.
 """
 import ipaddress
+import os
 import re
 import socket
 from pathlib import Path
@@ -221,8 +222,34 @@ def is_path_safe_for_auto_read(
         except OSError as e:
             return False, f"can't read the workspace directory: {e}"
         if not any(_is_inside(resolved, scope) for scope in scopes):
-            return False, "path is outside the current project directory"
+            # A folder inside the project that points elsewhere (a linked
+            # node_modules, a shared .venv) is part of the project as the
+            # user laid it out: reading through it is no riskier than reading
+            # the project, and the denylist above still applies to where it
+            # really lands (24 Nov: Auto stopped for a read under a linked
+            # node_modules). Without ".." tricks: the path is normalised
+            # first, so "node_modules/../../x" is judged as "../x".
+            lexical = _lexical(path_str, root)
+            if not any(_is_inside(lexical, scope) for scope in scopes):
+                return False, "path is outside the current project directory"
     return True, None
+
+
+def _lexical(path_str: str, root: "Path | None" = None) -> Path:
+    """The path as written, made absolute and normalised, links NOT followed."""
+    p = Path(path_str).expanduser()
+    if not p.is_absolute():
+        p = Path(root if root is not None else Path.cwd()) / p
+    base = Path(os.path.normpath(str(p)))
+    # The project folder itself may sit behind a link (/var -> /private/var):
+    # compare against its resolved form, keeping the part below it as written.
+    if root is not None:
+        try:
+            rel = base.relative_to(Path(os.path.normpath(str(Path(root).expanduser()))))
+            return Path(root).resolve() / rel
+        except ValueError:
+            pass
+    return base
 
 
 def is_command_safe_for_auto(
