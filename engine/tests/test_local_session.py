@@ -375,3 +375,64 @@ def test_a_picked_local_model_with_local_turned_off_says_so(harness, gateway, ll
     h.session.submit("hi")
     err = h.wait_for(Event.ERROR)
     assert "turned off" in err["data"]["message"] and _chat_requests(gateway) == []
+
+
+# ---- a picked local model and its small window ------------------------------
+
+LOCAL_ROW = {"id": "local/tiny", "context_length": 16384, "supports_tools": True, "local": True,
+             "pricing": {"prompt_usd_per_1m": "0", "completion_usd_per_1m": "0"}}
+TOO_LONG = json.dumps({"error": {
+    "code": 400, "message": "the request exceeds the available context size, try increasing it",
+    "type": "exceed_context_size_error", "n_prompt_tokens": 17000, "n_ctx": 16384}})
+
+
+def _bash(i):
+    return sse_turn(tool_calls=[{"id": f"b{i}", "name": "run_bash", "arguments": json.dumps(
+        {"command": f"python3 -c \"print('x' * 9000)\"  # {i}"})}])
+
+
+def _picked(harness, llama, **kw):
+    h = harness(mode=Mode.BYPASS, model="local/tiny", route_mode="off",
+                local=StubLocal(llama, window=16384), auto_compact=True, **kw)
+    h.session.catalog = [LOCAL_ROW] + CATALOG
+    return h
+
+
+def test_a_picked_local_model_is_trimmed_at_its_own_window(harness, gateway, llama):
+    llama.script(*[_bash(i) for i in range(16)], sse_turn("Done."))
+    h = _picked(harness, llama)
+    h.session.submit("print a lot")
+    h.wait_for(Event.TURN_FINISHED, timeout=60)
+    assert h.of(Event.COMPACTED), "a 16k local window must be trimmed long before 128k"
+    sent = [len(json.dumps(r["messages"])) // 4 for r in llama.requests]
+    assert max(sent) < 16384 * 0.8, sent
+
+
+def test_when_the_local_runner_says_too_long_the_chat_is_trimmed_and_retried(harness, gateway, llama):
+    llama.script(*[_bash(i) for i in range(6)], [f"__status__:400:{TOO_LONG}"], sse_turn("Done."))
+    h = _picked(harness, llama)
+    h.session.submit("print a lot")
+    fin = h.wait_for(Event.TURN_FINISHED, timeout=60)
+    assert h.of(Event.ERROR) == []
+    assert [c["data"]["reason"] for c in h.of(Event.COMPACTED)] == \
+        ["the chat outgrew the local model's window"]
+    assert len(llama.requests) == 8 and len(llama.requests[-1]["messages"]) < len(llama.requests[-2]["messages"])
+    assert fin["data"]["cost"] == 0
+
+
+def test_a_chat_that_cannot_be_trimmed_to_fit_says_so_plainly(harness, gateway, llama):
+    llama.script([f"__status__:400:{TOO_LONG}"])
+    h = _picked(harness, llama)
+    h.session.submit("hi")
+    err = h.wait_for(Event.ERROR)
+    msg = err["data"]["message"]
+    assert err["data"]["fatal"] and "16k window" in msg and "gateway" not in msg
+    assert _chat_requests(gateway) == []
+
+
+def test_other_local_errors_name_the_local_model_not_the_gateway(harness, gateway, llama):
+    llama.script(['__status__:400:{"error": {"message": "bad request"}}'])
+    h = _picked(harness, llama)
+    h.session.submit("hi")
+    err = h.wait_for(Event.ERROR)
+    assert err["data"]["message"] == "the local model returned HTTP 400"

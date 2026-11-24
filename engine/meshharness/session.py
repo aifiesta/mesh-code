@@ -588,8 +588,10 @@ class Session:
                 if (e.response.status_code < 500 and self._level_refused(
                         reasoning_refusal(_safe_text(e.response)))):
                     continue
+                source = ("the local model" if is_local(self._effective_model())
+                          else "gateway")
                 self.emit(Event.ERROR, fatal=True, message=(
-                    f"gateway returned HTTP {e.response.status_code}"),
+                    f"{source} returned HTTP {e.response.status_code}"),
                     detail=_safe_text(e.response))
                 break
             except httpx.RequestError as e:
@@ -916,6 +918,23 @@ class Session:
                     continue
                 code = e.response.status_code
                 body = _safe_text(e.response)
+                if picked_local:
+                    over = loopguard.parse_local_context_overflow(body)
+                    if over is not None:
+                        # The user chose this model, so there is no cloud to
+                        # hand the chat to: trim hard and try once more, and
+                        # if that is not enough say so in plain words.
+                        if not compacted_for_context and self.cfg.get("auto_compact", True):
+                            compacted_for_context = True
+                            if self._compact_now("the chat outgrew the local model's window",
+                                                 aggressive=True):
+                                continue
+                        window = over.get("context_limit") or target.context_limit
+                        size = f"{window // 1024}k " if window else ""
+                        return "", {"error": (
+                            f"this chat no longer fits the local model's {size}window, even "
+                            "after trimming it. Start a new chat, or pick a cloud model to "
+                            "carry on with this one.")}
                 overflow = loopguard.parse_max_tokens_overflow(body)
                 if overflow is not None and not self.state.get("_max_tokens_shrunk"):
                     new = loopguard.adjusted_max_tokens(overflow)
