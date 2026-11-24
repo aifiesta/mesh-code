@@ -1414,7 +1414,7 @@ class Session:
                   message=f"{name} can't run on this computer right now: {reason}")
         use, stop = "Use the cloud for this task", "Stop"
         token = self.pending.open()
-        self.emit(Event.ASK_USER, token=token, turn_id=None, questions=[{
+        self.emit(Event.ASK_USER, token=token, turn_id=None, from_app=True, questions=[{
             "header": "Local model",
             "question": (f"{name} can't run on this computer right now ({reason}). "
                          "Use a cloud model for this task instead? Cloud models cost money."),

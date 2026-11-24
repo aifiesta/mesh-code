@@ -398,6 +398,7 @@ def test_a_picked_local_model_that_cannot_run_warns_and_asks_before_the_cloud(ha
     q = ask["data"]["questions"][0]
     assert "can't run on this computer" in q["question"] and "cost money" in q["question"]
     assert [o["label"] for o in q["options"]] == ["Use the cloud for this task", "Stop"]
+    assert ask["data"]["from_app"] is True, "no \"Let the model decide\" on a question from the app"
     assert any(n["data"]["level"] == "warn" and "can't run" in n["data"]["message"]
                for n in h.of(Event.NOTICE))
     time.sleep(0.1)

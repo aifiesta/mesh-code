@@ -151,7 +151,9 @@ export type AskQuestion = {
   options?: { label: string; description?: string }[]
   multiSelect?: boolean
 }
-export type Ask = { token: string; questions: AskQuestion[] }
+// fromApp: asked by the app itself (not the model), so there is no model to
+// leave the choice to and no free-text answer.
+export type Ask = { token: string; questions: AskQuestion[]; fromApp?: boolean }
 
 export type Status = {
   model: string; mode: Mode; route_mode: string; session_cost: number

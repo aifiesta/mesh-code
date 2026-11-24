@@ -510,7 +510,7 @@ export function reduce(state: AppState, action: Action): AppState {
       case Ev.ASK_USER: {
         // Inline in the transcript, not a modal: the answer becomes part of
         // the history instead of vanishing with the dialog.
-        const ask = { token: d.token, questions: d.questions }
+        const ask = { token: d.token, questions: d.questions, fromApp: !!d.from_app }
         return {
           ...s, ask,
           messages: [...s.messages, { kind: 'ask', id: nid(), ask }],
