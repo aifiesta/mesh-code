@@ -73,6 +73,14 @@ TOOL_SCHEMAS = {t["function"]["name"]: (t["function"].get("parameters") or {}).g
                 for t in TOOLS}
 # Local model inside Smart routing (see the smart-routing section):
 LOCAL_LEVELS = ("low", "mid")       # Lookup and Small change start local
+# File reads sized to the serving model's window (tokens): one read at most a
+# fifth of it, all reads in one step at most two fifths, so a batch of reads
+# can never fill a 16k local window by itself (measured 24 Nov: three 13k-char
+# data files in one step were 32.8k tokens). Cloud windows of 1M never reach
+# these; the character caps in tools.py bind there as before.
+READ_SHARE = 0.20
+BATCH_READ_SHARE = 0.40
+READ_FLOOR_TOKENS = 400             # less room than this: defer the read to the next step
 LOCAL_STEP_LIMIT = 15               # steps on the local model before stepping up
 LOCAL_FAILED_ROUNDS = 2             # failed tool rounds in a row before stepping up
 # Tools that look at (or change) the project. A local answer with none of
@@ -588,8 +596,10 @@ class Session:
                 if (e.response.status_code < 500 and self._level_refused(
                         reasoning_refusal(_safe_text(e.response)))):
                     continue
+                source = ("the local model" if is_local(self._effective_model())
+                          else "gateway")
                 self.emit(Event.ERROR, fatal=True, message=(
-                    f"gateway returned HTTP {e.response.status_code}"),
+                    f"{source} returned HTTP {e.response.status_code}"),
                     detail=_safe_text(e.response))
                 break
             except httpx.RequestError as e:
@@ -618,6 +628,11 @@ class Session:
             model_used = meta.get("model") or model_used
             self.turn_model = model_used
             usage = meta.get("usage") or {}
+            if usage.get("prompt_tokens"):
+                # What this request really carried, for the trim check.
+                self.state["_seen_prompt"] = {"model": self._effective_model(),
+                                              "tokens": int(usage["prompt_tokens"]),
+                                              "n": len(self.state.get("messages") or [])}
             self.turn_tokens += int(usage.get("total_tokens") or 0)
             local_hop = bool(meta.get("local"))
             self.turn_local = local_hop
@@ -916,6 +931,23 @@ class Session:
                     continue
                 code = e.response.status_code
                 body = _safe_text(e.response)
+                if picked_local:
+                    over = loopguard.parse_local_context_overflow(body)
+                    if over is not None:
+                        # The user chose this model, so there is no cloud to
+                        # hand the chat to: trim hard and try once more, and
+                        # if that is not enough say so in plain words.
+                        if not compacted_for_context and self.cfg.get("auto_compact", True):
+                            compacted_for_context = True
+                            if self._compact_now("the chat outgrew the local model's window",
+                                                 aggressive=True):
+                                continue
+                        window = over.get("context_limit") or target.context_limit
+                        size = f"{window // 1024}k " if window else ""
+                        return "", {"error": (
+                            f"this chat no longer fits the local model's {size}window, even "
+                            "after trimming it. Start a new chat, or pick a cloud model to "
+                            "carry on with this one.")}
                 overflow = loopguard.parse_max_tokens_overflow(body)
                 if overflow is not None and not self.state.get("_max_tokens_shrunk"):
                     new = loopguard.adjusted_max_tokens(overflow)
@@ -1665,28 +1697,52 @@ class Session:
                 self._smart_escalate("the chat outgrew the local model's window")
         if not self.cfg.get("auto_compact", True):
             return
-        if self.state.get("_compact_exhausted"):
+        exhausted = self.state.get("_compact_exhausted")
+        if exhausted is not False and exhausted is not None and \
+                (exhausted is True or len(self.state["messages"]) <= exhausted):
+            # Nothing was left to trim, and nothing has been added since.
             return
-        # Use the EFFECTIVE model's window — a mid-turn escalation may have
-        # moved to a model with a different context limit.
-        limit = compact.context_limit(self._effective_model(), self.catalog)
-        if compact.should_compact(self.state["messages"], limit):
-            # Pass the limit so the FOLD phase is reachable. Without it,
-            # compact_history only truncates; the second call finds nothing
-            # left to truncate, returns {}, and _compact_exhausted trips —
-            # making the next context error fatal. The whole fold machinery
-            # was dead before this argument was threaded through.
-            self._compact_now("approaching the context limit", limit=limit)
+        # Use the EFFECTIVE model's line — a mid-turn escalation may have
+        # moved to a model with a different window or price.
+        model = self._effective_model()
+        line = compact.trim_line(model, self.catalog)
+        used, scale = self._chat_tokens(model)
+        if used > line:
+            # The line also sets how far the trim goes (folding until under
+            # half of it), so it does not fire again a few steps later.
+            self._compact_now("approaching this model's trim point", line=line, scale=scale)
+
+    def _chat_tokens(self, model: str) -> "tuple[int, float]":
+        """(tokens the next request will carry, real-per-estimated ratio).
+        The last request's real prompt count from the provider (tools and
+        system prompt included) plus a guess for what was added since; the
+        chars/4 guess alone when there is no count for this model's chat."""
+        msgs = self.state.get("messages") or []
+        est = compact.est_history_tokens(msgs)
+        seen = self.state.get("_seen_prompt") or {}
+        if (seen.get("model") == model and seen.get("tokens")
+                and 0 < seen.get("n", 0) <= len(msgs)):
+            used = int(seen["tokens"]) + compact.est_history_tokens(msgs[seen["n"]:])
+            # Never below the guess: a provider that leaves cached tokens out
+            # of its count must not make a big chat look small.
+            return max(used, est), max(1.0, used / max(1, est))
+        return est, 1.0
 
     def _compact_now(self, why: str, *, limit: "int | None" = None,
-                     aggressive: bool = False) -> bool:
+                     aggressive: bool = False, line: "int | None" = None,
+                     scale: float = 1.0) -> bool:
         try:
             report = compact.compact_history(
-                self.state, limit=limit, aggressive=aggressive)
+                self.state, limit=limit, aggressive=aggressive, line=line, scale=scale)
         except Exception:
             return False
+        # The chat before the trim is what the last real count measured.
+        self.state.pop("_seen_prompt", None)
         if not report:
-            self.state["_compact_exhausted"] = True
+            # Remember how long the chat was: once it grows, there may be
+            # something to trim again (an early check on a real count can
+            # find nothing yet, and must not switch trimming off all turn).
+            self.state["_compact_exhausted"] = len(self.state.get("messages") or [])
             return False
         try:
             memory.invalidate_dropped(self.state)
@@ -1703,6 +1759,7 @@ class Session:
                            reply: "str | None" = None) -> dict:
         from .core.tools import repair_tool_args, validate_call  # noqa: F401
         prepared = [_prepare_call(tc) for tc in tool_calls]
+        self.state["_batch_read_tok"] = 0   # what this batch's reads have added
 
         self.state["messages"].append({
             "role": "assistant",
@@ -2133,6 +2190,27 @@ class Session:
                   action="edit")
         return result
 
+    def _serving_window(self) -> "int | None":
+        """The window of the model that will read this step's results."""
+        if self.state.get("_on_local") or is_local(self._effective_model()):
+            try:
+                return self.local.context_window() if self.local is not None else None
+            except Exception:
+                return None
+        return compact.context_limit(self._effective_model(), self.catalog)
+
+    def _read_room(self) -> "dict | None":
+        """Token room for file reads: one read at most READ_SHARE of the
+        window, all reads in one step at most BATCH_READ_SHARE. On a 1M-token
+        cloud window both are far above the character caps, so only small
+        windows (local models, small picked models) feel it."""
+        window = self._serving_window()
+        if not window:
+            return None
+        used = self.state.get("_batch_read_tok") or 0
+        return {"window": window, "read": int(window * READ_SHARE),
+                "batch": int(window * BATCH_READ_SHARE) - used}
+
     def _read_file(self, args: dict, call_id: str) -> str:
         path = args.get("path") or ""
         # Same reason as _write_file: hand memory the workspace-resolved path.
@@ -2153,8 +2231,22 @@ class Session:
             self.emit(Event.TOOL_RESULT, call_id=call_id, name="read_file",
                       ok=True, result=stub, deduped=True)
             return stub
-        detail = tools_mod.read_file_detail(args, cwd=self.workspace)
+        room = self._read_room()
+        if room is not None and room["batch"] < READ_FLOOR_TOKENS and self.state.get("_batch_read_tok"):
+            # Earlier reads in this same step already took the room this
+            # model has; the next step's trim makes space for this one.
+            result = (f"[{Path(path).name} not read in this step: the reads above already "
+                      f"take about {self.state['_batch_read_tok']} tokens, as much as this "
+                      f"model's {room['window'] // 1024}k window can take at once. Read it "
+                      "in your next step.]")
+            self.emit(Event.TOOL_RESULT, call_id=call_id, name="read_file",
+                      ok=True, result=result, bytes=len(result))
+            return result
+        detail = tools_mod.read_file_detail(
+            args, cwd=self.workspace,
+            max_tokens=None if room is None else min(room["read"], room["batch"]))
         result = detail["text"]
+        self.state["_batch_read_tok"] = (self.state.get("_batch_read_tok") or 0) + tools_mod.est_tokens(result)
         ok = not result.startswith("Error:")
         self.emit(Event.TOOL_RESULT, call_id=call_id, name="read_file",
                   ok=ok, result=_clip(result), bytes=len(result))

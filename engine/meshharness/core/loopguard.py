@@ -221,6 +221,37 @@ def parse_max_tokens_overflow(msg: str) -> "dict | None":
         return None
 
 
+# The local runner's (llama-server's) refusal of a prompt longer than the
+# window it was started with. Its own wording, not the gateway's, so the
+# gateway parser above never matches it.
+_LOCAL_OVERFLOW_MARKERS = (
+    "exceed_context_size_error",
+    "exceeds the available context size",
+    "larger than the max context size",
+)
+
+
+def parse_local_context_overflow(body: str) -> "dict | None":
+    """The local runner said the chat no longer fits its window.
+
+    Returns {"prompt_tokens", "context_limit"} (either may be None when the
+    body does not carry them) or None for any other error."""
+    text = str(body or "")
+    if not any(k in text.lower() for k in _LOCAL_OVERFLOW_MARKERS):
+        return None
+    out = {"prompt_tokens": None, "context_limit": None}
+    try:
+        import json as _json
+        err = _json.loads(text).get("error") or {}
+        if isinstance(err, dict):
+            for src, dst in (("n_prompt_tokens", "prompt_tokens"), ("n_ctx", "context_limit")):
+                if isinstance(err.get(src), int):
+                    out[dst] = err[src]
+    except (ValueError, AttributeError):
+        pass
+    return out
+
+
 def adjusted_max_tokens(overflow: dict, margin: int = 256) -> "int | None":
     """New max_tokens that fits, or None if compaction is the only way out."""
     room = overflow["context_limit"] - overflow["input_tokens"] - margin
