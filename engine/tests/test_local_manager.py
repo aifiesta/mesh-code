@@ -286,3 +286,11 @@ def test_quitting_while_the_model_loads_in_the_background_leaves_nothing_running
     time.sleep(1.0)
     assert proc.poll() is not None and layer.server._proc is None
     assert layer.ready_target() is None and layer.server._proc is None
+
+
+def test_a_model_too_big_for_this_machine_says_so_not_that_it_is_missing(layer, monkeypatch):
+    layer.cfg["local_auto_setup"] = False
+    layer.boot()
+    monkeypatch.setattr(layer, "_plan_for", lambda mid: None)   # does not fit here
+    with pytest.raises(manager_mod.LocalUnavailable, match="does not fit in memory on this machine"):
+        layer.target_for("local/tiny")

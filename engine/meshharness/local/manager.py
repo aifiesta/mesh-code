@@ -369,6 +369,9 @@ class LocalModels:
         if not entry:
             raise LocalUnavailable(f"unknown local model {resolved}")
         plan = self._plan_for(resolved)
+        if plan is None:
+            # Said first: "not downloaded" would suggest a download fixes it.
+            raise LocalUnavailable(f"{entry['label']} does not fit in memory on this machine", permanent=True)
         path = self.state.get("installed", {}).get(resolved)
         if not path or not Path(path).exists():
             job = self._job_for(resolved)
@@ -379,8 +382,6 @@ class LocalModels:
             # a click. Say so once, not every turn.
             settled = bool(self.state.get("declined")) or bool(plan and self._blocked(plan))
             raise LocalUnavailable(f"{entry['label']} is not downloaded yet", permanent=settled)
-        if plan is None:
-            raise LocalUnavailable(f"{entry['label']} does not fit in memory on this machine", permanent=True)
         if plan.slow and not self.cfg.get("local_use_when_slow", False):
             raise LocalUnavailable(f"{entry['label']} would run slowly here; enable 'Use even when slow' to try it",
                                    permanent=True)
