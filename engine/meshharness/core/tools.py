@@ -1671,6 +1671,10 @@ def summarize_call(name: str, arguments: dict) -> str:
         return f"create_plan ({n} step{'s' if n != 1 else ''})"
     if name == "update_step":
         return f"update_step({arguments.get('index')}, {arguments.get('status')!r})"
+    if name == "delegate":
+        pieces = [x for x in (arguments.get("pieces") or []) if isinstance(x, dict)]
+        titles = ", ".join(str(x.get("title") or "?")[:40] for x in pieces[:4])
+        return f"delegate: {len(pieces)} pieces to helpers ({titles})"
     if name == "start_server":
         cmd = arguments.get("command") or "(missing command)"
         if len(cmd) > 100:

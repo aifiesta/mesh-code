@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 def sse_turn(text: str = "", tool_calls: list | None = None,
@@ -61,6 +61,7 @@ class FakeGateway:
         # gateway's per-line breakdown too (takes precedence over the above).
         self.request_events: dict[str, dict] = {}
         self._lock = threading.Lock()
+        self.responder = None       # payload -> SSE lines, or None for the script
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -116,7 +117,11 @@ class FakeGateway:
                 with outer._lock:
                     outer.requests.append(payload)
                     outer.headers.append({k.lower(): v for k, v in self.headers.items()})
-                    lines = outer._turns.pop(0) if outer._turns else sse_turn("(no script)")
+                    # A responder answers by what the request says (requests
+                    # from sessions running at once arrive in any order).
+                    lines = outer.responder(payload) if outer.responder else None
+                    if lines is None:
+                        lines = outer._turns.pop(0) if outer._turns else sse_turn("(no script)")
                 if lines and lines[0] == "__drop__":
                     # The server dies mid-stream: headers, a fragment, then the socket closes.
                     self.send_response(200)
@@ -169,7 +174,8 @@ class FakeGateway:
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
 
-        self._httpd = HTTPServer(("127.0.0.1", 0), Handler)
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._httpd.daemon_threads = True
         self.port = self._httpd.server_address[1]
         self.base_url = f"http://127.0.0.1:{self.port}/v1"
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
