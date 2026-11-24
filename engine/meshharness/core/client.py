@@ -128,6 +128,33 @@ class ToolCallAccumulator:
         return named
 
 
+# Reply limit sent for models whose provider needs one (see build_payload).
+OUTPUT_ROOM = {"anthropic/": 32_000}
+# The most a cut-off reply is retried with (see Session._hop).
+MAX_OUTPUT_ROOM = 64_000
+
+
+def output_room(model: str) -> "int | None":
+    for prefix, room in OUTPUT_ROOM.items():
+        if str(model or "").startswith(prefix):
+            return room
+    return None
+
+
+def cut_off_at(meta: dict) -> "int | None":
+    """Output tokens a reply was cut off at, or None if it ended normally."""
+    usage = meta.get("usage") or {}
+    try:
+        used = int(usage.get("completion_tokens") or 0)
+    except (TypeError, ValueError):
+        used = 0
+    if meta.get("finish_reason") in ("length", "max_tokens"):
+        return used or None
+    # Some relays send no finish reason: a reply that used exactly a common
+    # default limit and came back empty was cut there.
+    return used if used in (4096, 8192) else None
+
+
 def build_payload(messages: list, cfg: dict, tools: Optional[list] = None,
                   target=None) -> dict:
     """Build the /chat/completions request body from session config.
@@ -154,6 +181,14 @@ def build_payload(messages: list, cfg: dict, tools: Optional[list] = None,
         payload["models"] = list(cfg["fallback_models"])
     if cfg.get("reasoning_effort") and not local:
         payload["reasoning"] = {"effort": cfg["reasoning_effort"]}
+    if not local and not cfg.get("auto_route"):
+        # A model whose provider needs a reply limit gets the gateway's
+        # default when none is sent: 4,096 tokens for Anthropic models, which
+        # one Opus step at max thinking used up whole (24 Nov: a big task
+        # ended with nothing written). Ask for room instead.
+        room = output_room(payload["model"])
+        if room:
+            payload["max_tokens"] = room
     if local:
         for k, v in target.request_defaults.items():
             payload.setdefault(k, v)
@@ -401,6 +436,8 @@ def stream_chat(
                 choices = obj.get("choices") or []
                 if choices:
                     delta = choices[0].get("delta", {})
+                    if choices[0].get("finish_reason"):
+                        last_meta["finish_reason"] = choices[0]["finish_reason"]
 
                     content = delta.get("content")
                     if content:
