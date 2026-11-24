@@ -1,5 +1,5 @@
 import { USD_FX, type Fx } from './money'
-import { Ev, type LocalJob, type LocalStatus, type Approval, type Ask, type CatalogModel, type DirEntry, type FilePreview, type Root, type Msg, type Plan, type Profile, type RouteExplain, type SettingsDoc, type Status, type ToolCard, type WireEvent } from './types'
+import { Ev, type LocalJob, type LocalStatus, type Approval, type Ask, type CatalogModel, type DirEntry, type FilePreview, type HelperRun, type Root, type Msg, type Plan, type Profile, type RouteExplain, type SettingsDoc, type Status, type ToolCard, type WireEvent } from './types'
 
 /** The thinking level as Settings names it. */
 const THINKING: Record<string, string> = { none: 'off', low: 'low', medium: 'medium', high: 'high', xhigh: 'extra high', max: 'max' }
@@ -508,6 +508,21 @@ export function reduce(state: AppState, action: Action): AppState {
         }
       }
 
+      case Ev.HELPERS: {
+        // One card per hand-off, updated in place as the helpers work.
+        const run = { model: d.model ?? '', helpers: d.helpers ?? [], working: d.working ?? 0,
+                      cost: d.cost ?? 0 } as HelperRun
+        const idx = lastIndex(s.messages, (m) => m.kind === 'helpers' && m.callId === d.call_id)
+        if (idx >= 0) {
+          const messages = [...s.messages]
+          messages[idx] = { ...(messages[idx] as any), run }
+          return { ...s, messages }
+        }
+        return {
+          ...s, messages: [...s.messages, { kind: 'helpers', id: nid(), callId: d.call_id, run }],
+        }
+      }
+
       case Ev.ASK_USER: {
         // Inline in the transcript, not a modal: the answer becomes part of
         // the history instead of vanishing with the dialog.
@@ -649,6 +664,7 @@ export function reduce(state: AppState, action: Action): AppState {
           estimated: !!d.cost_estimated,
           bill: d.bill ?? null,
           localSteps: d.local_steps ?? 0, steppedUp: !!d.stepped_up_from_local,
+          helpers: d.helpers ?? null,
         }]
         // The engine ticks the plan from the step number the model puts on
         // its tool calls. A model can do the work and never say which step

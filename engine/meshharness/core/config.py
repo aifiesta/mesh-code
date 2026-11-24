@@ -99,6 +99,9 @@ DEFAULT_CONFIG = {
     # Effort: "auto" detects prompt difficulty (low/mid/high) and tilts the
     # weights; low|medium|high|xhigh|max forces the tilt for every prompt.
     "route_effort": "auto",
+    # Deep work helpers (helpers.py): a task that starts as Deep work on Opus
+    # may hand independent pieces to cheap helpers running at once.
+    "deep_work_helpers": True,
     # How the assistant writes (prose only — never tool access or scope).
     "output_style": "default",
     # Display currency for costs. Bills and totals stay in US dollars.
