@@ -402,9 +402,14 @@ def test_the_bundled_scores_send_small_work_cheap_and_the_top_to_the_strongest()
         start = router.pick_scored(rung, None, doc, cat)
         assert price[start["model"]] <= 0.25, f"{rung} should not start on a dear model"
         assert price[start["model"]] < price[deep["model"]]
-    best_hard = max(e["hard"]["score"] - e["hard"]["margin"] for e in scores.entries(doc))
-    top = next(e for e in scores.entries(doc) if (e["model"], e["level"]) == (deep["model"], deep["level"]))
-    assert top["hard"]["score"] - top["hard"]["margin"] == best_hard
+    # Deep work: the model of the strongest entry there is, one thinking level
+    # down when it was tested there (router.DEEP_WORK_LEVEL).
+    ents = scores.entries(doc)
+    best = max(ents, key=lambda e: e["hard"]["score"] - e["hard"]["margin"])
+    assert deep["model"] == best["model"]
+    tested = {e["level"] for e in ents if e["model"] == best["model"]}
+    assert deep["level"] == (router.DEEP_WORK_LEVEL if router.DEEP_WORK_LEVEL in tested
+                             else best["level"])
 
 
 # ---- the table serving a coding turn ------------------------------------------------------
@@ -607,3 +612,17 @@ def test_anthropic_models_are_counted_at_full_price():
 def test_caching_makes_a_task_cheaper_not_faster():
     assert _priced("deepseek/x")["minutes_per_task"] == \
         _priced("anthropic/claude-x")["minutes_per_task"]
+
+
+def test_deep_work_keeps_the_strongest_model_one_thinking_level_down():
+    """Deep work: the same model as before, at extra high when it was tested
+    there (router.DEEP_WORK_LEVEL); max stays for a model with no such entry,
+    for a level the user fixed, and for a step-up that found nothing stronger."""
+    doc = copy.deepcopy(DOC)
+    doc["models"]["t/strong"]["levels"]["xhigh"] = _e(90, 60, 12.0, 16)
+    got = _pick("max", doc=doc)
+    assert _id(got) == ("t/strong", "xhigh") and got["effort"] == "xhigh"
+    assert _id(_pick("max")) == ("t/strong", "max"), "no extra-high entry: max as before"
+    assert _id(_pick("max", doc=doc, level="max")) == ("t/strong", "max"), "the user's level wins"
+    # a struggling Complex task that finds nothing stronger climbs at full strength
+    assert _id(_pick("xhigh", doc=doc, failed=("t/strong", "xhigh"))) == ("t/strong", "max")
