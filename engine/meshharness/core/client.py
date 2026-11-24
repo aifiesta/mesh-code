@@ -128,7 +128,8 @@ class ToolCallAccumulator:
         return named
 
 
-def build_payload(messages: list, cfg: dict, tools: Optional[list] = None) -> dict:
+def build_payload(messages: list, cfg: dict, tools: Optional[list] = None,
+                  target=None) -> dict:
     """Build the /chat/completions request body from session config.
 
     Pure function (unit-testable without a network). Mesh extensions:
@@ -139,16 +140,23 @@ def build_payload(messages: list, cfg: dict, tools: Optional[list] = None) -> di
         gateway's older top-level `reasoning_effort` field is deprecated and
         refuses anything above "high"; `reasoning.effort` takes every level
         up to "max" (checked live 2026-11-17, docs/bench/model_scoring).
+
+    `target` (local/provider.Target) is a hop to the local llama-server: its
+    own model alias, no gateway extensions, the model's request defaults.
     """
+    local = bool(target and target.local)
     payload: dict = {
-        "model": "auto" if cfg.get("auto_route") else cfg["model"],
+        "model": target.model if local else ("auto" if cfg.get("auto_route") else cfg["model"]),
         "messages": messages,
         "stream": True,
     }
-    if cfg.get("fallback_models"):
+    if cfg.get("fallback_models") and not local:
         payload["models"] = list(cfg["fallback_models"])
-    if cfg.get("reasoning_effort"):
+    if cfg.get("reasoning_effort") and not local:
         payload["reasoning"] = {"effort": cfg["reasoning_effort"]}
+    if local:
+        for k, v in target.request_defaults.items():
+            payload.setdefault(k, v)
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
@@ -255,10 +263,27 @@ def _drop_empty_assistant(messages: list) -> list:
     ]
 
 
+def _endpoint(cfg: dict, target, *, blocking: bool = False) -> tuple:
+    """(url, headers, timeout) for one hop. The gateway gets 120 s streaming
+    / 300 s blocking; the local server a long read timeout, because reading
+    a long chat on a laptop takes minutes before the first token."""
+    if target is not None and target.local:
+        timeout = httpx.Timeout(connect=10.0, read=target.read_timeout, write=60.0, pool=10.0)
+        base, key = target.base_url, target.api_key
+    else:
+        timeout = 300 if blocking else 120
+        base, key = cfg["base_url"], cfg["api_key"]
+    headers = {"Content-Type": "application/json"}
+    if key:    # an empty bearer is an invalid header, not an unauthenticated request
+        headers["Authorization"] = f"Bearer {key}"
+    return f"{base.rstrip('/')}/chat/completions", headers, timeout
+
+
 def stream_chat(
     messages: list,
     cfg: dict,
     tools: Optional[list] = None,
+    target=None,
 ) -> Iterable:
     """Yield content deltas, then a final dict with usage/cost/model/tool_calls.
 
@@ -271,21 +296,22 @@ def stream_chat(
     caching.py). If the gateway rejects the marked request, we retry the raw
     request once, so caching can never be the reason a turn fails.
     """
-    url = f"{cfg['base_url']}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {cfg['api_key']}",
-        "Content-Type": "application/json",
-    }
+    url, headers, timeout = _endpoint(cfg, target)
+    local = bool(target is not None and target.local)
     # Strip any empty assistant message BEFORE both the raw payload and the
     # marked copy — one poisons every subsequent turn (see the helper).
     messages = _drop_empty_assistant(messages)
-    payload = build_payload(messages, cfg, tools)
+    payload = build_payload(messages, cfg, tools, target)
+    if local:
+        # llama-server sends token counts in the stream only when asked.
+        payload["stream_options"] = {"include_usage": True}
 
     attempts = [payload]
     # Cache marks, on a copy: the raw payload and the stored history never
     # carry one. Not when the gateway picks the model ("auto"): which model
-    # will answer is not known here. The raw payload is the fallback.
-    if caching.asked_for() and caching.needs_marks(payload["model"]):
+    # will answer is not known here. Never to the local server: it keeps its
+    # own cache and has no use for the field. The raw payload is the fallback.
+    if not local and caching.asked_for() and caching.needs_marks(payload["model"]):
         marked = caching.mark(messages)
         if marked is not messages:
             attempts = [{**payload, "messages": marked}, payload]
@@ -316,7 +342,7 @@ def stream_chat(
         accum = ToolCallAccumulator()
         progress_tool = ""
         progress_chars = 0
-        with httpx.stream("POST", url, json=body, headers=headers, timeout=120) as r:
+        with httpx.stream("POST", url, json=body, headers=headers, timeout=timeout) as r:
             if r.status_code >= 400:
                 r.read()  # so e.response.text works in the caller
                 if not is_last_attempt:
@@ -409,6 +435,9 @@ def stream_chat(
 
     if last_model:
         last_meta["model"] = last_model
+    if local:
+        last_meta["local"] = True
+        last_meta["model"] = target.display_id
     if request_ids:
         last_meta["request_ids"] = request_ids
     if dropped_chunks:
@@ -424,7 +453,7 @@ def stream_chat(
 
 
 def complete_chat(messages: list, cfg: dict, tools: "Optional[list]" = None,
-                  max_tokens: "int | None" = None) -> tuple:
+                  max_tokens: "int | None" = None, target=None) -> tuple:
     """Non-streaming fallback for one hop. Returns (reply_text, meta).
 
     Why this exists: Mesh's own retry + provider fallback is documented to
@@ -436,20 +465,16 @@ def complete_chat(messages: list, cfg: dict, tools: "Optional[list]" = None,
     Same meta shape as stream_chat's final yield, so callers need no special
     casing: {usage, cost, model, tool_calls?, error?, elapsed}.
     """
-    url = f"{cfg['base_url'].rstrip('/')}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {cfg['api_key']}",
-        "Content-Type": "application/json",
-    }
+    url, headers, timeout = _endpoint(cfg, target, blocking=True)
     # Sent without cache marks on purpose: this is the last resort after
     # streaming kept failing, and it has no second attempt to fall back to.
-    payload = build_payload(_drop_empty_assistant(messages), cfg, tools)
+    payload = build_payload(_drop_empty_assistant(messages), cfg, tools, target)
     payload["stream"] = False
     if max_tokens:
         payload["max_tokens"] = int(max_tokens)
 
     started = time.time()
-    r = httpx.post(url, json=payload, headers=headers, timeout=300)
+    r = httpx.post(url, json=payload, headers=headers, timeout=timeout)
     r.raise_for_status()
     data = r.json()
     meta: dict = {"elapsed": time.time() - started, "non_streaming": True}
@@ -482,6 +507,9 @@ def complete_chat(messages: list, cfg: dict, tools: "Optional[list]" = None,
     meta["model"] = (
         r.headers.get("x-resolved-model-id") or data.get("model") or ""
     )
+    if target is not None and target.local:
+        meta["local"] = True
+        meta["model"] = target.display_id
     rid = r.headers.get("x-request-id")
     if rid:
         meta["request_id"] = rid

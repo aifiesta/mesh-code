@@ -27,6 +27,7 @@ from .core import fx
 CATEGORIES = [
     ("model", "Model", "Which model answers, and what it costs"),
     ("routing", "Routing", "Let Mesh choose per prompt, or pin one model"),
+    ("local", "Local model", "A coding model on this machine: free and private while it answers"),
     ("behaviour", "Behaviour", "How the assistant works and writes"),
     ("limits", "Limits & recovery", "What happens on long or stuck turns"),
     ("privacy", "Memory & privacy", "What persists between sessions"),
@@ -67,7 +68,7 @@ SCHEMA: list[dict] = [
         "category": "routing",
         "type": "enum",
         "label": "Routing",
-        "default": "off",
+        "default": "smart",
         "options": [
             _opt("off", "Pinned", "Always use the model above."),
             _opt("smart", "Smart (local)", "A bundled table picks per prompt. No extra tokens, no extra network hop."),
@@ -103,6 +104,91 @@ SCHEMA: list[dict] = [
         "depends_on": {"route_mode": "smart"},
         "help": "How the router trades cost against capability and speed.",
         "why": "Weights move the pick along each cohort's efficiency frontier — no setting can select a model the table says cannot do the task.",
+    },
+    {
+        "key": "local_enabled",
+        "category": "local",
+        "type": "bool",
+        "label": "Use a local model",
+        "default": True,
+        "help": "With Smart routing on, lookups and small changes start on a model running on this machine once it is downloaded.",
+        "why": "Free and private for small work; when it struggles, Smart routing hands the task to its usual cloud pick. Off never downloads anything and never starts the local server.",
+    },
+    {
+        "key": "local_auto_setup",
+        "category": "local",
+        "type": "bool",
+        "label": "Download without asking",
+        "default": False,
+        "help": "Fetch the recommended model on first run without showing the setup card (only when it fits this machine and is 8 GB or less).",
+        "why": "Off means nothing is downloaded until you say yes.",
+    },
+    {
+        "key": "local_model",
+        "category": "local",
+        "type": "local_model",
+        "label": "Local model",
+        "default": "",
+        "help": "Which downloaded model to use; only installed models are accepted. Empty means the one recommended for this machine.",
+        "why": "Pick a bigger model if you have the memory, a smaller one if the fan bothers you.",
+    },
+    {
+        "key": "local_context",
+        "category": "local",
+        "type": "enum",
+        "label": "Context window",
+        "default": "auto",
+        "options": [
+            _opt("auto", "Auto", "32k on a 16 GB Mac; larger only where memory allows."),
+            _opt("16k", "16k", "Less memory; a long task moves to the cloud sooner."),
+            _opt("32k", "32k", ""), _opt("64k", "64k", ""),
+            _opt("128k", "128k", ""), _opt("256k", "256k", ""),
+        ],
+        "help": "How much of the chat the local model can see. Bigger windows use more memory.",
+        "why": "16k leaves more memory for the rest of the machine.",
+    },
+    {
+        "key": "local_gpu",
+        "category": "local",
+        "type": "enum",
+        "label": "GPU",
+        "default": "auto",
+        "options": [
+            _opt("auto", "Auto", "Use the GPU when it clearly helps."),
+            _opt("on", "On", "Offload every layer, even when memory is unknown."),
+            _opt("off", "Off", "CPU only."),
+        ],
+        "help": "Whether model layers are placed on the GPU.",
+        "why": "Auto is right on Apple Silicon; force it on for a discrete card the probe cannot size.",
+    },
+    {
+        "key": "local_keep_free_gb",
+        "category": "local",
+        "type": "int",
+        "label": "Memory to keep free",
+        "default": 4,
+        "min": 2, "max": 32,
+        "help": "Gigabytes of RAM the local model must leave untouched.",
+        "why": "Lower it for a bigger model; raise it if the rest of the machine starts swapping.",
+    },
+    {
+        "key": "local_idle_unload_min",
+        "category": "local",
+        "type": "int",
+        "label": "Unload when idle (minutes)",
+        "default": 20,
+        "min": 0, "max": 240,
+        "help": "Stop the local server after this many minutes without use, giving its memory back. 0 keeps it loaded.",
+        "why": "A loaded model holds several GB of memory even while you are not using it.",
+    },
+    {
+        "key": "local_use_when_slow",
+        "category": "local",
+        "type": "bool",
+        "label": "Use even when slow",
+        "default": False,
+        "help": "Run the local model on machines where it would be slow (no GPU, little memory).",
+        "why": "On a slow machine a cloud model is usually the better trade.",
     },
     {
         "key": "reasoning_effort",
@@ -264,12 +350,12 @@ def coerce(key: str, value: Any) -> Any:
             raise InvalidSetting(f"{key} must be a list of model ids")
         return [x.strip() for x in value if x.strip()]
 
-    if kind in ("model", "text"):
+    if kind in ("model", "text", "local_model"):
         if value is None:
             return ""
         if not isinstance(value, str):
             raise InvalidSetting(f"{key} must be text")
-        return value.strip() if kind == "model" else value
+        return value.strip() if kind in ("model", "local_model") else value
 
     raise InvalidSetting(f"unhandled setting type {kind!r}")
 

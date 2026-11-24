@@ -1,5 +1,5 @@
 import { USD_FX, type Fx } from './money'
-import { Ev, type Approval, type Ask, type CatalogModel, type DirEntry, type FilePreview, type Root, type Msg, type Plan, type Profile, type RouteExplain, type SettingsDoc, type Status, type ToolCard, type WireEvent } from './types'
+import { Ev, type LocalJob, type LocalStatus, type Approval, type Ask, type CatalogModel, type DirEntry, type FilePreview, type Root, type Msg, type Plan, type Profile, type RouteExplain, type SettingsDoc, type Status, type ToolCard, type WireEvent } from './types'
 
 /** The thinking level as Settings names it. */
 const THINKING: Record<string, string> = { none: 'off', low: 'low', medium: 'medium', high: 'high', xhigh: 'extra high', max: 'max' }
@@ -67,6 +67,14 @@ export type AppState = {
   configError: { key: string; message: string } | null
   /** Display currency and its rate. Amounts stay in dollars; this only formats them. */
   fx: Fx
+  /** The local model layer: machine, models, downloads, server. */
+  local: LocalStatus | null
+  /** "Not now" on the setup card: hidden until the app is opened again. */
+  localNotNow: boolean
+  /** The last thing the local layer said outside any chat (a failed download, a refused start). */
+  localNote: { level: string; text: string } | null
+  /** A one-time note from the engine to the whole app (e.g. Smart routing switched on). */
+  appNote: string | null
 }
 
 export const initialState: AppState = {
@@ -86,6 +94,10 @@ export const initialState: AppState = {
   keyResult: null,
   configError: null,
   fx: USD_FX,
+  local: null,
+  localNotNow: false,
+  localNote: null,
+  appNote: null,
 }
 
 let uid = 0
@@ -114,11 +126,15 @@ export type Action =
   | { t: 'clearTerm'; id: string }
   | { t: 'clearKeyError' }
   | { t: 'stopping'; id: string }
+  | { t: 'localNotNow' }
+  | { t: 'dismissAppNote' }
 
 export function reduce(state: AppState, action: Action): AppState {
   if (action.t === 'connection') return { ...state, connection: action.state }
   if (action.t === 'dismissConfigError') return { ...state, configError: null }
   if (action.t === 'clearKeyError') return { ...state, keyError: null }
+  if (action.t === 'localNotNow') return { ...state, localNotNow: true }
+  if (action.t === 'dismissAppNote') return { ...state, appNote: null }
 
   if (action.t === 'stopping') {
     // Optimistic: the button flips to "stopping" on the click. The engine
@@ -214,6 +230,7 @@ export function reduce(state: AppState, action: Action): AppState {
       return {
         ...state, ready: true, hasKey: !!d.has_key, sessions, order: prunedOrder,
         settings, catalog, profile, active, fx: d.fx ?? state.fx,
+        local: d.local ?? state.local,
       }
     }
 
@@ -231,6 +248,30 @@ export function reduce(state: AppState, action: Action): AppState {
 
     case Ev.ROUTE_EXPLAIN:
       return { ...state, routeExplain: d as RouteExplain }
+
+    case Ev.LOCAL_STATUS:
+      return { ...state, local: d as LocalStatus }
+
+    case Ev.LOCAL_PROGRESS: {
+      // Patch the job in place between status events so the bar moves.
+      if (!state.local) return state
+      const job = d as LocalJob
+      const over = job.phase === 'done' || job.phase === 'error' || job.phase === 'cancelled'
+      const jobs = over
+        ? state.local.jobs.filter((j) => j.id !== job.id)
+        : state.local.jobs.some((j) => j.id === job.id)
+          ? state.local.jobs.map((j) => (j.id === job.id ? job : j))
+          : [...state.local.jobs, job]
+      const models = state.local.models.map((m) =>
+        m.job?.id === job.id || (!m.job && m.id === job.target && !over) ? { ...m, job: over ? null : job } : m)
+      const localNote = job.phase === 'error'
+        ? { level: 'warn', text: `${job.kind === 'runtime' ? 'The local runtime' : job.target.replace('local/', '')} download failed: ${job.error ?? 'unknown error'}` }
+        : state.localNote
+      return { ...state, local: { ...state.local, jobs, models }, localNote }
+    }
+
+    case Ev.LOCAL_READY:
+      return { ...state, localNote: { level: 'info', text: `${String(d.model ?? '').replace('local/', '')} is downloaded. Lookups and small changes start on it.` } }
 
     case Ev.CONFIG_ERROR:
       return { ...state, configError: { key: d.key, message: d.message } }
@@ -283,6 +324,11 @@ export function reduce(state: AppState, action: Action): AppState {
     }
   }
 
+  if (!sid && ev.type === Ev.NOTICE && d.app) return { ...state, appNote: String(d.message ?? '') }
+  // The local layer speaks outside any chat; keep its last word for the card.
+  if (!sid && ev.type === Ev.NOTICE && String(d.message ?? '').startsWith('local model')) {
+    return { ...state, localNote: { level: d.level ?? 'info', text: String(d.message) } }
+  }
   if (!sid || !state.sessions[sid]) return state
 
   return mutate(state, sid, (s) => {
@@ -534,6 +580,12 @@ export function reduce(state: AppState, action: Action): AppState {
         const text =
           ev.type === Ev.COMPACTED
             ? `Compacted history (${d.before_tok}→${d.after_tok} tokens) — ${d.reason}`
+            : ev.type === Ev.ROUTED && d.local
+              ? (d.settled
+                  ? `Back on the local model (${shortModel(d.model)})`
+                  : `Started on the local model (${shortModel(d.model)})${d.task ? ` — ${d.task}` : ''}${d.why ? ` (${d.why})` : ''}`)
+            : ev.type === Ev.ROUTED && d.from_local
+              ? `Stepped up from the local model to ${picked}${d.task ? ` (${d.task})` : ''} — ${d.reason ?? 'it was struggling'}`
             : ev.type === Ev.ROUTED
               ? (d.escalated
                   ? `Stepped up to ${picked}${d.task ? ` (${d.task})` : ''} — ${d.reason ?? 'the model was struggling'}`
@@ -595,6 +647,7 @@ export function reduce(state: AppState, action: Action): AppState {
           // cost is shown as ~ here too, not just in the live bar.
           estimated: !!d.cost_estimated,
           bill: d.bill ?? null,
+          localSteps: d.local_steps ?? 0, steppedUp: !!d.stepped_up_from_local,
         }]
         // The engine ticks the plan from the step number the model puts on
         // its tool calls. A model can do the work and never say which step

@@ -38,7 +38,7 @@ from pathlib import Path
 import httpx
 
 from .bridge import Cancelled, Pending
-from .core import compact, loopguard, memory, router
+from .core import compact, finishcheck, loopguard, memory, router, textcalls
 from .core import journal, safety
 from .core import pricing as _pricing
 from .core import tools as tools_mod
@@ -47,6 +47,9 @@ from .core.client import (complete_chat, nearest_level, reasoning_refusal,
 from .core.permissions import AUTO_APPROVE, Mode
 from .core.plan import Plan
 from .core.tools import TOOLS, build_system_messages, find_stub_markers, summarize_call
+from .local import prompt as local_prompt
+from .local.manager import LocalUnavailable
+from .local.provider import is_local
 from .terminal import Terminal
 from .protocol import Decision, Event, event
 
@@ -65,13 +68,29 @@ ASK_TIMEOUT = 30 * 60
 
 _PORT_RANGE = (5173, 5199)
 
+TOOL_NAMES = {t["function"]["name"] for t in TOOLS}
+TOOL_SCHEMAS = {t["function"]["name"]: (t["function"].get("parameters") or {}).get("properties") or {}
+                for t in TOOLS}
+# Local model inside Smart routing (see the smart-routing section):
+LOCAL_LEVELS = ("low", "mid")       # Lookup and Small change start local
+LOCAL_STEP_LIMIT = 15               # steps on the local model before stepping up
+LOCAL_FAILED_ROUNDS = 2             # failed tool rounds in a row before stepping up
+# Tools that look at (or change) the project. A local answer with none of
+# these behind it is a guess (seen live: a lookup answered in one step, wrong).
+LOOK_TOOLS = {"read_file", "run_bash", "edit_file", "write_file"}
+
 
 class Session:
     """One conversation against one workspace directory."""
 
     def __init__(self, session_id: str, workspace: str | Path, cfg: dict,
-                 emit, *, title: str = "", mode: Mode = Mode.DEFAULT):
+                 emit, *, title: str = "", mode: Mode = Mode.DEFAULT, local=None):
         self.id = session_id
+        # The engine's LocalModels layer, or None (tests, a cloud-only engine).
+        self.local = local
+        # A step-up / back-to-local the user asked for from the UI thread;
+        # the worker takes it at the start of the next hop.
+        self._route_request: "tuple | None" = None
         self.workspace = Path(workspace).expanduser().resolve()
         self.title = title or self.workspace.name
         self._emit_raw = emit
@@ -92,6 +111,7 @@ class Session:
         # when a turn ends, so without these the bar sits frozen through the
         # part of a run where you most want to see what it is costing.
         self.turn_model: str | None = None
+        self.turn_local = False     # the last hop ran on this machine
         self.turn_cost = 0.0
         self.turn_tokens = 0
         self.turn_estimated = False
@@ -168,6 +188,7 @@ class Session:
             # really ran on (which the router may have chosen, and which is
             # NOT cfg["model"]), and the spend so far this turn.
             turn_model=self.turn_model,
+            turn_local=self.turn_local,
             turn_cost=round(self.turn_cost, 6),
             turn_tokens=self.turn_tokens,
             turn_estimated=self.turn_estimated,
@@ -300,11 +321,11 @@ class Session:
             pass  # persistence must never break a turn
 
     @classmethod
-    def restore(cls, data: dict, cfg: dict, emit) -> "Session":
+    def restore(cls, data: dict, cfg: dict, emit, *, local=None) -> "Session":
         """Rebuild a session from its snapshot — conversation intact."""
         s = cls(data["id"], data["workspace"], cfg, emit,
                 title=data.get("title") or "",
-                mode=mode_from_str_safe(data.get("mode")))
+                mode=mode_from_str_safe(data.get("mode")), local=local)
         s.created_at = data.get("created_at") or s.created_at
         s.chat_label = data.get("label") or ""
         s.session_cost = float(data.get("session_cost") or 0)
@@ -497,6 +518,13 @@ class Session:
         self.state["_smart_clean_hops"] = 0
         self.state["_turn_tool_calls"] = 0
         self.state["_turn_files"] = []
+        self.state["_turn_looked"] = 0
+        self.state["_local_hops"] = 0
+        self.state["_local_hops_total"] = 0
+        self.state["_local_stepped_up"] = False
+        self.state["_local_failed_rounds"] = 0
+        self.state["_local_text_nudged"] = False
+        self.state["_local_checked"] = False
         self.state.pop("_verify_fired", None)
         # Which turn this is, so a plan revised inside it can keep its ticks
         # while a plan made in a later turn starts clean (see _plan_tool).
@@ -511,6 +539,7 @@ class Session:
         self.turn_estimated = False
         self.turn_tokens = 0
         self.turn_model = None
+        self.turn_local = False
         self.turn_bill = _pricing.empty_bill()
 
         # Smart routing resolves locally and stores its pick in
@@ -533,6 +562,11 @@ class Session:
                 self.emit(Event.NOTICE, level="warn",
                           message=f"stopped after {hop_limit} hops (max_hops)")
                 break
+
+            self._take_route_request()
+            if (self.state.get("_on_local")
+                    and self.state.get("_local_hops", 0) >= LOCAL_STEP_LIMIT):
+                self._smart_escalate(f"{LOCAL_STEP_LIMIT} steps on the local model")
 
             self.emit(Event.HOP_STARTED, turn_id=turn_id, hop=hop,
                       model=model_used)
@@ -585,68 +619,86 @@ class Session:
             self.turn_model = model_used
             usage = meta.get("usage") or {}
             self.turn_tokens += int(usage.get("total_tokens") or 0)
-            # Billed figure by request id first (settles ~250ms after the
-            # stream), then an in-body cost, then the catalog estimate.
-            hop_cost, estimated = 0.0, False
-            hop_bill, priced_as = None, self._effective_model()
-            rids = meta.get("request_ids") or (
-                [meta["request_id"]] if meta.get("request_id") else [])
-            if rids and usage:
-                try:
-                    from .core import pricing
-                    billed, hop_bill = pricing.fetch_request_bill(
-                        self.cfg, rids, usage)
-                except Exception:
-                    billed, hop_bill = None, None
-                if billed is not None:
-                    hop_cost = float(billed)
-            if hop_cost <= 0:
-                try:
-                    hop_cost = float(meta.get("cost") or 0)
-                except (TypeError, ValueError):
-                    hop_cost = 0.0
-            if hop_cost <= 0 and usage:
-                try:
-                    from .core import pricing
-                    # Price the model we ASKED for first: that is the catalog
-                    # id. The one the gateway echoes back is often the
-                    # upstream's own name ("deepseek-flash" for
-                    # deepseek/deepseek-v4.1-flash), which matched nothing and
-                    # left 1.3M tokens showing as $0.0000.
-                    guess = None
-                    for candidate in (self._effective_model(),
-                                      meta.get("model") or model_used):
-                        if not candidate:
-                            continue
-                        guess = pricing.estimate_cost(candidate, usage, self.catalog)
-                        if guess is not None:
-                            priced_as = candidate
-                            break
-                    if guess:
-                        hop_cost, estimated = float(guess), True
-                except Exception:
-                    pass
-            self.turn_cost += hop_cost
-            if estimated:
-                self.turn_estimated = True
-            # The split. From the gateway's own bill when it sent one;
-            # otherwise worked out from the token counts and the catalog's
-            # rates, scaled to this step's total, and marked estimated.
-            if usage:
-                try:
-                    if hop_bill is None:
-                        hop_bill = _pricing.bill_from_usage(
-                            priced_as or model_used, usage, self.catalog,
-                            cost=hop_cost)
-                    _pricing.add_bill(self.turn_bill, hop_bill)
-                    self.emit(Event.HOP_USAGE, turn_id=turn_id, hop=hop,
-                              model=model_used,
-                              tokens=int(usage.get("total_tokens") or 0),
-                              cost=round(hop_cost, 8),
-                              cost_estimated=estimated,
-                              bill=_pricing.round_bill(hop_bill))
-                except Exception:
-                    pass        # the split is reporting; it must never break a turn
+            local_hop = bool(meta.get("local"))
+            self.turn_local = local_hop
+            if local_hop:
+                # Free, and never priced against a catalog row: the bill split
+                # shows the step at $0.
+                self.state["_local_hops"] = self.state.get("_local_hops", 0) + 1
+                self.state["_local_hops_total"] = self.state.get("_local_hops_total", 0) + 1
+                hop_bill = _local_bill(usage)
+                _pricing.add_bill(self.turn_bill, hop_bill)
+                self.emit(Event.HOP_USAGE, turn_id=turn_id, hop=hop, model=model_used,
+                          tokens=int(usage.get("total_tokens") or 0), cost=0.0,
+                          cost_estimated=False, local=True,
+                          bill=_pricing.round_bill(hop_bill))
+                self._status()
+                reply, meta = self._promote_text_calls(reply, meta, turn_id, hop)
+                if meta.get("_nudged"):
+                    continue
+            else:
+                # Billed figure by request id first (settles ~250ms after the
+                # stream), then an in-body cost, then the catalog estimate.
+                hop_cost, estimated = 0.0, False
+                hop_bill, priced_as = None, self._effective_model()
+                rids = meta.get("request_ids") or (
+                    [meta["request_id"]] if meta.get("request_id") else [])
+                if rids and usage:
+                    try:
+                        from .core import pricing
+                        billed, hop_bill = pricing.fetch_request_bill(
+                            self.cfg, rids, usage)
+                    except Exception:
+                        billed, hop_bill = None, None
+                    if billed is not None:
+                        hop_cost = float(billed)
+                if hop_cost <= 0:
+                    try:
+                        hop_cost = float(meta.get("cost") or 0)
+                    except (TypeError, ValueError):
+                        hop_cost = 0.0
+                if hop_cost <= 0 and usage:
+                    try:
+                        from .core import pricing
+                        # Price the model we ASKED for first: that is the catalog
+                        # id. The one the gateway echoes back is often the
+                        # upstream's own name ("deepseek-flash" for
+                        # deepseek/deepseek-v4.1-flash), which matched nothing and
+                        # left 1.3M tokens showing as $0.0000.
+                        guess = None
+                        for candidate in (self._effective_model(),
+                                          meta.get("model") or model_used):
+                            if not candidate:
+                                continue
+                            guess = pricing.estimate_cost(candidate, usage, self.catalog)
+                            if guess is not None:
+                                priced_as = candidate
+                                break
+                        if guess:
+                            hop_cost, estimated = float(guess), True
+                    except Exception:
+                        pass
+                self.turn_cost += hop_cost
+                if estimated:
+                    self.turn_estimated = True
+                # The split. From the gateway's own bill when it sent one;
+                # otherwise worked out from the token counts and the catalog's
+                # rates, scaled to this step's total, and marked estimated.
+                if usage:
+                    try:
+                        if hop_bill is None:
+                            hop_bill = _pricing.bill_from_usage(
+                                priced_as or model_used, usage, self.catalog,
+                                cost=hop_cost)
+                        _pricing.add_bill(self.turn_bill, hop_bill)
+                        self.emit(Event.HOP_USAGE, turn_id=turn_id, hop=hop,
+                                  model=model_used,
+                                  tokens=int(usage.get("total_tokens") or 0),
+                                  cost=round(hop_cost, 8),
+                                  cost_estimated=estimated,
+                                  bill=_pricing.round_bill(hop_bill))
+                    except Exception:
+                        pass        # the split is reporting; it must never break a turn
             # Publish the running tally now, while the turn is still going.
             self._status()
 
@@ -662,7 +714,15 @@ class Session:
                     reply,
                     tool_calls_this_turn=self.state.get("_turn_tool_calls", 0),
                     user_asked_action=router.asks_for_action(text))
-                if (weak and self.state.get("_smart_pick")
+                if local_hop and self.state.get("_on_local"):
+                    # The local model gets the same check every turn it answers
+                    # (it does not use up the cloud pick's one), plus one more:
+                    # an answer with nothing read behind it is a guess.
+                    if not weak and not self.state.get("_turn_looked"):
+                        weak = "it answered without reading any file"
+                    if weak and self._smart_escalate(f"answer rejected ({weak})"):
+                        continue  # the same hop again, on the cloud pick
+                elif (weak and self.state.get("_smart_pick")
                         and not self.state.get("_verify_fired")):
                     self.state["_verify_fired"] = True
                     if self._smart_escalate(f"answer rejected ({weak})"):
@@ -672,6 +732,10 @@ class Session:
                               text=reply, model=model_used)
                     self.state["messages"].append(
                         {"role": "assistant", "content": reply})
+                if (local_hop and self.state.get("_on_local")
+                        and self._finish_check_failed(turn_id, hop)):
+                    continue      # the tests failed: the cloud pick takes it from here
+                if has_reply:
                     self._plan_finish()
                 break
 
@@ -696,6 +760,12 @@ class Session:
             # A doomed batch or fresh stub markers reset the streak and, for
             # the doom case, escalate — evidence the model is out of its depth.
             all_doomed = report["total"] > 0 and report["doomed"] == report["total"]
+            if local_hop and self.state.get("_on_local"):
+                failed_round = report["total"] > 0 and report["failed"] == report["total"]
+                self.state["_local_failed_rounds"] = (
+                    self.state.get("_local_failed_rounds", 0) + 1 if failed_round else 0)
+                if self.state["_local_failed_rounds"] >= LOCAL_FAILED_ROUNDS:
+                    self._smart_escalate(f"{LOCAL_FAILED_ROUNDS} failed tool rounds in a row")
             if report["doomed"] == 0 and not self.state.get("stub_files"):
                 self.state["_smart_clean_hops"] = self.state.get("_smart_clean_hops", 0) + 1
                 self._smart_de_escalate()
@@ -750,14 +820,18 @@ class Session:
                       sealed=sealed, elapsed=round(elapsed, 2),
                       model=model_used, cost=round(turn_cost, 6),
                       cost_estimated=turn_estimated, tokens=turn_tokens,
-                      bill=turn_bill,
+                      bill=turn_bill, local=self.turn_local,
+                      local_steps=self.state.get("_local_hops_total", 0),
+                      stepped_up_from_local=bool(self.state.get("_local_stepped_up")),
                       session_cost=round(self.session_cost, 6))
         else:
             self.emit(Event.TURN_FINISHED, turn_id=turn_id, hops=hop,
                       model=model_used, cost=round(turn_cost, 6),
                       cost_estimated=turn_estimated,
                       tokens=turn_tokens, elapsed=round(elapsed, 2),
-                      bill=turn_bill,
+                      bill=turn_bill, local=self.turn_local,
+                      local_steps=self.state.get("_local_hops_total", 0),
+                      stepped_up_from_local=bool(self.state.get("_local_stepped_up")),
                       session_cost=round(self.session_cost, 6),
                       plan=self.state["plan"].to_dict() if self.state["plan"] else None,
                       stubs=sorted(self.state.get("stub_files") or {}))
@@ -778,6 +852,7 @@ class Session:
         self.turn_tokens = 0
         self.turn_estimated = False
         self.turn_model = None
+        self.turn_local = False
         self.turn_bill = _pricing.empty_bill()
         # A max_tokens shrink was derived from one over-long request's input.
         # Left set, it clips output for every later (now shorter) turn. Clear
@@ -802,11 +877,43 @@ class Session:
             cfg = self._effective_cfg()
             if self.state.get("_max_tokens_shrunk"):
                 cfg["max_tokens"] = self.state["_max_tokens_shrunk"]
+            target = None
+            if self.state.get("_on_local"):
+                target = self._local_target()
+                if target is None:
+                    self._smart_escalate("the local model is not loaded any more")
+                else:
+                    # Request-only: the stored chat keeps main's full prompt,
+                    # so a step-up sends the cloud model everything as usual.
+                    msgs = self._local_messages(msgs)
+            elif is_local(cfg.get("model")):
+                # The user picked a local model in the model list: every step
+                # runs on it, as with any picked model. Loading it waits (and
+                # Stop still stops); not downloaded, stopped or turned off
+                # ends the turn with the reason.
+                try:
+                    target = self._picked_local_target(cfg["model"])
+                except LocalUnavailable as e:
+                    if self._interrupt.is_set():
+                        raise KeyboardInterrupt
+                    return "", {"error": f"local model: {e}", "local_unavailable": True}
+                msgs = self._local_messages(msgs)
+            picked_local = target is not None and not self.state.get("_on_local")
             try:
-                reply, meta = self._consume(stream_chat(msgs, cfg, tools=TOOLS))
+                if target is not None:
+                    self.local.server.begin_use()
+                try:
+                    reply, meta = self._consume(stream_chat(msgs, cfg, tools=TOOLS, target=target))
+                finally:
+                    if target is not None:
+                        self.local.server.end_use()
             except KeyboardInterrupt:
                 raise
             except httpx.HTTPStatusError as e:
+                if target is not None and not picked_local:
+                    self._local_hop_failed(f"HTTP {e.response.status_code}")
+                    attempt = 0
+                    continue
                 code = e.response.status_code
                 body = _safe_text(e.response)
                 overflow = loopguard.parse_max_tokens_overflow(body)
@@ -829,22 +936,37 @@ class Session:
                     continue
                 if not tried_non_streaming and loopguard.is_retryable_status(code):
                     tried_non_streaming = True
-                    got = self._non_streaming(msgs)
+                    got = self._non_streaming(msgs, target)
                     if got is not None:
                         return got
                 raise
             except httpx.RequestError as e:
+                if target is not None and not picked_local:
+                    self._local_hop_failed(type(e).__name__)
+                    attempt = 0
+                    continue
+                if picked_local:
+                    # Picked local: no cloud to hand over to. Forget a dead
+                    # server; the retry below then says why it cannot run.
+                    try:
+                        self.local.recover()
+                    except Exception:
+                        pass
                 if attempt < loopguard.MAX_STREAM_ATTEMPTS:
                     self._wait_retry(attempt, f"network error ({type(e).__name__})")
                     continue
                 if not tried_non_streaming:
                     tried_non_streaming = True
-                    got = self._non_streaming(msgs)
+                    got = self._non_streaming(msgs, target)
                     if got is not None:
                         return got
                 raise
 
             err = meta.get("error")
+            if err and target is not None and not picked_local:
+                self._local_hop_failed(str(err)[:120])
+                attempt = 0
+                continue
             if err:
                 kind = loopguard.classify_inband_error(str(err))
                 if kind == "transient" and attempt < loopguard.MAX_STREAM_ATTEMPTS:
@@ -940,7 +1062,7 @@ class Session:
             meta["ttft"] = ttft
         return "".join(buf), meta
 
-    def _non_streaming(self, msgs):
+    def _non_streaming(self, msgs, target=None):
         """Last-resort blocking request — Mesh's own retry and provider
         fallback only cover non-streaming calls, so this is where a run of
         streaming failures can still recover."""
@@ -949,7 +1071,7 @@ class Session:
                       message="streaming keeps failing — trying one non-streaming request")
             # The hop's effective cfg, as the streaming attempt used: the
             # live smart pick, and no thinking level this model has refused.
-            return complete_chat(msgs, self._effective_cfg(), tools=TOOLS,
+            return complete_chat(msgs, self._effective_cfg(), tools=TOOLS, target=target,
                                  max_tokens=self.state.get("_max_tokens_shrunk"))
         except Exception:
             return None
@@ -1072,14 +1194,24 @@ class Session:
 
     def _route_turn(self, text: str, had_image: bool = False) -> None:
         """Initial per-turn pick. Fail-open: any miss leaves _smart_pick unset
-        and the pinned model rides."""
+        and the pinned model rides. Then, for Lookup and Small change, the
+        local model when it is loaded: the cloud pick stays in _smart_pick as
+        the model a step-up goes to."""
         self.state["_smart_pick"] = None
+        self.state["_on_local"] = False
+        self.state["_turn_level"] = None
+        self.state["_turn_cohort"] = None
         if self.cfg.get("route_mode") != "smart":
             return
+        self._route_cloud(text, had_image)
+        try:
+            self._start_local(had_image)
+        except Exception:
+            self.state["_on_local"] = False   # never let routing break a turn
+
+    def _route_cloud(self, text: str, had_image: bool) -> None:
         try:
             table = router.load_table()
-            if not table or not self.catalog:
-                return
             history_chars = sum(
                 len(m.get("content") or "") if isinstance(m.get("content"), str) else 0
                 for m in self.state.get("messages") or [])
@@ -1109,6 +1241,12 @@ class Session:
                 difficulty, why = router.task_level(text)
             else:
                 difficulty = router.estimate_difficulty(text)
+            self.state["_turn_level"] = difficulty
+            self.state["_turn_cohort"] = cohort
+            # The level is known even with no catalog (offline): the local
+            # model can still take the turn.
+            if not table or not self.catalog:
+                return
             self.state["_smart_cohort"] = cohort
             self.state["_smart_base_difficulty"] = difficulty   # de-escalation floor
             exclude = set(self.cfg.get("exclude_models") or []) | set(self.state.get("_smart_bad") or set())
@@ -1128,16 +1266,22 @@ class Session:
         except Exception:
             self.state["_smart_pick"] = None  # never let routing break a turn
 
-    def _smart_escalate(self, reason: str) -> bool:
+    def _smart_escalate(self, reason: str, *, explicit: bool = False) -> bool:
         """The current model is visibly struggling — climb the effort ladder
         for the rest of this turn and re-pick. Bounded to _MAX_ESCALATIONS so
         a hard task reaches a frontier model but a broken one can't spend
-        forever."""
+        forever. `explicit` is the user's Escalate button: no cap applies.
+
+        On the local model, the first step is off it, to Smart routing's own
+        pick for this task level (not "something clearly stronger", which
+        from a local model would jump past the cheap pick to a dear one)."""
+        if self.state.get("_on_local"):
+            return self._step_off_local(reason)
         if self.cfg.get("route_mode") != "smart":
             return False
-        if self.state.get("_smart_escalations", 0) >= self._MAX_ESCALATIONS:
+        if not explicit and self.state.get("_smart_escalations", 0) >= self._MAX_ESCALATIONS:
             return False
-        if self.cfg.get("route_effort", "auto") != "auto":
+        if not explicit and self.cfg.get("route_effort", "auto") != "auto":
             return False  # user pinned the effort — respect it
         try:
             table = router.load_table()
@@ -1233,6 +1377,229 @@ class Session:
             f"{_short_model(self.cfg.get('model',''))} (skipped for this session)"))
         return True
 
+    # ------------------------------------------------------------------
+    # the local model, as one more choice inside Smart routing
+    #
+    # Lookup and Small change start on it once it is downloaded and loaded;
+    # everything else, and any turn where it is not ready, is routed exactly
+    # as before. `_on_local` says the next hop goes to it; `_smart_pick`
+    # keeps Smart routing's own pick for the level, which is where a step-up
+    # lands. After a step-up the turn stays on the cloud; the next message
+    # starts local again.
+    # ------------------------------------------------------------------
+    def _local_target(self):
+        """A Target for the loaded local model, or None (never blocks)."""
+        if self.local is None or not self.cfg.get("local_enabled", True):
+            return None
+        try:
+            return self.local.ready_target()
+        except Exception:
+            return None
+
+    def _picked_local_target(self, model_id: str):
+        """A Target for a local model the user picked in the model list.
+        Blocks while it loads; raises LocalUnavailable with a reason."""
+        if self.local is None or not self.cfg.get("local_enabled", True):
+            raise LocalUnavailable("local models are turned off in Settings", permanent=True)
+        return self.local.target_for(
+            model_id, cancel=self._interrupt,
+            notify=lambda msg: self.emit(Event.NOTICE, level="info", message=msg))
+
+    def _local_fit(self) -> "tuple[bool, str]":
+        """Does this chat fit the local model? Half its window at most: the
+        rest is the task's own reading and writing."""
+        window = self.local.context_window() if self.local is not None else None
+        if not window:
+            return False, "the local model has no window yet"
+        used = compact.est_history_tokens(self._local_messages(self.state.get("messages") or []))
+        if used > window // 2:
+            return False, (f"this chat is about {used // 1000}k tokens, more than half the "
+                           f"local model's {window // 1024}k window")
+        return True, ""
+
+    def _start_local(self, had_image: bool) -> None:
+        level, cohort = self.state.get("_turn_level"), self.state.get("_turn_cohort")
+        if (had_image or not level or router._band(level) not in LOCAL_LEVELS
+                or cohort not in router.SCORED_COHORTS):
+            return
+        target = self._local_target()
+        if target is None or not self._local_fit()[0]:
+            return
+        self._go_local(target, why="free on this machine")
+
+    def _go_local(self, target, *, why: str, back: bool = False) -> None:
+        self.state["_on_local"] = True
+        self.state["_local_hops"] = 0
+        self.state["_local_failed_rounds"] = 0
+        self.turn_model = target.display_id
+        level = self.state.get("_turn_level")
+        self.emit(Event.ROUTED, model=target.display_id, local=True,
+                  cohort=self.state.get("_turn_cohort"), difficulty=level,
+                  task=router.LEVEL_NAMES.get(router._band(level)) if level else None,
+                  why=why, thinking=None, settled=back, ranked=[])
+
+    def _step_off_local(self, reason: str) -> bool:
+        if not self.state.get("_on_local"):
+            return False
+        self.state["_on_local"] = False
+        self.state["_local_stepped_up"] = True
+        model = self._effective_model()
+        info = self.state.get("_smart_pick_info") if self.state.get("_smart_pick") else None
+        label = _pick_label(info) if info else _short_model(model)
+        self.turn_model = model
+        level = self.state.get("_turn_level")
+        self.emit(Event.ROUTED, model=model, escalated=True, from_local=True, reason=reason,
+                  cohort=self.state.get("_turn_cohort"), difficulty=level,
+                  thinking=self.state.get("_smart_level"),
+                  task=router.LEVEL_NAMES.get(router._band(level)) if level else None,
+                  ranked=((info or {}).get("ranked") or [])[:5])
+        self.emit(Event.NOTICE, level="info",
+                  message=f"stepping up from the local model ({reason}) → {label}")
+        return True
+
+    def _local_hop_failed(self, what: str) -> None:
+        """The local server failed on a hop: the cloud pick takes the same
+        hop. Not retried locally, and never restarted behind the user."""
+        try:
+            self.local.recover()
+        except Exception:
+            pass
+        self._smart_escalate(f"the local server failed: {what}")
+
+    def _local_messages(self, msgs: list) -> list:
+        """The chat as a small local model is sent it: one short system
+        prompt in place of main's two system messages (a Qwen chat template
+        takes one system message, first), later system notes (a compaction
+        summary) as user notes, and text only. Built per request; the stored
+        chat is never changed."""
+        block = journal.prompt_block(self.workspace) if self.cfg.get("repo_memory", True) else ""
+        out = [{"role": "system", "content": local_prompt.build_compact_system_prompt(
+            self.cfg, cwd=str(self.workspace), journal_block=block or "")}]
+        i = 0
+        while i < len(msgs) and msgs[i].get("role") == "system":
+            i += 1
+        for m in msgs[i:]:
+            content = m.get("content")
+            if isinstance(content, list):
+                content = "\n".join(p.get("text") or "" for p in content
+                                    if isinstance(p, dict) and p.get("type") == "text")
+            if m.get("role") == "system":
+                out.append({"role": "user", "content": f"[Note from Mesh Code]\n{content or ''}"})
+                continue
+            m = {k: v for k, v in m.items() if k != "cache_control"}
+            if content is not m.get("content"):
+                m["content"] = content
+            out.append(m)
+        return out
+
+    def _promote_text_calls(self, reply: str, meta: dict, turn_id: str, hop: int):
+        """A small model may print a tool call as text instead of calling it.
+        The common shapes become real calls; anything else gets one nudge a
+        turn. Local hops only: a cloud reply quoting a call is text."""
+        if meta.get("tool_calls") or not textcalls.looks_like_tool_call(reply or ""):
+            return reply, meta
+        # The turn id keeps these ids unique across turns: a cloud model that
+        # takes the chat over may refuse two tool calls with the same id.
+        clean, calls, _why = textcalls.extract(reply, TOOL_NAMES, schemas=TOOL_SCHEMAS,
+                                               id_prefix=f"text_{turn_id}_{hop}")
+        if calls:
+            for c in calls:
+                self.emit(Event.TOOL_REPAIRED, call_id=c["id"], name=c["name"], kind="text_parsed")
+            return clean, {**meta, "tool_calls": calls}
+        if not self.state.get("_local_text_nudged"):
+            self.state["_local_text_nudged"] = True
+            self.state["messages"].append({"role": "user", "content": (
+                "You printed a tool call as text instead of calling the function:\n\n"
+                + (reply or "")[:2000]
+                + "\n\nCall the function instead; do not write <tool_call> or "
+                  "<function=...> in your reply.")})
+            return reply, {**meta, "_nudged": True}
+        return reply, meta
+
+    def _finish_check_failed(self, turn_id: str, hop: int) -> bool:
+        """The local model says a change is done: run the project's tests,
+        through the same approval as any command. True when they failed and
+        the turn stepped up to the cloud pick with the output in hand."""
+        if self.state.get("_local_checked") or not self.state.get("_turn_files"):
+            return False
+        self.state["_local_checked"] = True
+        cmd = finishcheck.find_test_command(self.workspace)
+        if not cmd:
+            return False
+        self.emit(Event.NOTICE, level="info",
+                  message="checking the local model's change: running the project's tests")
+        p = {"id": f"check_{turn_id}_{hop}", "name": "run_bash",
+             "args": {"command": cmd, "timeout": 180}, "kind": "ok"}
+        try:
+            result = self._execute_one(p, turn_id, hop)
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            return False
+        if finishcheck.verdict(result) is not False:
+            return False
+        self.state["messages"].append({"role": "user", "content": (
+            f"[Mesh Code ran the project's tests after that change (`{cmd}`) and they fail:\n"
+            f"{_clip(result, 3000)}\n\nFix the code so the tests pass.]")})
+        return self._smart_escalate("the project's tests fail after its change")
+
+    def _take_route_request(self) -> None:
+        """Apply an Escalate / Back to local the user asked for meanwhile."""
+        req, self._route_request = self._route_request, None
+        if not req:
+            return
+        kind, harder = req
+        if kind == "escalate":
+            why = "you asked for a stronger model"
+            if self.state.get("_on_local"):
+                self._step_off_local(why)
+                if harder:
+                    self._smart_escalate(why, explicit=True)
+            else:
+                self._smart_escalate(why, explicit=True)
+                if harder:
+                    self._smart_escalate(why, explicit=True)
+        elif kind == "local" and not self.state.get("_on_local"):
+            ok, why = self._local_ready_for_back()
+            target = self._local_target() if ok else None
+            if target is None:
+                self.emit(Event.NOTICE, level="warn", message=f"staying on the cloud model: {why or 'the local model is not loaded'}")
+                return
+            self._go_local(target, why="you asked for the local model", back=True)
+            self.emit(Event.NOTICE, level="info", message="back to the local model")
+
+    def _local_ready_for_back(self) -> "tuple[bool, str]":
+        if self.local is None or not self.cfg.get("local_enabled", True):
+            return False, "local models are turned off in Settings"
+        ok, why = self._local_fit()
+        if not ok:
+            return False, why
+        if self._local_target() is None:
+            return False, "the local model is not loaded yet (loading it now)"
+        return True, ""
+
+    # -- called from the transport thread ------------------------------
+    def escalate(self, *, harder: bool = False) -> None:
+        """The Escalate button: off the local model to Smart routing's pick
+        for this level; `harder` goes one step further, to what Smart routing
+        would step up to from that pick. Idle: applies to the next message."""
+        self._route_request = ("escalate", bool(harder))
+        if not self._busy.is_set():
+            self.emit(Event.NOTICE, level="info",
+                      message="the next message starts on " + ("a stronger cloud model" if harder
+                                                                else "Smart routing's cloud pick"))
+
+    def deescalate(self) -> None:
+        """Back to local. Refused, with the reason, when the chat is over
+        half the local window or the local model is not ready."""
+        ok, why = self._local_ready_for_back()
+        if not ok:
+            self.emit(Event.NOTICE, level="warn", message=f"can't go back to the local model: {why}")
+            return
+        self._route_request = ("local", False)
+        if not self._busy.is_set():
+            self.emit(Event.NOTICE, level="info", message="the next message starts on the local model")
+
     def explain_route(self, text: str) -> dict:
         """What would smart routing pick for this prompt, and why?
 
@@ -1289,6 +1656,13 @@ class Session:
         return out
 
     def _maybe_compact(self) -> None:
+        if self.state.get("_on_local") and self.local is not None:
+            # A small model works worse from a summary, and the cloud pick has
+            # room for the whole chat: at the point where this window would
+            # compact, step up instead. (The point itself is unchanged.)
+            window = self.local.context_window()
+            if window and compact.should_compact(self._local_messages(self.state["messages"]), window):
+                self._smart_escalate("the chat outgrew the local model's window")
         if not self.cfg.get("auto_compact", True):
             return
         if self.state.get("_compact_exhausted"):
@@ -1340,11 +1714,12 @@ class Session:
         })
         self.state["_batch_assistant_idx"] = len(self.state["messages"]) - 1
 
-        doomed = 0
+        doomed = failed = 0
         worked = stepped = False
         for p in prepared:
             if self._interrupt.is_set():
-                return {"total": len(prepared), "doomed": doomed, "interrupted": True}
+                return {"total": len(prepared), "doomed": doomed, "failed": failed + doomed,
+                        "interrupted": True}
 
             name, args = p["name"], p["args"]
             # `step` is the model telling the ENGINE which plan step this
@@ -1394,17 +1769,23 @@ class Session:
                 result = self._execute_one(p, turn_id, hop)
             except KeyboardInterrupt:
                 self._append_tool_result(p["id"], "Interrupted by the user.")
-                return {"total": len(prepared), "doomed": doomed, "interrupted": True}
+                return {"total": len(prepared), "doomed": doomed, "failed": failed + doomed,
+                        "interrupted": True}
             except Exception as e:
                 result = f"Error: tool execution raised {type(e).__name__}: {e}"
                 self.emit(Event.TOOL_RESULT, call_id=p["id"], name=name,
                           ok=False, result=result)
 
+            if str(result).startswith("Error"):
+                failed += 1
+            elif name in LOOK_TOOLS and not str(result).startswith("User denied"):
+                self.state["_turn_looked"] = self.state.get("_turn_looked", 0) + 1
             self._append_tool_result(p["id"], result)
 
         if worked:
             self._plan_nudge(stepped)
-        return {"total": len(prepared), "doomed": doomed, "interrupted": False}
+        return {"total": len(prepared), "doomed": doomed, "failed": failed + doomed,
+                "interrupted": False}
 
     def _append_tool_result(self, call_id: str, result: str) -> None:
         self.state["messages"].append(
@@ -2158,6 +2539,18 @@ def _task_name(got: dict, rung: str) -> "str | None":
     if not got.get("scored"):
         return None
     return router.LEVEL_NAMES.get(router._band(rung))
+
+
+def _local_bill(usage: "dict | None") -> dict:
+    """A local step's split: its real token counts, every dollar part $0."""
+    bill = _pricing.empty_bill()
+    try:
+        tokens = _pricing.usage_tokens(usage)
+        for part in ("fresh", "cached", "cache_write", "output"):
+            bill[f"{part}_tokens"] = tokens[part]
+    except Exception:
+        pass
+    return bill
 
 
 def _pick_label(got: dict) -> str:

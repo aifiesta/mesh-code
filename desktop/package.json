@@ -38,6 +38,10 @@
       {
         "from": "../packaging/engine-dist",
         "to": "engine"
+      },
+      {
+        "from": "../packaging/llama-dist",
+        "to": "llama"
       }
     ],
     "mac": {

@@ -28,7 +28,10 @@ a = Analysis(
     datas=[("../engine/meshharness/core/routing_table.json",
             "meshharness/core"),
            ("../engine/meshharness/core/model_scores.json",
-            "meshharness/core")],
+            "meshharness/core"),
+           # The local-model manifest: without it no local model can be chosen.
+           ("../engine/meshharness/local/manifest.json",
+            "meshharness/local")],
     hiddenimports=hidden,
     hookspath=[],
     runtime_hooks=[],

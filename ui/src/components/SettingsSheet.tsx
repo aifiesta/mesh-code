@@ -1,7 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
-import type { CatalogModel, SettingsDoc } from '../types'
+import type { CatalogModel, LocalStatus, SettingsDoc } from '../types'
 import { Field } from './Field'
+import { LocalModelPanel } from './LocalModelPanel'
 import { ModelBrowser } from './ModelBrowser'
+
+export type LocalActions = {
+  install: (m: string) => void
+  cancel: (job: string) => void
+  remove: (m: string) => void
+  setDefault: (m: string) => void
+  server: (a: 'stop' | 'start' | 'restart') => void
+  refresh: () => void
+}
 
 /**
  * The full surface, grouped and explained. Every control — including ones
@@ -12,15 +22,20 @@ import { ModelBrowser } from './ModelBrowser'
  * you smart mode exists. Hiding them just makes the feature invisible again,
  * which is the problem this whole screen is meant to solve.
  */
-export function SettingsSheet({ settings, catalog, error, onSet, onClose, onRefreshCatalog }: {
+export function SettingsSheet({ settings, catalog, local, localActions, initialTab, error, onSet, onClose, onRefreshCatalog }: {
   settings: SettingsDoc | null
   catalog: CatalogModel[]
+  local?: LocalStatus | null
+  localActions?: LocalActions
+  initialTab?: string
   error: { key: string; message: string } | null
   onSet: (key: string, value: any) => void
   onClose: () => void
   onRefreshCatalog: (force?: boolean) => void
 }) {
-  const [tab, setTab] = useState<string>(settings?.categories[0]?.id ?? 'model')
+  const [tab, setTab] = useState<string>(
+    (initialTab && settings?.categories.some((c) => c.id === initialTab) ? initialTab : null)
+      ?? settings?.categories[0]?.id ?? 'model')
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -97,11 +112,24 @@ export function SettingsSheet({ settings, catalog, error, onSet, onClose, onRefr
               onExclude={(id) => onSet('exclude_models', [...excluded, id])}
               onUnexclude={(id) => onSet('exclude_models', excluded.filter((x) => x !== id))}
               onRefresh={() => onRefreshCatalog(true)}
+              onInstall={(id) => localActions?.install(id)}
             />
           )}
 
+          {tab === 'local' && (local && localActions
+            ? <LocalModelPanel
+                local={local}
+                onInstall={localActions.install}
+                onCancel={localActions.cancel}
+                onDelete={localActions.remove}
+                onSetDefault={localActions.setDefault}
+                onServer={localActions.server}
+                onRefresh={localActions.refresh}
+              />
+            : <p className="sheet-blurb">The local model layer has not reported yet.</p>)}
+
           {inTab
-            .filter((s) => s.type !== 'model')
+            .filter((s) => s.type !== 'model' && s.type !== 'local_model')
             .map((s) => (
               <div key={s.key} className={met(s.depends_on) ? '' : 'field-muted'}>
                 <Field spec={s} onChange={onSet} />

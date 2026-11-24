@@ -103,6 +103,14 @@ export class EngineClient {
   setRoute(session: string, route_mode: string) {
     this.send(Req.SET_ROUTE, { session, route_mode })
   }
+  escalate(session: string, harder = false) { this.send(Req.ESCALATE, { session, harder }) }
+  deescalate(session: string) { this.send(Req.DEESCALATE, { session }) }
+  localInstall(model: string) { this.send(Req.LOCAL_INSTALL, { model }) }
+  localCancel(job: string) { this.send(Req.LOCAL_CANCEL, { job }) }
+  localDelete(model: string) { this.send(Req.LOCAL_DELETE, { model }) }
+  localServer(action: 'stop' | 'start' | 'restart') { this.send(Req.LOCAL_SERVER, { action }) }
+  localRefresh() { this.send(Req.LOCAL_REFRESH, {}) }
+  localDecline() { this.send(Req.LOCAL_DECLINE, {}) }
   stopServer(session: string, pid: number) {
     this.send(Req.STOP_SERVER, { session, pid })
   }

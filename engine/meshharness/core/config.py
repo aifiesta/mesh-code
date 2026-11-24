@@ -14,6 +14,7 @@ where the key came from.
 import json
 import os
 import stat
+import time
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
@@ -54,6 +55,12 @@ TOOLCALL_FAILURES_FILE = CONFIG_DIR / "toolcall_failures.jsonl"
 # read back exact code/errors it no longer has. (Claude Code does the same —
 # its compact summary points at the session transcript.)
 TRANSCRIPTS_DIR = CONFIG_DIR / "transcripts"
+# The local model layer: downloaded weights, runner builds, server state.
+LOCAL_DIR = CONFIG_DIR / "local"
+# One-time changes already made to this install's settings, by name. Kept
+# apart from config.json: a settings save rewrites that file with the
+# declared keys only, which would forget the record and repeat the change.
+MIGRATIONS_FILE = CONFIG_DIR / "migrations.json"
 FAILURE_LOG_MAX_BYTES = 1_000_000
 _RAW_ARGS_LOG_CAP = 32_768  # bound one pathological record
 
@@ -85,7 +92,9 @@ DEFAULT_CONFIG = {
     # Smart routing (local table-driven picker). route_mode: "off" (pin),
     # "auto" (gateway picks — mirrors auto_route), "smart" (local pick).
     # Weights steer smart picks along each cohort's efficiency frontier.
-    "route_mode": "off",
+    # On by default since 23 Nov 2026: the local model is a choice inside
+    # Smart routing, so with routing pinned nobody would ever reach it.
+    "route_mode": "smart",
     "route_weights": {"cost": 0.5, "cap": 0.3, "speed": 0.2},
     # Effort: "auto" detects prompt difficulty (low/mid/high) and tilts the
     # weights; low|medium|high|xhigh|max forces the tilt for every prompt.
@@ -99,6 +108,18 @@ DEFAULT_CONFIG = {
     # Models observed rejecting reasoning_effort (with tools) — skipped
     # without a doomed retry in future sessions. Evidence-based cache.
     "reasoning_rejected_models": [],
+    # Local model (see local/manager.py). On by default: with Smart routing
+    # on, Lookup and Small change start on it once it is downloaded and
+    # loaded. Nothing downloads until the user says yes on the setup card,
+    # unless local_auto_setup is turned on.
+    "local_enabled": True,
+    "local_auto_setup": False,
+    "local_model": "",
+    "local_context": "auto",
+    "local_gpu": "auto",
+    "local_keep_free_gb": 4,
+    "local_idle_unload_min": 20,
+    "local_use_when_slow": False,
 }
 
 _DIR_MODE = stat.S_IRWXU                       # 0700
@@ -252,6 +273,7 @@ def load_config() -> dict:
     # longer depends on it and its cut of old tool results raised bills.
     # Drop it from old configs the same way.
     cfg.pop("optimize", None)
+    _switch_to_smart_routing_once(cfg, loaded)
     # Resolution order: env > credentials file > legacy hand-edited
     # config.json. MESH_API_KEY kept as fallback for one release.
     file_key = (cfg.get("api_key") or "").strip()
@@ -281,6 +303,50 @@ def load_config() -> dict:
 # gateway survives the test and then poisons every later launch, which is
 # exactly the trap the api_key strip below already existed to avoid.
 _EPHEMERAL_KEYS = ("api_key", "base_url")
+
+
+def _migrations() -> dict:
+    try:
+        data = json.loads(MIGRATIONS_FILE.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _mark_migration(name: str) -> None:
+    done = _migrations()
+    done[name] = time.strftime("%Y-%m-%d")
+    try:
+        tmp = MIGRATIONS_FILE.with_name(MIGRATIONS_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(done, indent=2))
+        secure_file(tmp)
+        os.replace(tmp, MIGRATIONS_FILE)
+    except OSError:
+        pass
+
+
+SMART_ROUTING_ON = "smart_routing_on"   # 24 Nov 2026
+
+
+def _switch_to_smart_routing_once(cfg: dict, loaded: dict) -> None:
+    """Turn Smart routing on, once, for an install that has Pinned saved.
+
+    Smart routing became the default on 24 Nov 2026 (the local model is a
+    choice inside it). Every existing install has "off" written to disk by
+    its first launch, so the new default alone reached nobody. This switches
+    them once; a user who sets Pinned again afterwards keeps it, because the
+    switch is recorded and never repeated. `_switched_to_smart` tells the
+    app to say so once (keys starting with _ are never saved)."""
+    if SMART_ROUTING_ON in _migrations():
+        return
+    if loaded.get("route_mode", "off") == "off" and cfg.get("route_mode") == "off":
+        cfg["route_mode"] = "smart"
+        cfg["_switched_to_smart"] = True
+        try:
+            save_config({**loaded, "route_mode": "smart"})
+        except OSError:
+            return          # not recorded: try again next launch
+    _mark_migration(SMART_ROUTING_ON)
 
 
 def save_config(cfg: dict) -> None:

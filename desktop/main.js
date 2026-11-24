@@ -17,6 +17,7 @@ const { spawn } = require('node:child_process')
 const path = require('node:path')
 const fs = require('node:fs')
 const readline = require('node:readline')
+const os = require('node:os')
 
 const isDev = !app.isPackaged
 let engine = null
@@ -45,6 +46,20 @@ function uiDir() {
     : path.join(process.resourcesPath, 'ui')
 }
 
+/** The bundled llama-server, if this build carries one: fetch-llama.sh
+ *  leaves the binary plus `variant` and `tag` files the engine matches its plan to. */
+function llamaEnv() {
+  const dir = isDev
+    ? path.resolve(__dirname, '..', 'packaging', 'llama-dist')
+    : path.join(process.resourcesPath, 'llama')
+  try {
+    const variant = fs.readFileSync(path.join(dir, 'variant'), 'utf8').trim()
+    const tag = fs.readFileSync(path.join(dir, 'tag'), 'utf8').trim()
+    if (variant && tag) return { MESH_LLAMA_DIR: dir, MESH_LLAMA_VARIANT: variant, MESH_LLAMA_TAG: tag }
+  } catch { /* no bundled runtime: the engine downloads one */ }
+  return {}
+}
+
 function startEngine() {
   return new Promise((resolve, reject) => {
     const { cmd, args, cwd } = engineCommand()
@@ -56,7 +71,7 @@ function startEngine() {
 
     engine = spawn(cmd, [...args, '--ui', ui], {
       cwd,
-      env: { ...process.env, PYTHONUNBUFFERED: '1' },
+      env: { ...process.env, PYTHONUNBUFFERED: '1', ...llamaEnv() },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
 
@@ -183,6 +198,14 @@ function buildMenu() {
           label: 'Show Engine Logs',
           click: () => shell.openPath(app.getPath('logs')),
         },
+        {
+          label: 'Show Local Model Logs',
+          click: () => {
+            const dir = path.join(os.homedir(), '.mesh-code', 'local', 'logs')
+            fs.mkdirSync(dir, { recursive: true })
+            shell.openPath(dir)
+          },
+        },
       ],
     },
   ]
@@ -197,7 +220,24 @@ async function pickFolder() {
   return r.canceled ? null : r.filePaths[0]
 }
 
+// One copy of the app per user. Each copy runs its own engine, and each
+// engine can load its own local model: two copies on a 16 GB Mac meant two
+// 9B runners (about 11 GB) and a frozen machine. Opening the app again now
+// brings the open window forward instead. (From aifiesta/mesh-code#17.)
+const primary = app.requestSingleInstanceLock()
+if (!primary) app.quit()
+app.on('second-instance', () => {
+  if (win && !win.isDestroyed()) {
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
+  } else if (engine) {
+    createWindow()
+  }
+})
+
 app.whenReady().then(async () => {
+  if (!primary) return
   ipcMain.handle('pick-folder', pickFolder)
   // 'system' hands control back to macOS; 'light'/'dark' force it, which is
   // what repaints the vibrancy behind a manually-chosen theme.
