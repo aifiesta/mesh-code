@@ -29,36 +29,123 @@ def _dec(value) -> "float | None":
         return None
 
 
-def find_model(model_id: str, models: "list | None") -> "dict | None":
-    """Catalog row for a model id, tolerating the resolved-id suffix.
+_PRICE_KEYS = ("prompt_usd_per_1m", "completion_usd_per_1m",
+               "cache_read_input_usd_per_1m", "cache_write_input_usd_per_1m",
+               "discount_pct")
 
-    The `model` echoed back is often the upstream's own build string
-    ("gpt-4o-mini-2024-07-18") rather than the catalog id
-    ("openai/gpt-4o-mini"), so fall back to a suffix match on the last path
-    segment before giving up.
+
+def _norm(text: str) -> str:
+    """One caser and one separator, applied to BOTH sides of every compare.
+
+    An id is re-spelled on its way through the gateway. It echoes
+    "seed-1-6-flash-250715" for catalog "bytedance-seed/seed-1.6-flash"
+    (dots became dashes) and "deepseek-ai/DeepSeek-V4-Flash" for catalog
+    "deepseek/deepseek-v4-flash" (case differs). Both re-spellings matched
+    nothing, so a priced catalog row went unread and the hop showed no cost
+    at all.
+
+    casefold() is called here and nowhere else, and every comparison below
+    runs on its output, so no compare straddles a folded and an unfolded
+    string. Folding is not length-preserving either, which is why rung 4
+    measures the FOLDED segment when it picks the longest one.
+    """
+    folded = (text or "").casefold()
+    for sep in (".", "_", " "):
+        folded = folded.replace(sep, "-")
+    return folded
+
+
+def _tail(model_id: str) -> str:
+    """Last path segment: "openai/gpt-4o-mini" -> "gpt-4o-mini"."""
+    return (model_id or "").rsplit("/", 1)[-1]
+
+
+def _rates(row: dict) -> tuple:
+    """The rate fields a cost is computed from, as numbers.
+
+    Compared as numbers, not strings: "0.60" and "0.6" are one rate.
+    """
+    pricing = row.get("pricing") or {}
+    return tuple(_dec(pricing.get(key)) for key in _PRICE_KEYS)
+
+
+def _one_of(rows: list) -> "dict | None":
+    """The single row `rows` agrees on, or None when they disagree.
+
+    Two catalog ids can fold to one key: "vendor/seed-1.6-flash" and
+    "vendor/seed-1-6-flash" both become "seed-1-6-flash". Keying a lookup on
+    the folded form would drop one of them silently and price the request off
+    catalog order, so a real clash answers None. A blank cost panel is what
+    the caller already shows; a confident wrong price is worse.
+
+    Rows repeating one id, or carrying identical rates, are not a clash: the
+    figure is the same whichever one wins.
+    """
+    if not rows:
+        return None
+    first = rows[0]
+    for row in rows[1:]:
+        if (row.get("id") or "") == (first.get("id") or ""):
+            continue
+        if _rates(row) != _rates(first):
+            return None
+    return first
+
+
+def find_model(model_id: str, models: "list | None") -> "dict | None":
+    """Catalog row for a model id, by rungs of decreasing certainty.
+
+    The id echoed back is often not the catalog id. It may be the upstream's
+    own build string ("gpt-4o-mini-2024-07-18" for "openai/gpt-4o-mini"), or
+    the same name in another case or with another separator. So the lookup
+    walks four rungs, each tried over the WHOLE catalog before the next:
+
+      1. the id exactly as the catalog spells it
+      2. the whole id, folded (case and separators)
+      3. the last path segment, folded
+      4. that segment plus the upstream's build suffix, cut at a separator
+         boundary, the longest catalog segment winning
+
+    An exact id therefore never loses to a looser match on another row, and a
+    rung whose candidates disagree stops there with None rather than falling
+    through to a looser guess.
     """
     if not model_id or not models:
         return None
-    for m in models:
-        if m.get("id") == model_id:
-            return m
-    tail = model_id.rsplit("/", 1)[-1]
-    best = None
-    for m in models:
-        mid = m.get("id") or ""
-        mtail = mid.rsplit("/", 1)[-1]
-        if mtail == tail:
-            return m
-        # "gpt-4o-mini-2024-07-18" starts with "gpt-4o-mini" — but only at a
-        # SEPARATOR boundary. A bare startswith matched "gpt-4o-2024-08-06"
-        # against "gpt-4" and billed gpt-4o at gpt-4's rate; requiring the
-        # next char to be "-"/"." stops the shorter sibling from winning.
-        if (mtail and (tail == mtail
-                       or tail.startswith(mtail + "-")
-                       or tail.startswith(mtail + "."))
-                and (best is None or len(mtail) > len(best[0]))):
-            best = (mtail, m)
-    return best[1] if best else None
+    rows = [m for m in models if isinstance(m, dict)]
+
+    for row in rows:                                            # 1
+        if row.get("id") == model_id:
+            return row
+
+    want = _norm(model_id)
+    folded_id = [r for r in rows if _norm(r.get("id") or "") == want]
+    if folded_id:                                               # 2
+        return _one_of(folded_id)
+
+    tail = _norm(_tail(model_id))
+    if not tail:
+        return None
+    folded_tail = [r for r in rows if _norm(_tail(r.get("id") or "")) == tail]
+    if folded_tail:                                             # 3
+        return _one_of(folded_tail)
+
+    # Rung 4. "gpt-4o-2024-08-06" is "gpt-4o" plus a build date, so a catalog
+    # segment that prefixes the echoed one still prices it, but only when the
+    # next character is a separator. A bare startswith matched
+    # "gpt-4o-2024-08-06" against "gpt-4" and billed gpt-4o at gpt-4's rate;
+    # folding every separator to "-" first makes that boundary one character.
+    best: "list" = []
+    longest = 0
+    for row in rows:
+        segment = _norm(_tail(row.get("id") or ""))
+        if not segment or not tail.startswith(segment + "-"):
+            continue
+        if len(segment) > longest:
+            best, longest = [row], len(segment)
+        elif len(segment) == longest:
+            best.append(row)
+    return _one_of(best)
 
 
 def estimate_cost(model_id: str, usage: dict,
