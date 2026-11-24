@@ -26,3 +26,12 @@ drops electron-builder's platform peers (squirrel-windows, dmg-license)
 from the lock; `npm ci` on a default-configured runner then refuses it.
 Regenerate with `npx npm@10.9 install --package-lock-only
 --legacy-peer-deps=false` when `desktop/package.json` changes.
+
+## 2026-10-21 — tests run in ci on three oses and a frozen engine must boot before any release builds
+`release.yml` used to build installers from whatever tree carried the tag;
+the 64-test suite only ever ran on the authoring machine. `test.yml` now
+runs the engine tests on macOS, Ubuntu and Windows, builds the UI, checks
+that `protocol.py` and `types.ts` name the same events, and boots a
+PyInstaller freeze through its WebSocket. The release workflow calls it
+first. Windows cannot block yet because the suite still has POSIX-only
+paths; it runs with `continue-on-error` until it is green.
