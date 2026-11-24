@@ -628,6 +628,11 @@ class Session:
             model_used = meta.get("model") or model_used
             self.turn_model = model_used
             usage = meta.get("usage") or {}
+            if usage.get("prompt_tokens"):
+                # What this request really carried, for the trim check.
+                self.state["_seen_prompt"] = {"model": self._effective_model(),
+                                              "tokens": int(usage["prompt_tokens"]),
+                                              "n": len(self.state.get("messages") or [])}
             self.turn_tokens += int(usage.get("total_tokens") or 0)
             local_hop = bool(meta.get("local"))
             self.turn_local = local_hop
@@ -1692,28 +1697,52 @@ class Session:
                 self._smart_escalate("the chat outgrew the local model's window")
         if not self.cfg.get("auto_compact", True):
             return
-        if self.state.get("_compact_exhausted"):
+        exhausted = self.state.get("_compact_exhausted")
+        if exhausted is not False and exhausted is not None and \
+                (exhausted is True or len(self.state["messages"]) <= exhausted):
+            # Nothing was left to trim, and nothing has been added since.
             return
-        # Use the EFFECTIVE model's window — a mid-turn escalation may have
-        # moved to a model with a different context limit.
-        limit = compact.context_limit(self._effective_model(), self.catalog)
-        if compact.should_compact(self.state["messages"], limit):
-            # Pass the limit so the FOLD phase is reachable. Without it,
-            # compact_history only truncates; the second call finds nothing
-            # left to truncate, returns {}, and _compact_exhausted trips —
-            # making the next context error fatal. The whole fold machinery
-            # was dead before this argument was threaded through.
-            self._compact_now("approaching the context limit", limit=limit)
+        # Use the EFFECTIVE model's line — a mid-turn escalation may have
+        # moved to a model with a different window or price.
+        model = self._effective_model()
+        line = compact.trim_line(model, self.catalog)
+        used, scale = self._chat_tokens(model)
+        if used > line:
+            # The line also sets how far the trim goes (folding until under
+            # half of it), so it does not fire again a few steps later.
+            self._compact_now("approaching this model's trim point", line=line, scale=scale)
+
+    def _chat_tokens(self, model: str) -> "tuple[int, float]":
+        """(tokens the next request will carry, real-per-estimated ratio).
+        The last request's real prompt count from the provider (tools and
+        system prompt included) plus a guess for what was added since; the
+        chars/4 guess alone when there is no count for this model's chat."""
+        msgs = self.state.get("messages") or []
+        est = compact.est_history_tokens(msgs)
+        seen = self.state.get("_seen_prompt") or {}
+        if (seen.get("model") == model and seen.get("tokens")
+                and 0 < seen.get("n", 0) <= len(msgs)):
+            used = int(seen["tokens"]) + compact.est_history_tokens(msgs[seen["n"]:])
+            # Never below the guess: a provider that leaves cached tokens out
+            # of its count must not make a big chat look small.
+            return max(used, est), max(1.0, used / max(1, est))
+        return est, 1.0
 
     def _compact_now(self, why: str, *, limit: "int | None" = None,
-                     aggressive: bool = False) -> bool:
+                     aggressive: bool = False, line: "int | None" = None,
+                     scale: float = 1.0) -> bool:
         try:
             report = compact.compact_history(
-                self.state, limit=limit, aggressive=aggressive)
+                self.state, limit=limit, aggressive=aggressive, line=line, scale=scale)
         except Exception:
             return False
+        # The chat before the trim is what the last real count measured.
+        self.state.pop("_seen_prompt", None)
         if not report:
-            self.state["_compact_exhausted"] = True
+            # Remember how long the chat was: once it grows, there may be
+            # something to trim again (an early check on a real count can
+            # find nothing yet, and must not switch trimming off all turn).
+            self.state["_compact_exhausted"] = len(self.state.get("messages") or [])
             return False
         try:
             memory.invalidate_dropped(self.state)
