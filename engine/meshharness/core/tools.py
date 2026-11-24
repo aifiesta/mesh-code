@@ -547,6 +547,18 @@ _BUILD_DIRS = frozenset({"dist", "build", "target", "out", "vendor", "coverage"}
 # question about one function, whatever the prompt said.
 WHOLE_READ_LIMIT = 20_000
 LONG_FILE_MAP_CHARS = 3_000   # budget for the definitions list / first lines
+# Tokens, not characters, are what fill a model's window, and the two part
+# ways on dense text: a 13k-char checksum list is ~10k tokens where chars/4
+# guesses 3.3k. Counting words, digits and symbols lands within ~15% of a
+# real tokenizer on code, prose, JSON, lockfiles and hex alike (measured
+# 2026-11-24 against the local Qwen runner's /tokenize).
+_PIECE_RE = re.compile(r"[A-Za-z]+|\d|[^\sA-Za-z\d]")
+MIN_READ_CHARS = 1_000        # a token-limited read still shows at least this much
+
+
+def est_tokens(text: str) -> int:
+    """A tokenizer-free token count that does not undercount dense text."""
+    return len(_PIECE_RE.findall(text or ""))
 LONG_FILE_HEAD_LINES = 40     # first lines shown when there are no definitions
 SKIP_MIN_CHARS = 2_000      # below this a note saves nothing
 LONG_LINE_AVG_CHARS = 1_000  # average line length that marks minified/generated data
@@ -1175,13 +1187,14 @@ def _definitions(path: Path, lines: list) -> list:
     return found
 
 
-def _long_file_map(path: Path, content: str, lines: list) -> str:
+def _long_file_map(path: Path, content: str, lines: list,
+                   budget: int = LONG_FILE_MAP_CHARS) -> str:
     """What an unranged read of a long file returns instead of the file:
     its size, where its definitions are (or its first lines when the
     language has no patterns), and how to read the part that matters."""
     total = len(lines)
     head = (f"[{path.name} is long — {total} lines, {len(content)} chars, "
-            f"about {len(content) // 4} tokens — so it is not returned whole.")
+            f"about {est_tokens(content)} tokens — so it is not returned whole.")
     how = ("[Read the part you need by calling again with offset and limit. "
            "To find a line, search with a shell command (grep -n). To read "
            "all of it, call again with offset=1.]")
@@ -1189,20 +1202,25 @@ def _long_file_map(path: Path, content: str, lines: list) -> str:
     if defs:
         shown, used = [], 0
         for d in defs:
-            if used + len(d) + 1 > LONG_FILE_MAP_CHARS:
+            if used + len(d) + 1 > budget:
                 break
             shown.append(d)
             used += len(d) + 1
         more = (f"\n… and {len(defs) - len(shown)} more definitions"
                 if len(shown) < len(defs) else "")
         return f"{head} Definitions by line:]\n" + "\n".join(shown) + f"{more}\n{how}"
-    body, end, _ = _numbered_range(lines, 1, LONG_FILE_HEAD_LINES,
-                                   LONG_FILE_MAP_CHARS)
+    body, end, _ = _numbered_range(lines, 1, LONG_FILE_HEAD_LINES, budget)
     return f"{head} Its first {end} lines:]\n{body}\n{how}"
 
 
-def read_file_detail(arguments: dict, cwd: "str | Path | None" = None) -> dict:
+def read_file_detail(arguments: dict, cwd: "str | Path | None" = None, *,
+                     max_tokens: "int | None" = None) -> dict:
     """Run a read and say what kind of result it is.
+
+    `max_tokens` is the room the serving model has for this read (None: no
+    limit beyond the character caps). A file over it is not returned whole,
+    and a range or first chunk is cut to fit it, so one read can never fill
+    a small window on its own.
 
     Returns {"text", "whole", "shown", "content"}:
       text    — what goes back to the model.
@@ -1248,18 +1266,24 @@ def read_file_detail(arguments: dict, cwd: "str | Path | None" = None) -> dict:
         if reason:
             return result(
                 f"[{target.name} not shown: {reason} — {len(content)} chars, "
-                f"{total} lines, about {len(content) // 4} tokens. To see "
+                f"{total} lines, about {est_tokens(content)} tokens. To see "
                 "part of it, call again with offset and limit, or search it "
                 "with a shell command.]",
                 content=content,
             )
-        if len(content) <= min(READ_LIMIT, WHOLE_READ_LIMIT):
+        fits = max_tokens is None or est_tokens(content) <= max_tokens
+        if len(content) <= min(READ_LIMIT, WHOLE_READ_LIMIT) and fits:
             return result(content, whole=True, shown=True, content=content)
         if len(content) <= READ_LIMIT:
             # Fits, but is long enough that returning it whole is the single
             # most expensive thing a read can do. Return a map instead; one
             # more call with offset=1 still gets all of it.
-            return result(_long_file_map(target, content, lines), content=content)
+            map_budget = LONG_FILE_MAP_CHARS
+            if max_tokens is not None:
+                per_tok = len(content) / max(1, est_tokens(content))
+                # the map's own header and how-to line are ~120 tokens
+                map_budget = max(200, min(map_budget, int((max_tokens - 150) * per_tok)))
+            return result(_long_file_map(target, content, lines, map_budget), content=content)
         # Too big for one read — see READ_LIMIT. Return the first chunk, cut
         # at a line boundary, with the footer that says how to continue.
         start, count = 1, None
@@ -1278,7 +1302,12 @@ def read_file_detail(arguments: dict, cwd: "str | Path | None" = None) -> dict:
             f"[{target.name} has {total} lines; offset {start} is past the "
             "end. Nothing to show.]", content=content)
 
-    body, end, note = _numbered_range(lines, start, count, READ_LIMIT)
+    budget = READ_LIMIT
+    if max_tokens is not None:
+        # The file's own characters-per-token, so dense text gets fewer chars.
+        per_tok = len(content) / max(1, est_tokens(content))
+        budget = max(MIN_READ_CHARS, min(READ_LIMIT, int(max_tokens * per_tok)))
+    body, end, note = _numbered_range(lines, start, count, budget)
     if end < total:
         footer = (f"[lines {start}-{end} of {total}.{note} For more, call "
                   f"again with offset={end + 1}, or any other range.]")

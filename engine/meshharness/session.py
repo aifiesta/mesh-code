@@ -73,6 +73,14 @@ TOOL_SCHEMAS = {t["function"]["name"]: (t["function"].get("parameters") or {}).g
                 for t in TOOLS}
 # Local model inside Smart routing (see the smart-routing section):
 LOCAL_LEVELS = ("low", "mid")       # Lookup and Small change start local
+# File reads sized to the serving model's window (tokens): one read at most a
+# fifth of it, all reads in one step at most two fifths, so a batch of reads
+# can never fill a 16k local window by itself (measured 24 Nov: three 13k-char
+# data files in one step were 32.8k tokens). Cloud windows of 1M never reach
+# these; the character caps in tools.py bind there as before.
+READ_SHARE = 0.20
+BATCH_READ_SHARE = 0.40
+READ_FLOOR_TOKENS = 400             # less room than this: defer the read to the next step
 LOCAL_STEP_LIMIT = 15               # steps on the local model before stepping up
 LOCAL_FAILED_ROUNDS = 2             # failed tool rounds in a row before stepping up
 # Tools that look at (or change) the project. A local answer with none of
@@ -1722,6 +1730,7 @@ class Session:
                            reply: "str | None" = None) -> dict:
         from .core.tools import repair_tool_args, validate_call  # noqa: F401
         prepared = [_prepare_call(tc) for tc in tool_calls]
+        self.state["_batch_read_tok"] = 0   # what this batch's reads have added
 
         self.state["messages"].append({
             "role": "assistant",
@@ -2152,6 +2161,27 @@ class Session:
                   action="edit")
         return result
 
+    def _serving_window(self) -> "int | None":
+        """The window of the model that will read this step's results."""
+        if self.state.get("_on_local") or is_local(self._effective_model()):
+            try:
+                return self.local.context_window() if self.local is not None else None
+            except Exception:
+                return None
+        return compact.context_limit(self._effective_model(), self.catalog)
+
+    def _read_room(self) -> "dict | None":
+        """Token room for file reads: one read at most READ_SHARE of the
+        window, all reads in one step at most BATCH_READ_SHARE. On a 1M-token
+        cloud window both are far above the character caps, so only small
+        windows (local models, small picked models) feel it."""
+        window = self._serving_window()
+        if not window:
+            return None
+        used = self.state.get("_batch_read_tok") or 0
+        return {"window": window, "read": int(window * READ_SHARE),
+                "batch": int(window * BATCH_READ_SHARE) - used}
+
     def _read_file(self, args: dict, call_id: str) -> str:
         path = args.get("path") or ""
         # Same reason as _write_file: hand memory the workspace-resolved path.
@@ -2172,8 +2202,22 @@ class Session:
             self.emit(Event.TOOL_RESULT, call_id=call_id, name="read_file",
                       ok=True, result=stub, deduped=True)
             return stub
-        detail = tools_mod.read_file_detail(args, cwd=self.workspace)
+        room = self._read_room()
+        if room is not None and room["batch"] < READ_FLOOR_TOKENS and self.state.get("_batch_read_tok"):
+            # Earlier reads in this same step already took the room this
+            # model has; the next step's trim makes space for this one.
+            result = (f"[{Path(path).name} not read in this step: the reads above already "
+                      f"take about {self.state['_batch_read_tok']} tokens, as much as this "
+                      f"model's {room['window'] // 1024}k window can take at once. Read it "
+                      "in your next step.]")
+            self.emit(Event.TOOL_RESULT, call_id=call_id, name="read_file",
+                      ok=True, result=result, bytes=len(result))
+            return result
+        detail = tools_mod.read_file_detail(
+            args, cwd=self.workspace,
+            max_tokens=None if room is None else min(room["read"], room["batch"]))
         result = detail["text"]
+        self.state["_batch_read_tok"] = (self.state.get("_batch_read_tok") or 0) + tools_mod.est_tokens(result)
         ok = not result.startswith("Error:")
         self.emit(Event.TOOL_RESULT, call_id=call_id, name="read_file",
                   ok=ok, result=_clip(result), bytes=len(result))
