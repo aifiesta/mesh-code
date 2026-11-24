@@ -87,7 +87,7 @@ def _simple_helper(payload):
 ])
 def test_offered_only_when_the_task_starts_as_deep_work(harness, level, pick, mode,
                                                                 offered):
-    h = harness(route_mode=mode)
+    h = harness(route_mode=mode, deep_work_helpers=True)
     s = h.session
     s.state.update(_turn_level=level, _smart_pick=pick, _on_local=False)
     s._arm_helpers()
@@ -95,8 +95,23 @@ def test_offered_only_when_the_task_starts_as_deep_work(harness, level, pick, mo
     assert ("delegate" in names) is offered
 
 
+def test_off_by_default_deep_work_runs_alone(harness):
+    """Since 25 Nov the helpers are off unless config.json turns them on: a
+    Deep work task on Sol gets neither the tool nor the decision note."""
+    from meshharness.core.config import DEFAULT_CONFIG
+    assert DEFAULT_CONFIG["deep_work_helpers"] is False
+    for h in (harness(route_mode="smart"),
+              harness(route_mode="smart", deep_work_helpers=DEFAULT_CONFIG["deep_work_helpers"])):
+        s = h.session
+        s.state["messages"].append({"role": "user", "content": "rework the shop"})
+        s.state.update(_turn_level="max", _smart_pick="openai/gpt-6.1-sol", _on_local=False)
+        s._arm_helpers()
+        assert "delegate" not in {t["function"]["name"] for t in s._tools()}
+        assert s.state["messages"][-1]["content"] == "rework the shop"
+
+
 def test_a_step_up_into_opus_mid_task_does_not_offer_it(harness):
-    h = harness(route_mode="smart")
+    h = harness(route_mode="smart", deep_work_helpers=True)
     s = h.session
     s.state.update(_turn_level="xhigh", _smart_pick="openai/gpt-6.1-sol", _on_local=False)
     s._arm_helpers()
@@ -113,7 +128,7 @@ def test_the_switch_turns_it_off(harness):
 
 
 def test_if_opus_is_dropped_mid_task_the_tool_goes_with_it(harness):
-    h = harness(route_mode="smart")
+    h = harness(route_mode="smart", deep_work_helpers=True)
     s = h.session
     s.state.update(_turn_level="max", _smart_pick="anthropic/claude-opus-5.5", _on_local=False)
     s._arm_helpers()
@@ -362,7 +377,7 @@ def test_a_second_delegate_in_one_task_is_refused(gateway, harness, monkeypatch)
 
 
 def test_the_decision_note_rides_with_the_message_but_not_in_the_chat(harness):
-    h = harness(route_mode="smart")
+    h = harness(route_mode="smart", deep_work_helpers=True)
     s = h.session
     s.state["messages"].append({"role": "user", "content": "rework the shop"})
     s.state.update(_turn_level="max", _smart_pick="anthropic/claude-opus-5.5", _on_local=False)

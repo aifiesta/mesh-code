@@ -1199,10 +1199,11 @@ class Session:
         """At the start of a task: offer the lead the `delegate` tool when the
         task STARTS as Deep work under Smart routing (Sol at extra high since
         24 Nov; Opus where Sol is not offered). A task that steps up into
-        another model later is finished by that model alone."""
+        another model later is finished by that model alone. Off unless the
+        config sets deep_work_helpers (off by default since 25 Nov)."""
         self.state["_helpers_for"] = None
         self.state["_helpers_used"] = False
-        if self.helper or not self.cfg.get("deep_work_helpers", True):
+        if self.helper or not self.cfg.get("deep_work_helpers", False):
             return
         if self.cfg.get("route_mode") != "smart" or self.state.get("_on_local"):
             return
