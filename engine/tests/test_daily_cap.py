@@ -336,3 +336,18 @@ def test_once_used_up_a_sleeping_local_model_is_woken_and_waited_for(
     h.session.submit("What is x in price.py?")
     h.wait_for(Event.TURN_FINISHED)
     assert _chat_requests(gateway) == [] and len(llama.requests) >= 1
+
+
+def test_once_used_up_a_local_reply_cut_off_empty_ends_the_task_and_stays_off_the_cloud(
+        harness, gateway, llama, monkeypatch, tmp_path):
+    cut = dict(finish_reason="length",
+               usage={"prompt_tokens": 900, "completion_tokens": 4096, "total_tokens": 4996})
+    llama.script(sse_turn("", **cut), sse_turn("", **cut))
+    gateway.script(sse_turn("should not be sent"))
+    h, _ = _smart(harness, monkeypatch, llama)
+    h.session.cap = _used_up(tmp_path)
+    h.session.submit(LOOKUP)
+    h.wait_for(Event.TURN_FINISHED, timeout=20)
+    assert _chat_requests(gateway) == [] and len(llama.requests) == 2
+    msg = h.of(Event.ERROR)[-1]["data"]["message"]
+    assert "cloud models are off" in msg and "cut off at 4096 tokens" in msg

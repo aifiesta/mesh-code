@@ -494,3 +494,52 @@ def test_a_yes_covers_one_task_and_the_next_message_asks_again(harness, gateway,
     h.session.respond_ask(h.of(Event.ASK_USER)[-1]["data"]["token"], ["Use the cloud for this task"])
     h.wait_for(Event.TURN_FINISHED, min_count=2)
     assert len(h.of(Event.ASK_USER)) == 2 and len(_chat_requests(gateway)) == 2
+
+
+# ---- a local reply cut off empty (25 Nov) -------------------------------------------
+
+def _cut_off(n=4096):
+    return sse_turn("", finish_reason="length",
+                    usage={"prompt_tokens": 900, "completion_tokens": n, "total_tokens": 900 + n})
+
+
+def test_a_local_reply_cut_off_empty_gets_more_room_once_and_stays_free(
+        harness, gateway, llama, monkeypatch, tmp_path):
+    (tmp_path / "price.py").write_text("def line_total(q, p):\n    return q * p\n")
+    llama.script(_cut_off(), _read("price.py"), sse_turn("It multiplies quantity by price."))
+    h, _ = _smart(harness, monkeypatch, llama)
+    h.session.submit(LOOKUP)
+    fin = h.wait_for(Event.TURN_FINISHED)
+    assert _chat_requests(gateway) == [] and fin["data"]["cost"] == 0
+    assert llama.requests[1]["max_tokens"] == 32000, "asked again, with more room"
+    assert not fin["data"]["stepped_up_from_local"] and h.of(Event.ERROR) == []
+
+
+def test_a_local_reply_cut_off_empty_twice_hands_the_step_to_the_cloud(harness, gateway, llama, monkeypatch):
+    """Smart routing put the step on the local model; it came back empty and
+    cut off even with more room: the cloud pick takes it, as with any local
+    failure. Before this fix (PR 21) the task ended with an error."""
+    llama.script(_cut_off(), _cut_off(), _cut_off())
+    gateway.script(sse_turn("answered by the cloud"))
+    h, _ = _smart(harness, monkeypatch, llama)
+    h.session.submit(LOOKUP)
+    fin = h.wait_for(Event.TURN_FINISHED)
+    assert len(llama.requests) == 2, "one more local try, not a third"
+    assert len(_chat_requests(gateway)) == 1 and fin["data"]["stepped_up_from_local"]
+    assert "max_tokens" not in _chat_requests(gateway)[0], "the local retry's room stays local"
+    assert h.of(Event.ERROR) == []
+    step = [e["data"] for e in h.of(Event.ROUTED) if e["data"].get("from_local")]
+    assert step and "cut off at 4096 tokens" in step[0]["reason"]
+    assert [e["data"]["text"] for e in h.of(Event.ASSISTANT_MESSAGE)] == ["answered by the cloud"]
+
+
+def test_a_picked_local_model_cut_off_empty_twice_says_so(harness, gateway, llama):
+    """The user picked the local model: no cloud to hand to. One try with more
+    room, then the task ends with a plain reason that names the local model."""
+    llama.script(_cut_off(8192), _cut_off(8192), _cut_off(8192))
+    h = harness(mode=Mode.BYPASS, model="local/tiny", route_mode="off", local=StubLocal(llama))
+    h.session.catalog = CATALOG
+    h.session.submit(STANDARD)
+    err = h.wait_for(Event.ERROR)
+    assert err["data"]["fatal"] and "local model's reply was cut off at 8192" in err["data"]["message"]
+    assert _chat_requests(gateway) == [] and len(llama.requests) == 2
