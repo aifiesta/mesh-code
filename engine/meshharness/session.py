@@ -1067,6 +1067,26 @@ class Session:
 
             if not meta.get("tool_calls") and not (reply or "").strip():
                 cut = cut_off_at(meta)
+                if cut and target is not None and raised_room:
+                    # A local model cut off again, with more room: free, but
+                    # not getting there. Smart routing put this step here, so
+                    # the cloud pick takes it, as with any other local failure
+                    # (25 Nov: the task ended with an error instead).
+                    why = f"its reply was cut off at {cut} tokens"
+                    if not picked_local:
+                        if self._smart_escalate(f"the local model's reply was cut off at {cut} tokens"):
+                            # The room asked of the local model is not the
+                            # cloud model's: it starts with its own request.
+                            self.state.pop("_max_tokens_shrunk", None)
+                            raised_room = False
+                            attempt = 0
+                            continue
+                        if self._cap_on():
+                            return "", {"error": self._cap_message(f"the local model failed ({why})"),
+                                        "cap_stop": True}
+                    return "", dict(meta, cut_off=True, error=(
+                        f"the local model's reply was cut off at {cut} tokens and came back "
+                        "empty. Ask for the work in smaller parts, or pick a cloud model."))
                 if cut:
                     # The reply ran out of room (thinking included) and came
                     # back empty. Asking again the same way buys the same
